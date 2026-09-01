@@ -1,0 +1,12 @@
+#!/bin/sh
+# desc: t72 browser-scrollback -- hugpy keeper session has tmux mouse ON (board t4/o1)
+# Backfilled probe for the defect that motivated p1: the t72 fix was delivered to
+# every VM and took effect on none, because set-option rejects the '=' target
+# prefix and 2>/dev/null hid the error. This is the check that would have caught it.
+SOCK=console
+SESS=$(. /opt/llm-station/hugpy-keeper.env 2>/dev/null; echo "${HUGPY_KEEPER_SESSION:-keeper}")
+tmux -L "$SOCK" has-session -t "=$SESS" 2>/dev/null || {
+  echo "no tmux session '$SESS' on socket '$SOCK' (keeper not running: probe not applicable)"; exit 0; }
+m=$(tmux -L "$SOCK" display-message -p -t "$SESS" '#{mouse}' 2>/dev/null)
+[ "$m" = "1" ] || { echo "session '$SESS' has mouse=$m, want 1 -- scrollback fix NOT in effect"; exit 1; }
+exit 0

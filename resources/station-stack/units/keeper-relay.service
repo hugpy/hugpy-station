@@ -1,0 +1,39 @@
+# keeper-relay — SELF-CONTAINED install (2026-07-24).
+#
+# Differs from the share-based unit in exactly one structural way: the code
+# lives IN this VM (/opt/llm-station/keeper-relay), so there is no
+# RequiresMountsFor=/srv/share and no dependency on a host-granted mount.
+# That mount was the reason every service install had to be brokered by ae.
+[Unit]
+Description=keeper-relay (self-contained) — station derived from hostname
+Documentation=file:///opt/llm-station/keeper-relay/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+Environment=HOME=/home/ubuntu
+Environment=PYTHONUNBUFFERED=1
+# KEEPER_STATION deliberately UNSET: keeper_relay._resolve_station() falls back
+# to the hostname, so a VM cloned from this golden image identifies as ITSELF
+# with no post-clone edit. Pinning it here made every clone claim to be
+# teststation (observed on golden-clone-test, 2026-07-24).
+ExecStart=/usr/bin/python3 /opt/llm-station/keeper-relay/keeper_relay.py
+
+Restart=always
+RestartSec=10
+
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+PrivateTmp=no
+ProtectHome=no
+
+[Install]
+WantedBy=multi-user.target

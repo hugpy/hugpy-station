@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hugpy Station — Set up</title>
+<style>
+:root{--bg:#0d1117;--panel:#161b22;--line:#30363d;--fg:#e6edf3;--mut:#8b949e;--acc:#4c8dff;--ok:#3fb950;--bad:#f85149}
+*{box-sizing:border-box}body{margin:0;font:15px/1.55 ui-sans-serif,system-ui,sans-serif;background:var(--bg);color:var(--fg);
+display:flex;min-height:100vh;align-items:center;justify-content:center}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;max-width:520px;width:92%;padding:28px}
+h1{font-size:20px;margin:0 0 4px}p.sub{color:var(--mut);margin:0 0 20px}
+.row{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--line)}
+.row:last-of-type{border-bottom:0}.dot{width:10px;height:10px;border-radius:50%;background:var(--mut);flex:0 0 auto}
+.dot.ok{background:var(--ok)}.dot.bad{background:var(--bad)}
+.name{font-weight:600}.for{color:var(--mut);font-size:13px;margin-left:auto}
+label{display:block;color:var(--mut);font-size:13px;margin:16px 0 4px}
+input{width:100%;background:#0d1117;border:1px solid var(--line);color:var(--fg);padding:9px 11px;border-radius:8px;font:13px monospace}
+button{background:var(--acc);color:#fff;border:0;padding:11px 18px;border-radius:9px;font-size:15px;font-weight:600;cursor:pointer;margin-top:18px;width:100%}
+button:disabled{opacity:.5;cursor:default}
+pre{background:#0d1117;border:1px solid var(--line);border-radius:8px;padding:10px;margin-top:14px;font-size:12px;color:var(--mut);white-space:pre-wrap;max-height:220px;overflow:auto}
+.done{color:var(--ok);font-weight:600;text-align:center;margin-top:16px}
+</style></head>
+<body>
+<div class="card">
+  <h1>Set up hugpy Station</h1>
+  <p class="sub">One click gets the model seats ready. This installs the seat tools and signs you in.</p>
+  <div id="seats"></div>
+  <label>Sign-in token (optional — paste a 1-year token to skip the browser login)</label>
+  <input id="token" placeholder="sk-ant-oat01-…">
+  <button id="go" onclick="setup()">Set up seats</button>
+  <div id="msg"></div>
+  <pre id="log" style="display:none"></pre>
+  <div id="ok" class="done" style="display:none">✓ Ready — you can close this and use the console.</div>
+</div>
+<script>
+const $=id=>document.getElementById(id)
+async function refresh(){
+  const s=await (await fetch('/api/firstrun')).json()
+  const el=$('seats'); el.innerHTML=''
+  for(const [exe,info] of Object.entries(s.seats)){
+    const r=document.createElement('div');r.className='row'
+    r.innerHTML=`<span class="dot ${info.present?'ok':'bad'}"></span><span class="name">${exe}</span><span class="for">${info.for}</span>`
+    el.appendChild(r)
+  }
+  const t=document.createElement('div');t.className='row'
+  t.innerHTML=`<span class="dot ${s.token?'ok':'bad'}"></span><span class="name">sign-in token</span><span class="for">auth</span>`
+  el.appendChild(t)
+  if(s.ready){$('ok').style.display='block';$('go').textContent='Re-run setup'}
+  return s
+}
+async function setup(){
+  const btn=$('go');btn.disabled=true;$('msg').textContent='Setting up… (a minute or two)'
+  const token=$('token').value.trim()
+  try{
+    const r=await (await fetch('/api/firstrun/provision',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token})})).json()
+    $('log').style.display='block';$('log').textContent=r.log||r.error||'(no output)'
+    $('msg').textContent=r.ok?'Done.':'Finished with issues — see log.'
+  }catch(e){$('msg').textContent='Error: '+e}
+  btn.disabled=false;refresh()
+}
+refresh()
+</script>
+</body></html>

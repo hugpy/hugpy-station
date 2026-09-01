@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Station Console — sign in</title>
+  <style>
+    :root { --bg:#0b0e14; --panel:#11151f; --line:#232a3a; --fg:#c8d3e6;
+            --muted:#6b7689; --accent:#4da3ff; --bad:#e85c5c; }
+    * { box-sizing: border-box; }
+    html, body { height:100%; margin:0; }
+    body { background:var(--bg); color:var(--fg);
+      font:14px/1.5 ui-monospace, Menlo, Consolas, monospace;
+      display:flex; align-items:center; justify-content:center; }
+    form { background:var(--panel); border:1px solid var(--line); border-radius:12px;
+      padding:28px 26px; width:320px; box-shadow:0 12px 40px rgba(0,0,0,.4); }
+    .brand { color:var(--accent); font-weight:600; font-size:16px; margin-bottom:4px; }
+    .sub { color:var(--muted); font-size:12px; margin-bottom:20px; }
+    label { display:block; color:var(--muted); font-size:12px; margin:14px 0 5px; }
+    input { width:100%; background:#0b0e14; color:var(--fg); border:1px solid var(--line);
+      border-radius:7px; padding:9px 11px; font:inherit; }
+    input:focus { outline:none; border-color:var(--accent); }
+    button { width:100%; margin-top:20px; background:var(--accent); color:#06101f;
+      border:none; border-radius:7px; padding:10px; font:inherit; font-weight:600; cursor:pointer; }
+    button:hover { filter:brightness(1.08); }
+    .err { color:var(--bad); font-size:12px; margin-top:14px; min-height:16px; }
+  </style>
+</head>
+<body>
+  <form method="post" action="/login">
+    <div class="brand">▦ Station Console</div>
+    <div class="sub">sign in to manage the dev stations</div>
+    <label for="user">User</label>
+    <input id="user" name="user" autocomplete="username" autofocus>
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" autocomplete="current-password">
+    <button type="submit">Sign in</button>
+    <div class="err" id="err"></div>
+  </form>
+  <script>
+    if (new URLSearchParams(location.search).get("e"))
+      document.getElementById("err").textContent = "Invalid user or password.";
+  </script>
+</body>
+</html>

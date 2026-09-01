@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+# station-stack-install — deploy the PACKAGED in-VM keeper stack into a station.
+# The absorbed successor of vm_mgr's `vm-station-sync` + keeper-persistence
+# `install.sh`: with this, the installed console ships every VM-side hook and
+# wire itself — keeper-relay (the steward's effect half: lean_context +
+# zero_usage + arm/monitor), the bugreport scanner, and station-keeper
+# persistence (tmux'd keeper + keeper-launch.sh, the router_mode effect piece).
+#
+#   station-stack-install <vm>            sync/refresh the stack (idempotent)
+#   station-stack-install <vm> --live     also install the relay live drop-in
+#                                         (steward_restart executes instead of
+#                                         dry/observe — the relay default)
+#   station-stack-install <vm> --status   print JSON status, change nothing
+#
+# Payload: <bin>/../station-stack (opt/ tree + units/), vendored in the deb.
+# Relay + bugreport code are AUTHORITATIVE (overwritten); keeper-agents.d only
+# seeds if absent; a pre-existing BUGREPORT_KEY_UNITS override is preserved.
+set -euo pipefail
+log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
+die() { echo "error: $*" >&2; exit 1; }
+command -v lxc >/dev/null 2>&1 || die "lxc not found"
+
+HERE="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+STACK="${STATION_STACK:-$HERE/../station-stack}"
+STACK="$(readlink -f "$STACK")"
+[ -d "$STACK/opt" ] || die "packaged stack missing: $STACK/opt"
+
+VM=""; LIVE=0; STATUS=0
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --live) LIVE=1; shift;;
+    --status) STATUS=1; shift;;
+    -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+    --*) die "unknown option: $1";;
+    *) VM="$1"; shift;;
+  esac
+done
+[ -n "$VM" ] || die "usage: station-stack-install <vm> [--live|--status]"
+
+CANON_MD5="$(md5sum "$STACK/opt/llm-station/keeper-relay/keeper_relay.py" | cut -d' ' -f1)"
+
+if [ "$STATUS" = 1 ]; then
+  # JSON on stdout, always exit 0 unless the VM itself is unreachable — the
+  # console route turns this straight into its GET body.
+  lxc info "$VM" >/dev/null 2>&1 || { echo '{"ok":false,"error":"no such VM"}'; exit 0; }
+  lxc exec "$VM" -- true 2>/dev/null || { echo '{"ok":false,"error":"agent not responding (stopped?)"}'; exit 0; }
+  GOT="$(lxc exec "$VM" -- md5sum /opt/llm-station/keeper-relay/keeper_relay.py 2>/dev/null | cut -d' ' -f1 || true)"
+  RELAY="$(lxc exec "$VM" -- systemctl is-active keeper-relay 2>/dev/null || true)"
+  SCAN="$(lxc exec "$VM" -- systemctl is-active bugreport-scanner 2>/dev/null || true)"
+  TIMER="$(lxc exec "$VM" -- systemctl is-active station-keeper.timer 2>/dev/null || true)"
+  LIVECONF="false"
+  lxc exec "$VM" -- test -f /etc/systemd/system/keeper-relay.service.d/live.conf 2>/dev/null && LIVECONF="true"
+  INSTALLED="false"; [ -n "$GOT" ] && INSTALLED="true"
+  CURRENT="false"; [ "$GOT" = "$CANON_MD5" ] && CURRENT="true"
+  printf '{"ok":true,"installed":%s,"current":%s,"relay_md5":"%s","canon_md5":"%s","relay":"%s","scanner":"%s","keeper_timer":"%s","live":%s}\n' \
+    "$INSTALLED" "$CURRENT" "${GOT:-}" "$CANON_MD5" "${RELAY:-unknown}" "${SCAN:-unknown}" "${TIMER:-unknown}" "$LIVECONF"
+  exit 0
+fi
+
+lxc info "$VM" >/dev/null 2>&1 || die "no such VM: $VM"
+lxc exec "$VM" -- true 2>/dev/null || die "$VM: agent not responding (stopped?)"
+log "[$VM] installing station stack from $STACK"
+
+# remember an existing BUGREPORT_KEY_UNITS before we overwrite the unit
+KEYS="$(lxc exec "$VM" -- bash -c \
+  'systemctl cat bugreport-scanner.service 2>/dev/null | grep -h BUGREPORT_KEY_UNITS= | tail -1 | sed "s/.*BUGREPORT_KEY_UNITS=//"' || true)"
+
+# code: relay + bugreport + station-keeper authoritative; keeper-agents.d only if absent
+tar -C "$STACK/opt" -cz llm-station/keeper-relay llm-station/board-mirror llm-station/probes.d llm-station/station-probe bugreport station-keeper \
+  | lxc exec "$VM" -- tar -C /opt -xz
+if ! lxc exec "$VM" -- test -d /opt/llm-station/keeper-agents.d; then
+  tar -C "$STACK/opt" -cz llm-station/keeper-agents.d | lxc exec "$VM" -- tar -C /opt -xz
+fi
+GOT="$(lxc exec "$VM" -- md5sum /opt/llm-station/keeper-relay/keeper_relay.py | cut -d' ' -f1)"
+[ "$GOT" = "$CANON_MD5" ] || die "$VM: relay hash mismatch after push ($GOT != $CANON_MD5)"
+lxc exec "$VM" -- chown -R ubuntu:ubuntu /opt/llm-station/keeper-relay /opt/llm-station/board-mirror /opt/bugreport
+lxc exec "$VM" -- chmod 0755 /opt/llm-station/station-probe \
+  /opt/station-keeper/keeper-launch.sh /opt/station-keeper/keeper-ensure.sh 2>/dev/null || true
+
+# units — stream via tar (the 0-byte lxc file push trap applies to /etc too),
+# but keep the live drop-in out unless --live: relay restarts stay dry/observe.
+# station-keeper.service is a template (%STATION%/%GROUP%) — push it rendered.
+TDIR="$(mktemp -d)"
+trap 'rm -rf "$TDIR"' EXIT
+cp "$STACK/units/keeper-relay.service" "$STACK/units/bugreport-scanner.service" \
+   "$STACK/units/board-mirror.service" "$STACK/units/station-keeper.timer" "$TDIR/"
+case "$VM" in blackbird) GROUP=collab;; *) GROUP=ubuntu;; esac
+sed -e "s/%STATION%/$VM/g" -e "s/%GROUP%/$GROUP/g" \
+  "$STACK/units/station-keeper.service" > "$TDIR/station-keeper.service"
+if [ "$LIVE" = 1 ]; then
+  mkdir -p "$TDIR/keeper-relay.service.d"
+  cp "$STACK/units/keeper-relay.service.d/live.conf" "$TDIR/keeper-relay.service.d/"
+fi
+tar -C "$TDIR" -cz . | lxc exec "$VM" -- tar -C /etc/systemd/system -xz
+if [ -n "$KEYS" ]; then
+  printf '[Service]\nEnvironment=BUGREPORT_KEY_UNITS=%s\n' "$KEYS" \
+    | lxc exec "$VM" -- bash -c 'mkdir -p /etc/systemd/system/bugreport-scanner.service.d && cat > /etc/systemd/system/bugreport-scanner.service.d/key-units.conf'
+fi
+lxc exec "$VM" -- systemctl daemon-reload
+# board-mirror needs psycopg (system python3). Best-effort — it's fail-open, so a
+# box without the driver simply idles until this lands; never abort the install.
+lxc exec "$VM" -- bash -c 'python3 -c "import psycopg" 2>/dev/null || apt-get install -y python3-psycopg 2>/dev/null || pip3 install --break-system-packages "psycopg[binary]" 2>/dev/null || true' >/dev/null 2>&1 || true
+lxc exec "$VM" -- systemctl enable --now keeper-relay.service bugreport-scanner.service board-mirror.service station-keeper.timer >/dev/null 2>&1 || true
+lxc exec "$VM" -- systemctl restart keeper-relay.service bugreport-scanner.service board-mirror.service
+
+sleep 2
+ST="$(lxc exec "$VM" -- bash -c 'echo "relay=$(systemctl is-active keeper-relay) scanner=$(systemctl is-active bugreport-scanner) board-mirror=$(systemctl is-active board-mirror) keeper-timer=$(systemctl is-active station-keeper.timer)"')"
+log "[$VM] $ST (relay md5 verified)"
+case "$ST" in *failed*) exit 1;; esac
+exit 0

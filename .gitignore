@@ -1,0 +1,14 @@
+# hugpy Station — standalone repo
+/node_modules/
+/dist/
+__pycache__/
+*.pyc
+*.egg-info/
+# secrets — NEVER commit
+.secret
+.auth
+*.env
+*.pem
+*.key
+# local backup files
+*.bak-*

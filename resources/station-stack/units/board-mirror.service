@@ -1,0 +1,39 @@
+# board-mirror — reflect this VM's ~/todo.json into the central `board` table.
+#
+# Watchdog for KEEPER-TASK-central-board: the file stays authoritative; this
+# publishes a locus-scoped projection to Postgres so a single agent can see every
+# board. READ-ONLY on the file, FAIL-OPEN on the DB (no driver / no env / DB down
+# -> it idles; nothing on the delivery path depends on it). Same self-contained
+# shape as keeper-relay.service — code lives in this VM, no host mount needed.
+[Unit]
+Description=board-mirror — ~/todo.json -> central board table (locus from hostname)
+Documentation=file:///opt/llm-station/board-mirror/board_mirror.py
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+Environment=HOME=/home/ubuntu
+Environment=PYTHONUNBUFFERED=1
+# KEEPER_STATION deliberately UNSET: board_mirror.resolve_locus() falls back to
+# the hostname, byte-identical to keeper-relay, so a cloned image identifies as
+# ITSELF with no post-clone edit.
+ExecStart=/usr/bin/python3 /opt/llm-station/board-mirror/board_mirror.py
+
+Restart=always
+RestartSec=10
+
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+PrivateTmp=no
+ProtectHome=no
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# install-vm-console — put a hugpy-station (headless web mode) INSIDE a station
+# VM, so that station has its OWN console: its own terminal, its own A/B/local
+# seats grounded in the VM, its own todo/flow/steward — confined to the VM by
+# construction. The host station's "⧉ console" button and the sidecar routes
+# (/api/... ?vm=<name>) talk to it over a per-VM token.
+#
+#   install-vm-console <vm>            install or upgrade (idempotent)
+#   install-vm-console <vm> --status   report only
+#
+# Source of truth is THIS host's own installed package
+# ($HUGPY_STATION_ROOT, default /opt/hugpy-station/resources): the backend
+# (python3 + aiohttp, no Electron) and the bin/ helpers are pushed into the VM
+# at the same path, a systemd unit runs it as the dev user on :$VMCONSOLE_PORT
+# bound to the VM's own addresses, and access needs the token the host keeps
+# in $VMCONSOLE_TOKEN_DIR/vmconsole-<vm>.token (0600). Everything printed.
+set -euo pipefail
+
+VM="${1:-}"; MODE="${2:-}"
+[ -n "$VM" ] || { echo "usage: install-vm-console <vm> [--status]" >&2; exit 2; }
+[[ "$VM" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || { echo "bad vm name" >&2; exit 2; }
+
+SRC="${HUGPY_STATION_ROOT:-/opt/hugpy-station/resources}"
+PORT="${VMCONSOLE_PORT:-8800}"
+TOKDIR="${VMCONSOLE_TOKEN_DIR:-}"
+if [ -z "$TOKDIR" ]; then
+  if [ -d /srv/vm_mgr/secrets ] && [ -w /srv/vm_mgr/secrets ]; then TOKDIR=/srv/vm_mgr/secrets
+  else TOKDIR="${XDG_CONFIG_HOME:-$HOME/.config}/hugpy-station/vmconsole"; fi
+fi
+TOKF="$TOKDIR/vmconsole-$VM.token"
+DEST=/opt/hugpy-station/resources      # same path inside the VM
+UNIT=hugpy-station-web.service
+
+say() { printf '%s\n' "install-vm-console[$VM]: $*"; }
+die() { say "ERROR: $*" >&2; exit 1; }
+
+lxc info "$VM" >/dev/null 2>&1 || die "no such instance"
+state="$(lxc list "$VM" -c s --format csv | head -1)"
+[ "$state" = "RUNNING" ] || die "instance is $state — start it first (lxc start $VM)"
+ip="$(lxc list "$VM" -c 4 --format csv | head -1 | tr -d '"' | awk '{print $1}')"
+
+if [ "$MODE" = "--status" ]; then
+  say "ip=$ip port=$PORT token=$([ -s "$TOKF" ] && echo present || echo absent) ($TOKF)"
+  lxc exec "$VM" -- systemctl is-active "$UNIT" 2>/dev/null | sed "s/^/install-vm-console[$VM]: unit=/" || true
+  exit 0
+fi
+
+[ -f "$SRC/backend/server.py" ] || die "no station backend at $SRC/backend (set HUGPY_STATION_ROOT)"
+
+say "1/6 token: $TOKF"
+mkdir -p "$TOKDIR"; chmod 700 "$TOKDIR"
+if [ ! -s "$TOKF" ]; then
+  ( umask 077; python3 -c 'import secrets;print(secrets.token_hex(32))' > "$TOKF" )
+  say "    minted a new token"
+else
+  say "    reusing the existing token"
+fi
+TOKEN="$(cat "$TOKF")"
+
+say "2/6 deps inside the VM (python3, aiohttp, tmux, openssh-server)"
+lxc exec "$VM" -- bash -c '
+  export DEBIAN_FRONTEND=noninteractive
+  if ! python3 -c "import aiohttp" 2>/dev/null || ! command -v tmux >/dev/null || ! command -v sshd >/dev/null; then
+    apt-get update -qq >/dev/null 2>&1 || true
+    apt-get install -y -qq python3 python3-aiohttp tmux openssh-server >/dev/null 2>&1 || apt-get install -y python3 python3-aiohttp tmux openssh-server
+  fi
+  systemctl enable --now ssh >/dev/null 2>&1 || true
+  id ubuntu >/dev/null 2>&1 || useradd -m -s /bin/bash ubuntu
+  echo "    python3=$(python3 --version 2>&1)  aiohttp=$(python3 -c "import aiohttp;print(aiohttp.__version__)" 2>/dev/null || echo MISSING)  tmux=$(command -v tmux >/dev/null && echo ok || echo MISSING)  sshd=$(systemctl is-active ssh 2>/dev/null || echo inactive)"
+' | sed "s/^/install-vm-console[$VM]:/"
+
+say "3/6 push backend + bin from $SRC → $VM:$DEST"
+lxc exec "$VM" -- bash -c "rm -rf '$DEST.new'; mkdir -p '$DEST.new'"
+lxc file push -q -r -p "$SRC/backend" "$VM$DEST.new/"
+lxc file push -q -r -p "$SRC/bin"     "$VM$DEST.new/"
+# a-settings template + frontier directive ride inside backend/ already
+lxc exec "$VM" -- bash -c "
+  rm -rf '$DEST.old'; [ -d '$DEST' ] && mv '$DEST' '$DEST.old' || true
+  mv '$DEST.new' '$DEST'; rm -rf '$DEST.old'
+  chown -R root:root '$DEST'; chmod -R a+rX '$DEST'; chmod 755 '$DEST'/bin/* || true
+  ln -sf '$DEST/bin/agent-sudo' /usr/bin/agent-sudo
+  ln -sf '$DEST/bin/vm-new' /usr/bin/fleet-vm-new
+  rm -f '$DEST/backend/.secret' '$DEST/backend/.auth'   # never inherit host secrets
+  install -d -o ubuntu -g ubuntu -m 700 /home/ubuntu/.config/hugpy-station
+  echo '    files in place'"
+
+say "4/6 systemd unit ($UNIT) — runs as ubuntu, HOST=0.0.0.0 PORT=$PORT, token-gated"
+lxc exec "$VM" -- bash -c "cat > /etc/systemd/system/$UNIT" <<UNITEOF
+[Unit]
+Description=hugpy Station (workbench inside this VM) — token-gated web console
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ubuntu
+Environment=HOST=0.0.0.0
+Environment=PORT=$PORT
+Environment=STATION_CONSOLE_TOKEN=$TOKEN
+Environment=STATION_CONSOLE_UID=1000
+Environment=STATION_CONSOLE_GID=1000
+Environment=STATION_CONSOLE_HOME=/home/ubuntu
+Environment=HUGPY_STATION_STATE=/home/ubuntu/.config/hugpy-station
+# bash -l: ubuntu's own login PATH (~/.local/bin for claude / hugpy-agent)
+ExecStart=/bin/bash -lc 'exec python3 "$DEST/backend/server.py"'
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+UNITEOF
+lxc exec "$VM" -- bash -c "chmod 600 /etc/systemd/system/$UNIT; systemctl daemon-reload; systemctl enable --now $UNIT >/dev/null 2>&1; systemctl restart $UNIT; sleep 1; systemctl is-active $UNIT" \
+  | sed "s/^/install-vm-console[$VM]:     unit=/"
+
+say "5/6 reachability from the host: http://$ip:$PORT/"
+ok=0
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  if [ -n "$ip" ] && (exec 3<>"/dev/tcp/$ip/$PORT") 2>/dev/null; then ok=1; break; fi
+  sleep 1
+done
+if [ "$ok" = 1 ]; then say "    port answers"; else
+  say "    port NOT answering yet — last unit log:"
+  lxc exec "$VM" -- journalctl -u "$UNIT" -n 15 --no-pager 2>/dev/null | sed "s/^/install-vm-console[$VM]:     /" || true
+fi
+
+say "6/6 done. In the host station: dropdown → $VM → ⧉ console (tokened one-click)."
+say "    direct:  http://$ip:$PORT/?token=<$TOKF>"
+say "    in-VM:   lxc exec $VM -- systemctl status $UNIT"

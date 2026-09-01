@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FleetView — terminal</title>
+<link rel="stylesheet" href="/static/xterm.css">
+<style>
+  :root { color-scheme: dark; }
+  html, body { margin: 0; height: 100%; background: #0d1117; }
+  /* top strip left free for controls you'll integrate later */
+  #bar { height: 34px; display: flex; align-items: center; gap: 10px;
+         padding: 0 12px; color: #b6bec9; font: 13px system-ui, sans-serif;
+         background: #161b22; border-bottom: 1px solid #262d38; }
+  #bar .dot { width: 9px; height: 9px; border-radius: 50%; background: #d05; }
+  #bar .dot.ok { background: #2ea043; }
+  #term { position: absolute; top: 34px; left: 0; right: 0; bottom: 0; padding: 6px; }
+</style>
+</head>
+<body>
+  <div id="bar"><span class="dot" id="dot"></span><span id="status">connecting…</span>
+    <span style="flex:1"></span><span style="opacity:.6">FleetView</span></div>
+  <div id="term"></div>
+  <script src="/static/xterm.js"></script>
+  <script src="/static/xterm-addon-fit.js"></script>
+  <script>
+    const term = new Terminal({
+      fontSize: 14, cursorBlink: true,
+      theme: { background: '#0d1117', foreground: '#e6e9ef' },
+    });
+    const fit = new FitAddon.FitAddon();
+    term.loadAddon(fit);
+    term.open(document.getElementById('term'));
+    fit.fit();
+
+    const dot = document.getElementById('dot');
+    const status = document.getElementById('status');
+    const enc = new TextEncoder();
+
+    const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+    const ws = new WebSocket(`${proto}://${location.host}/wsterm` +
+      `?rows=${term.rows}&cols=${term.cols}`);
+    ws.binaryType = 'arraybuffer';
+
+    ws.onopen = () => {
+      dot.classList.add('ok'); status.textContent = 'connected';
+      sendSize();
+    };
+    ws.onclose = () => { dot.classList.remove('ok'); status.textContent = 'disconnected'; };
+    ws.onerror = () => { status.textContent = 'error'; };
+    ws.onmessage = (e) => {
+      if (typeof e.data === 'string') return;           // JSON control frames — ignore
+      term.write(new Uint8Array(e.data));
+    };
+
+    term.onData((d) => { if (ws.readyState === 1) ws.send(enc.encode(d)); });
+
+    function sendSize() {
+      if (ws.readyState === 1)
+        ws.send(JSON.stringify({ t: 'size', rows: term.rows, cols: term.cols }));
+    }
+    window.addEventListener('resize', () => { fit.fit(); sendSize(); });
+    term.focus();
+  </script>
+</body>
+</html>

@@ -1,0 +1,29 @@
+[Unit]
+# The HEADLESS fleet console — the packaged backend served without the
+# desktop app, for domain/proxy access (see: hugpy-station-domain). The
+# instance name is the account it runs as: hugpy-station-web@op.
+# Loopback-only by design: nginx (or the operator's own proxy) fronts it.
+# It REFUSES to start without a console password (STATION_CONSOLE_REQUIRE_AUTH):
+# a proxied console reaching the world must never run open.
+Description=hugpy Station web (headless) — %i
+After=network-online.target snap.lxd.daemon.service
+Wants=network-online.target
+
+[Service]
+User=%i
+# Uniform credential seam (same contract as hugpy-agent's generated agent.env):
+# the installer writes HUGPY_API_KEY / HUGPY_BASE / HUGPY_URL here, root-0600.
+# %h is NOT the instance user's home in system units, hence the /etc path.
+EnvironmentFile=-/etc/hugpy-station/%i.env
+Environment=HOST=127.0.0.1
+Environment=PORT=8898
+Environment=STATION_CONSOLE_REQUIRE_AUTH=1
+Environment=STATION_CONSOLE_PROXY_TLS=1
+# bash -l: the account's own login PATH (~/.local/bin for claude/hugpy-agent,
+# /snap/bin for lxc) — the same seats the desktop app sees.
+ExecStart=/bin/bash -lc 'exec python3 "/opt/hugpy-station/resources/backend/server.py"'
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,225 @@
+#!/usr/bin/env bash
+# install-ssh-console — give an ssh-host locus its OWN workbench console: the
+# ssh twin of install-vm-console (operator, 2026-08-27: "it should ssh into
+# the host its to be a console of"). Same contract as the VM flavor — the
+# sidecar routes (/api/... ?vm=<name>) and /api/vm/<name>/* reach a
+# hugpy-station serving on :$VMCONSOLE_PORT inside the locus, gated by the
+# token this host keeps in $VMCONSOLE_TOKEN_DIR/vmconsole-<name>.token (0600).
+#
+# Two paths, tried in order (idempotent):
+#   adopt   — a hugpy-station ALREADY serves on the port there (however it was
+#             started; ssh hosts are often guests another station also
+#             manages): read its STATION_CONSOLE_TOKEN out of the running
+#             process's environ (passwordless sudo) and store it locally.
+#             Nothing on the host is touched — never clobber a console some
+#             other station's token already opens.
+#   install — nothing serves: push THIS station's backend + bin over ssh into
+#             /opt/hugpy-station/resources, mint a token, write + start the
+#             hugpy-station-web systemd unit (requires passwordless sudo).
+#
+#   install-ssh-console <name>            adopt-or-install
+#   install-ssh-console <name> --unitize  convert an adopted, orphan-started
+#             console into a managed systemd unit: SAME backend path, SAME
+#             token, SAME env (captured from the running process — nothing is
+#             pushed, nothing re-minted); brief restart, then reboot-safe.
+#   install-ssh-console <name> --status   report only
+#
+# <name> must exist in ~/.config/hugpy-station/ssh-hosts.json.
+set -euo pipefail
+
+NAME="${1:-}"; MODE="${2:-}"
+[ -n "$NAME" ] || { echo "usage: install-ssh-console <ssh-host> [--status|--unitize]" >&2; exit 2; }
+[[ "$NAME" =~ ^[a-z0-9][a-z0-9-]{0,62}$ ]] || { echo "bad ssh-host name" >&2; exit 2; }
+
+SRC="${HUGPY_STATION_ROOT:-/opt/hugpy-station/resources}"
+PORT="${VMCONSOLE_PORT:-8800}"
+HOSTS="${HUGPY_STATION_STATE:-${XDG_CONFIG_HOME:-$HOME/.config}/hugpy-station}/ssh-hosts.json"
+TOKDIR="${VMCONSOLE_TOKEN_DIR:-}"
+if [ -z "$TOKDIR" ]; then
+  if [ -d /srv/vm_mgr/secrets ] && [ -w /srv/vm_mgr/secrets ]; then TOKDIR=/srv/vm_mgr/secrets
+  else TOKDIR="${XDG_CONFIG_HOME:-$HOME/.config}/hugpy-station/vmconsole"; fi
+fi
+TOKF="$TOKDIR/vmconsole-$NAME.token"
+DEST=/opt/hugpy-station/resources
+UNIT=hugpy-station-web.service
+
+say() { printf '%s\n' "install-ssh-console[$NAME]: $*"; }
+die() { say "ERROR: $*" >&2; exit 1; }
+
+[ -f "$HOSTS" ] || die "no ssh-hosts.json at $HOSTS"
+read -r SHOST SUSER SPORT SKEY < <(python3 - "$HOSTS" "$NAME" <<'PYEOF'
+import json, sys
+h = json.load(open(sys.argv[1])).get(sys.argv[2])
+if not h:
+    sys.exit(3)
+print(h.get("host", ""), h.get("user") or "root", h.get("port") or 22,
+      h.get("key") or "")
+PYEOF
+) || die "unknown ssh host '$NAME' (add it in the station first)"
+[ -n "$SHOST" ] || die "ssh host '$NAME' has no address"
+SSH=(ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o ConnectTimeout=8 -p "$SPORT")
+[ -n "$SKEY" ] && SSH+=(-i "$SKEY")
+SSH+=("$SUSER@$SHOST")
+
+rsh() { "${SSH[@]}" "$@"; }
+tokened_ok() {  # can THIS host open the remote console with the stored token?
+  [ -s "$TOKF" ] || return 1
+  local code
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 6 \
+          -H "X-Console-Token: $(cat "$TOKF")" \
+          "http://$SHOST:$PORT/api/mct/todo" 2>/dev/null || true)"
+  [ "$code" = "200" ]
+}
+serving() {  # does anything answer the port, reachable from this host?
+  (exec 3<>"/dev/tcp/$SHOST/$PORT") 2>/dev/null
+}
+
+if [ "$MODE" = "--status" ]; then
+  say "host=$SUSER@$SHOST:$SPORT port=$PORT token=$([ -s "$TOKF" ] && echo present || echo absent) ($TOKF)"
+  say "serving=$(serving && echo yes || echo no) tokened=$(tokened_ok && echo ok || echo no)"
+  rsh "systemctl is-active $UNIT 2>/dev/null" | sed "s/^/install-ssh-console[$NAME]: unit=/" || true
+  exit 0
+fi
+
+if [ "$MODE" = "--unitize" ]; then
+  serving || die "nothing serves on $SHOST:$PORT — nothing to unitize (run without flags to install)"
+  tokened_ok || die "stored token does not open the console — adopt first (run without flags)"
+  say "unitize: converting the running console into a managed $UNIT (same backend, env, token)"
+  rsh "sudo -n env PORT=$PORT UNIT=$UNIT bash -s" <<'REMOTE' | sed "s/^/install-ssh-console[$NAME]:     /"
+set -euo pipefail
+pid=$(ss -ltnpH "sport = :$PORT" | grep -oP 'pid=\K[0-9]+' | head -1)
+[ -n "$pid" ] || { echo "no pid on :$PORT"; exit 1; }
+user=$(ps -o user= -p "$pid" | tr -d ' ')
+server=$(tr '\0' '\n' < /proc/$pid/cmdline | grep 'server\.py$' | head -1)
+[ -n "$server" ] || { echo "listener on :$PORT is not a hugpy-station server.py"; exit 1; }
+echo "pid=$pid user=$user backend=$server"
+{
+  echo "[Unit]"
+  echo "Description=hugpy Station (workbench on this host) — token-gated web console (unitized from pid $pid)"
+  echo "After=network-online.target"
+  echo "Wants=network-online.target"
+  echo ""
+  echo "[Service]"
+  echo "User=$user"
+  tr '\0' '\n' < /proc/$pid/environ \
+    | grep -E '^(HOST|PORT|STATION_CONSOLE_[A-Z_]+|HUGPY_[A-Z_0-9]+)=' \
+    | while IFS= read -r kv; do printf 'Environment="%s"\n' "$kv"; done
+  echo "ExecStart=/bin/bash -lc 'exec python3 \"$server\"'"
+  echo "Restart=on-failure"
+  echo "RestartSec=3"
+  echo ""
+  echo "[Install]"
+  echo "WantedBy=multi-user.target"
+} > "/etc/systemd/system/$UNIT"
+chmod 600 "/etc/systemd/system/$UNIT"
+kill "$pid" 2>/dev/null || true
+for i in $(seq 1 20); do ss -ltnH "sport = :$PORT" | grep -q . || break; sleep 0.5; done
+if ss -ltnH "sport = :$PORT" | grep -q .; then kill -9 "$pid" 2>/dev/null || true; sleep 1; fi
+systemctl daemon-reload
+systemctl enable --now "$UNIT" >/dev/null 2>&1 || true
+systemctl restart "$UNIT"; sleep 1
+echo "unit=$(systemctl is-active "$UNIT")"
+REMOTE
+  ok=0
+  for i in 1 2 3 4 5 6 7 8 9 10; do
+    if serving && tokened_ok; then ok=1; break; fi
+    sleep 1
+  done
+  if [ "$ok" != 1 ]; then
+    rsh "sudo -n journalctl -u $UNIT -n 15 --no-pager 2>/dev/null" | sed "s/^/install-ssh-console[$NAME]:     /" || true
+    die "unit installed but the console is not answering with the token"
+  fi
+  say "done — $UNIT active, same token; the console now survives reboots of $NAME."
+  exit 0
+fi
+
+say "1/4 probe: http://$SHOST:$PORT/"
+if tokened_ok; then
+  say "    already installed — the stored token opens it. Nothing to do."
+  exit 0
+fi
+
+if serving; then
+  say "2/4 a console already serves there — ADOPTING its token (host untouched)"
+  TOKEN="$(rsh "pid=\$(sudo -n ss -ltnpH 'sport = :$PORT' 2>/dev/null | grep -oP 'pid=\\K[0-9]+' | head -1); \
+               [ -n \"\$pid\" ] && sudo -n cat /proc/\$pid/environ 2>/dev/null | tr '\\0' '\\n' \
+               | grep '^STATION_CONSOLE_TOKEN=' | head -1 | cut -d= -f2-" || true)"
+  [ -n "$TOKEN" ] || die "port $PORT serves but the token could not be read (needs passwordless sudo on $NAME). Free the port or grant sudo, then re-run."
+  mkdir -p "$TOKDIR"; chmod 700 "$TOKDIR"
+  ( umask 077; printf '%s\n' "$TOKEN" > "$TOKF" )
+  say "3/4 token adopted → $TOKF"
+  tokened_ok || die "adopted token did not open the console — is it a hugpy-station?"
+  say "4/4 done (adopt). Note: if unit=inactive the console was started outside systemd and will not survive a reboot of $NAME — run '$0 $NAME --unitize' to convert it in place."
+  exit 0
+fi
+
+say "2/4 nothing serves — full install over ssh (needs passwordless sudo on $NAME)"
+rsh "sudo -n true" || die "passwordless sudo unavailable for $SUSER@$SHOST — cannot install"
+[ -f "$SRC/backend/server.py" ] || die "no station backend at $SRC/backend (set HUGPY_STATION_ROOT)"
+mkdir -p "$TOKDIR"; chmod 700 "$TOKDIR"
+if [ ! -s "$TOKF" ]; then
+  ( umask 077; python3 -c 'import secrets;print(secrets.token_hex(32))' > "$TOKF" )
+  say "    minted a new token"
+fi
+TOKEN="$(cat "$TOKF")"
+
+rsh 'export DEBIAN_FRONTEND=noninteractive
+  if ! python3 -c "import aiohttp" 2>/dev/null || ! command -v tmux >/dev/null; then
+    sudo -n apt-get update -qq >/dev/null 2>&1 || true
+    sudo -n apt-get install -y -qq python3 python3-aiohttp tmux >/dev/null 2>&1 || sudo -n apt-get install -y python3 python3-aiohttp tmux
+  fi
+  echo "    python3=$(python3 --version 2>&1)  aiohttp=$(python3 -c "import aiohttp;print(aiohttp.__version__)" 2>/dev/null || echo MISSING)  tmux=$(command -v tmux >/dev/null && echo ok || echo MISSING)"' \
+  | sed "s/^/install-ssh-console[$NAME]:/"
+
+say "3/4 push backend + bin from $SRC → $NAME:$DEST"
+tar -C "$SRC" -czf - backend bin | rsh "sudo -n bash -c '
+  rm -rf $DEST.new; mkdir -p $DEST.new; tar -xzf - -C $DEST.new
+  rm -rf $DEST.old; [ -d $DEST ] && mv $DEST $DEST.old || true
+  mv $DEST.new $DEST; rm -rf $DEST.old
+  chown -R root:root $DEST; chmod -R a+rX $DEST; chmod 755 $DEST/bin/* || true
+  rm -f $DEST/backend/.secret $DEST/backend/.auth
+  u=\$(id -un 1000 2>/dev/null || echo $SUSER)
+  install -d -o \"\$u\" -g \"\$u\" -m 700 /home/\$u/.config/hugpy-station
+  echo \"    files in place (seat user \$u)\"'" | sed "s/^/install-ssh-console[$NAME]:/"
+
+say "4/4 systemd unit ($UNIT) — HOST=0.0.0.0 PORT=$PORT, token-gated"
+rsh "u=\$(id -un 1000 2>/dev/null || echo $SUSER); sudo -n tee /etc/systemd/system/$UNIT >/dev/null <<UNITEOF
+[Unit]
+Description=hugpy Station (workbench on this host) — token-gated web console
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=\$u
+Environment=HOST=0.0.0.0
+Environment=PORT=$PORT
+Environment=STATION_CONSOLE_TOKEN=$TOKEN
+Environment=STATION_CONSOLE_UID=1000
+Environment=STATION_CONSOLE_GID=1000
+Environment=STATION_CONSOLE_HOME=/home/\$u
+Environment=HUGPY_STATION_STATE=/home/\$u/.config/hugpy-station
+ExecStart=/bin/bash -lc 'exec python3 \"$DEST/backend/server.py\"'
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
+UNITEOF
+sudo -n chmod 600 /etc/systemd/system/$UNIT
+sudo -n systemctl daemon-reload
+sudo -n systemctl enable --now $UNIT >/dev/null 2>&1 || true
+sudo -n systemctl restart $UNIT; sleep 1; systemctl is-active $UNIT" \
+  | sed "s/^/install-ssh-console[$NAME]:     unit=/"
+
+ok=0
+for i in 1 2 3 4 5 6 7 8 9 10; do
+  if serving; then ok=1; break; fi
+  sleep 1
+done
+if [ "$ok" = 1 ] && tokened_ok; then
+  say "done. Drawers for '$NAME' now proxy to http://$SHOST:$PORT/ (tokened)."
+else
+  say "port NOT answering with the token yet — last unit log:"
+  rsh "sudo -n journalctl -u $UNIT -n 15 --no-pager 2>/dev/null" | sed "s/^/install-ssh-console[$NAME]:     /" || true
+  exit 1
+fi

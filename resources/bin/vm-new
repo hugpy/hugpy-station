@@ -1,0 +1,329 @@
+#!/usr/bin/env bash
+# vm-new — hugpy-station PACKAGED builder: create a station VM on this
+# machine's LXD, no site layer required. With this script the installed
+# console IS the vm_mgr for the VMs created under it.
+#
+# Resolution contract (server.py): a site layer's richer vm-new wins when
+# present ($VM_NEW_BIN, then `vm-new` on PATH); this packaged copy at
+# <backend>/../bin/vm-new is the fallback that makes a bare deb install
+# self-sufficient.
+#
+# Source selection:
+#   * an instance named 'golden' (or --from <instance>) exists -> CoW clone of
+#     it, same as the site builder;
+#   * otherwise -> fresh `lxc init $FLEET_VM_IMAGE --vm` (default ubuntu:24.04
+#     from the public image server; first build downloads the image).
+#
+# Usage: vm-new <name> [--from golden|<instance>] [--cpu N] [--mem 8GiB]
+#                      [--disk 100GiB] [--instance-only] [--snapshot] [-y|--yes]
+#                      [--no-seed]
+# Site-layer options (--profile/--net/--claude/--project/--directive*) are
+# accepted and noted as no-ops so the console can pass one argv everywhere.
+#
+# Seeding (default ON, skip with --no-seed): after boot the station is seeded
+# with its OWN model seats, so the console's grounding rule ("each VM's A/B/
+# local live IN that VM") holds from first open, not only on site-layer builds:
+#   * tmux + curl + python3-pip/venv (apt, as root) — tmux is what keeps the
+#     keeper session alive across console restarts;
+#   * A  — Claude Code via the official installer, as the dev user
+#     (~/.local/bin/claude — exactly where the keeper launcher looks);
+#   * B / local — `pip install --user hugpy-agent` (hugpy-agent mct / console),
+#     plus ~/.mct for its session workspaces;
+#   * OpenCode — the local seat's TUI (hugpy-agent console execs it, wired to
+#     the fleet's models); official installer + a ~/.local/bin symlink so
+#     hugpy-agent's PATH probe always finds it;
+#   * qwen-code — the local seat's alternate frontend (`hugpy-agent console
+#     --frontend qwen-code`), via `npm i -g @qwen-code/qwen-code`;
+#   * clawd — Clawd-Codex, the frontier's third-party A CLI, seeded from a
+#     source checkout ($FLEET_CLAWD_SRC, else auto-detected from the host's
+#     own editable install); skipped with a note when no source is around;
+#   * ssh — sshd enabled + keys seeded for the dev user: the FLEET KEY (a
+#     passphraseless pair minted once on the first build, kept at
+#     $HUGPY_STATION_STATE/fleet_ssh_key; the console's ssh transport pins to
+#     it, so in-app logins never prompt) plus the operator's own key
+#     ($FLEET_SSH_PUBKEY, else ~/.ssh/id_*.pub) for LAN logins;
+#   * fleet-msg — the station's mail line to the keeper console (host arm):
+#     `fleet-msg <text>` queues to ~/.keeper-mail-out.jsonl (the console
+#     collects it), `fleet-msg --inbox` reads mail the console sent here.
+# Every seeding step is best-effort: a miss logs a WARNING and the build goes
+# on — the VM is still a usable station (bare shell) and the console UI grays
+# out what is absent. Credentials are NEVER seeded: A asks you to log in on
+# its first launch in each VM.
+set -euo pipefail
+log() { printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
+die() { echo "error: $*" >&2; exit 1; }
+command -v lxc >/dev/null 2>&1 || die "lxc not found — install LXD first (snap install lxd)"
+
+NAME=""; FROM="golden"; CPU=4; MEM="8GiB"; DISK="100GiB"
+ASSUME_YES=0; INSTANCE_ONLY=0; DO_SNAP=0; DO_SEED=1
+IMAGE="${FLEET_VM_IMAGE:-ubuntu:24.04}"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --from) FROM="$2"; shift 2;;
+    --cpu) CPU="$2"; shift 2;;
+    --mem) MEM="$2"; shift 2;;
+    --disk) DISK="$2"; shift 2;;
+    --instance-only) INSTANCE_ONLY=1; shift;;
+    --snapshot) DO_SNAP=1; shift;;
+    --no-seed) DO_SEED=0; shift;;
+    -y|--yes) ASSUME_YES=1; shift;;
+    --profile|--net|--claude|--project|--directive|--directive-link)
+      log "note: $1 $2 is a site-layer (vm_mgr) feature — ignored by the packaged builder"
+      shift 2;;
+    --no-llm-station) shift;;
+    -h|--help) grep '^#' "$0" | sed 's/^# \{0,1\}//'; exit 0;;
+    --*) die "unknown option: $1";;
+    *) NAME="$1"; shift;;
+  esac
+done
+
+[ -n "$NAME" ] || die "usage: vm-new <name> [options]  (see --help)"
+[[ "$NAME" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$ ]] \
+  || die "invalid name '$NAME' (lowercase letters/digits/hyphen)"
+# 'keeper' is reserved for the console's synthetic local-machine seat — a real
+# instance with that name would shadow it in every station list.
+case "$NAME" in sandbox|default|golden|none|keeper) die "'$NAME' is reserved";; esac
+lxc info "$NAME" >/dev/null 2>&1 && die "instance '$NAME' already exists"
+[[ "$CPU" =~ ^[0-9]+$ ]] || die "--cpu must be a number"
+[[ "$MEM" =~ ^[0-9]+(GiB|MiB)$ ]] || die "--mem like 8GiB"
+[[ "$DISK" =~ ^[0-9]+(GiB|MiB)$ ]] || die "--disk like 100GiB"
+
+# First run on a fresh machine: no storage pool yet -> minimal default setup.
+if ! lxc storage list --format csv 2>/dev/null | grep -q .; then
+  log "LXD has no storage pool — running 'lxd init --auto'"
+  lxd init --auto || die "lxd init --auto failed — run it manually, then retry"
+fi
+
+if lxc info "$FROM" >/dev/null 2>&1; then
+  IO_FLAG=""
+  [ "$INSTANCE_ONLY" = 1 ] && IO_FLAG="--instance-only"
+  log "Cloning '$FROM' -> '$NAME' (CoW${IO_FLAG:+, instance-only})"
+  [ "$ASSUME_YES" = 1 ] || { printf "Proceed? [y/N] "; read -r a; case "$a" in y|Y) :;; *) die "aborted";; esac; }
+  lxc copy "$FROM" "$NAME" $IO_FLAG
+  CLONED=1
+else
+  [ "$FROM" = "golden" ] || die "source instance '$FROM' does not exist"
+  log "No 'golden' instance here — building '$NAME' fresh from $IMAGE (VM)"
+  [ "$ASSUME_YES" = 1 ] || { printf "Proceed? [y/N] "; read -r a; case "$a" in y|Y) :;; *) die "aborted";; esac; }
+  lxc init "$IMAGE" "$NAME" --vm
+  CLONED=0
+fi
+
+log "Applying resources: cpu=$CPU mem=$MEM disk=$DISK"
+lxc config set "$NAME" limits.cpu="$CPU" limits.memory="$MEM"
+lxc config device set "$NAME" root size="$DISK" 2>/dev/null \
+  || lxc config device override "$NAME" root size="$DISK" 2>/dev/null \
+  || log "WARNING: could not set root disk size (pool may not support quotas)"
+
+log "Starting '$NAME'"
+lxc start "$NAME"
+# VMs surface the exec channel via the lxd-agent; a fresh image's first boot
+# (cloud-init) can take a while — poll up to 4 minutes.
+for i in $(seq 1 48); do lxc exec "$NAME" -- true 2>/dev/null && break; sleep 5; done
+lxc exec "$NAME" -- true 2>/dev/null || die "'$NAME' started but its agent did not come up"
+
+if [ "$CLONED" = 1 ]; then
+  log "Resetting identity (hostname / machine-id / ssh host keys)"
+  lxc exec "$NAME" -- bash -c "
+set -e
+hostnamectl set-hostname '$NAME' 2>/dev/null || echo '$NAME' > /etc/hostname
+sed -i 's/127.0.1.1.*/127.0.1.1 $NAME/' /etc/hosts 2>/dev/null || true
+: > /etc/machine-id; rm -f /var/lib/dbus/machine-id
+systemd-machine-id-setup >/dev/null 2>&1 || true
+ln -sf /etc/machine-id /var/lib/dbus/machine-id 2>/dev/null || true
+rm -f /etc/ssh/ssh_host_*; ssh-keygen -A >/dev/null 2>&1 || true
+systemctl restart ssh 2>/dev/null || true
+" || log "WARNING: identity reset incomplete — check the clone manually"
+fi
+
+# ---- seed the station's own model seats (A / B / local) --------------------
+# The console grounds a VM's model surfaces IN that VM (frontier=A, local=B,
+# and the keeper tab's tmux'd claude). Seat them now so the first open works.
+# Best-effort by design: every miss is a WARNING, never a failed build.
+if [ "$DO_SEED" = 1 ]; then
+  log "Seeding model seats (A / B / local) — skip with --no-seed"
+  lxc exec "$NAME" -- bash -c \
+    'for i in $(seq 1 24); do getent hosts archive.ubuntu.com >/dev/null 2>&1 && exit 0; sleep 5; done; exit 1' \
+    || log "WARNING: no network/DNS in '$NAME' after 2m — seeding will likely fail"
+  log "  apt: tmux curl pip (keeper persistence needs tmux)"
+  lxc exec "$NAME" -- bash -c \
+    'export DEBIAN_FRONTEND=noninteractive; apt-get update -qq \
+     && apt-get install -y -qq tmux curl ca-certificates python3-pip python3-venv' \
+    || log "WARNING: apt seed failed — no tmux means the keeper dies with the console"
+  # Node 22 via NodeSource, NOT Ubuntu 24.04's node 18: current qwen-code
+  # needs Node >= 20 (18 dies on a missing `File` global at startup).
+  log "  node 22 (NodeSource — qwen-code needs Node >= 20)"
+  lxc exec "$NAME" -- bash -c \
+    'export DEBIAN_FRONTEND=noninteractive; \
+     curl -fsSL https://deb.nodesource.com/setup_22.x | bash - >/dev/null 2>&1 \
+     && apt-get install -y -qq nodejs' \
+    || log "WARNING: Node 22 install failed — qwen-code may not run"
+  log "  A: Claude Code -> ~/.local/bin/claude (dev user; logs in on first launch)"
+  lxc exec "$NAME" -- sudo -u ubuntu -H bash -lc \
+    'command -v claude >/dev/null 2>&1 || [ -x "$HOME/.local/bin/claude" ] \
+     || curl -fsSL https://claude.ai/install.sh | bash' \
+    || log "WARNING: Claude Code install failed — the A / keeper seat is empty"
+  log "  B/local: hugpy-agent (+ ~/.mct session workspaces)"
+  lxc exec "$NAME" -- sudo -u ubuntu -H bash -lc \
+    'command -v hugpy-agent >/dev/null 2>&1 || [ -x "$HOME/.local/bin/hugpy-agent" ] \
+     || python3 -m pip install --user --quiet --break-system-packages hugpy-agent; \
+     mkdir -p "$HOME/.mct"' \
+    || log "WARNING: hugpy-agent install failed — the B / local seats are empty"
+  log "  local: OpenCode (the local seat's TUI; hugpy-agent console execs it)"
+  lxc exec "$NAME" -- sudo -u ubuntu -H bash -lc \
+    'command -v opencode >/dev/null 2>&1 || [ -x "$HOME/.npm-global/bin/opencode" ] \
+     || { curl -fsSL https://opencode.ai/install | bash \
+          && mkdir -p "$HOME/.local/bin" \
+          && ln -sf "$HOME/.opencode/bin/opencode" "$HOME/.local/bin/opencode"; }' \
+    || log "WARNING: OpenCode install failed — the local seat opens a bare shell"
+  log "  local alt: qwen-code (hugpy-agent console --frontend qwen-code)"
+  lxc exec "$NAME" -- sudo -u ubuntu -H bash -lc \
+    'command -v qwen >/dev/null 2>&1 \
+     || { npm config set prefix "$HOME/.npm-global" \
+          && npm install -g --silent @qwen-code/qwen-code; }; \
+     [ -x "$HOME/.npm-global/bin/qwen" ] && mkdir -p "$HOME/.local/bin" \
+       && ln -sf "$HOME/.npm-global/bin/qwen" "$HOME/.local/bin/qwen" || true' \
+    || log "WARNING: qwen-code install failed — that backend stays grayed"
+  # clawd (Clawd-Codex, the frontier's third-party A CLI) is not on PyPI — it
+  # seeds from a source checkout: $FLEET_CLAWD_SRC wins, else auto-detect the
+  # HOST's own clawd editable install (its venv's direct_url.json). No source
+  # found = a note, not a failure; the backend stays grayed per-VM.
+  CLAWD_SRC="${FLEET_CLAWD_SRC:-}"
+  if [ -z "$CLAWD_SRC" ]; then
+    CLAWD_SRC=$(python3 - <<'PY' 2>/dev/null || true
+import glob, json, os, shutil
+exe = shutil.which("clawd")
+if exe:
+    venv = os.path.dirname(os.path.dirname(os.path.realpath(exe)))
+    for p in glob.glob(os.path.join(venv, "lib", "python*",
+                                    "site-packages", "*", "direct_url.json")):
+        try:
+            u = json.load(open(p)).get("url", "")
+        except Exception:
+            continue
+        if u.startswith("file://") and "clawd" in os.path.basename(
+                os.path.dirname(p)).lower():
+            print(u[7:]); break
+PY
+)
+  fi
+  if [ -n "$CLAWD_SRC" ] && [ -f "$CLAWD_SRC/pyproject.toml" ]; then
+    log "  frontier alt: clawd (Clawd-Codex, from $CLAWD_SRC)"
+    tar czf /tmp/clawd-src.$$.tgz -C "$CLAWD_SRC" \
+        --exclude .git --exclude '*.egg-info' --exclude __pycache__ . \
+      && lxc file push /tmp/clawd-src.$$.tgz "$NAME/tmp/clawd-src.tgz" \
+      && lxc exec "$NAME" -- sudo -u ubuntu -H bash -lc \
+        'command -v clawd >/dev/null 2>&1 || { \
+           mkdir -p /tmp/clawd-src && tar xzf /tmp/clawd-src.tgz -C /tmp/clawd-src \
+           && python3 -m venv "$HOME/.venvs/clawd" \
+           && "$HOME/.venvs/clawd/bin/pip" install -q /tmp/clawd-src \
+           && mkdir -p "$HOME/.local/bin" \
+           && ln -sf "$HOME/.venvs/clawd/bin/clawd" "$HOME/.local/bin/clawd" \
+           && rm -rf /tmp/clawd-src /tmp/clawd-src.tgz; }' \
+      || log "WARNING: clawd install failed — that backend stays grayed"
+    rm -f /tmp/clawd-src.$$.tgz
+  else
+    log "  note: no clawd source on this host (set FLEET_CLAWD_SRC=<dir> to seed it)"
+  fi
+  # SSH seat: enable sshd and seed the operator's public key, so the station
+  # is reachable as `ssh ubuntu@<ip>` — from this host (NAT bridge) and from
+  # any LAN machine holding the private key. $FLEET_SSH_PUBKEY overrides the
+  # auto-picked ~/.ssh/id_*.pub. No key found = sshd still up, note logged.
+  log "  ssh: enable sshd + seed your public key"
+  lxc exec "$NAME" -- bash -c \
+    'export DEBIAN_FRONTEND=noninteractive; \
+     dpkg -s openssh-server >/dev/null 2>&1 || apt-get install -y -qq openssh-server; \
+     systemctl enable --now ssh >/dev/null 2>&1 || systemctl enable --now sshd >/dev/null 2>&1' \
+    || log "WARNING: sshd enable failed — the ssh option will not connect"
+  # The FLEET KEY: a dedicated passphraseless ed25519 pair, minted ONCE on
+  # the first station build and kept with the console's state. Every station
+  # gets its pub; the console's ssh transport pins to it (IdentitiesOnly), so
+  # in-app ssh logins are prompt-free with zero operator setup — no personal
+  # key required, no passphrase prompts. The operator's own ~/.ssh key (or
+  # $FLEET_SSH_PUBKEY) is seeded ALONGSIDE it when present, for LAN logins.
+  FLEET_KEY="${HUGPY_STATION_STATE:-$HOME/.config/hugpy-station}/fleet_ssh_key"
+  if [ ! -f "$FLEET_KEY" ]; then
+    mkdir -p "$(dirname "$FLEET_KEY")"
+    ssh-keygen -q -t ed25519 -N "" -C "hugpy-station@$(hostname)" -f "$FLEET_KEY" \
+      && log "  minted the fleet key: $FLEET_KEY" \
+      || log "WARNING: fleet key generation failed"
+  fi
+  SSH_PUBS=""
+  [ -f "$FLEET_KEY.pub" ] && SSH_PUBS="$(cat "$FLEET_KEY.pub")"
+  EXTRA_PUB="${FLEET_SSH_PUBKEY:-}"
+  if [ -z "$EXTRA_PUB" ]; then
+    for f in "$HOME/.ssh/id_ed25519.pub" "$HOME/.ssh/id_rsa.pub" "$HOME/.ssh/id_ecdsa.pub"; do
+      [ -f "$f" ] && EXTRA_PUB="$(cat "$f")" && break
+    done
+  fi
+  [ -n "$EXTRA_PUB" ] && SSH_PUBS="${SSH_PUBS:+$SSH_PUBS
+}$EXTRA_PUB"
+  if [ -n "$SSH_PUBS" ]; then
+    printf '%s\n' "$SSH_PUBS" | lxc exec "$NAME" -- sudo -u ubuntu -H bash -c \
+      'mkdir -p ~/.ssh && chmod 700 ~/.ssh && cat >> ~/.ssh/authorized_keys \
+       && sort -u ~/.ssh/authorized_keys -o ~/.ssh/authorized_keys \
+       && chmod 600 ~/.ssh/authorized_keys' \
+      || log "WARNING: ssh key seed failed"
+  else
+    log "  note: no ssh key to seed (fleet key mint failed?) — sshd is up but key-less"
+  fi
+  log "  fleet-msg: station <-> keeper-console mail CLI"
+  lxc exec "$NAME" -- bash -c \
+    'cat > /usr/local/bin/fleet-msg && chmod 755 /usr/local/bin/fleet-msg' <<'FLEETMSG' \
+    || log "WARNING: fleet-msg install failed — agents can still append ~/.keeper-mail-out.jsonl"
+#!/bin/sh
+# fleet-msg — this station's mail line to the keeper console (the fleet's
+# host arm). No network needed: the console collects the outbox over lxc.
+#   fleet-msg <text...>     queue a message to the keeper console (~30s pickup)
+#   fleet-msg --inbox [N]   print the last N inbox messages (default 20) —
+#                           mail the keeper console sent THIS station
+case "$1" in
+  --inbox)
+    exec python3 - "${2:-20}" <<'PY'
+import json, os, sys, time
+p = os.path.expanduser("~/.bridge-mail.jsonl")
+try:
+    lines = open(p, encoding="utf-8").read().splitlines()
+except OSError:
+    lines = []
+for ln in lines[-int(sys.argv[1]):]:
+    try:
+        r = json.loads(ln)
+    except ValueError:
+        continue
+    ts = time.strftime("%m-%d %H:%M", time.localtime(r.get("ts", 0)))
+    print("[%s] %s: %s" % (ts, r.get("from", "?"), r.get("text", "")))
+PY
+    ;;
+  ""|-h|--help)
+    echo "usage: fleet-msg <text...> | fleet-msg --inbox [N]" >&2; exit 2;;
+  *)
+    exec python3 - "$@" <<'PY'
+import fcntl, json, os, sys, time
+p = os.path.expanduser("~/.keeper-mail-out.jsonl")
+row = {"ts": int(time.time()), "to": "keeper",
+       "text": " ".join(sys.argv[1:])[:4000]}
+with open(p + ".lock", "a") as lk:          # same lock the collector takes
+    fcntl.flock(lk, fcntl.LOCK_EX)
+    with open(p, "a", encoding="utf-8") as f:
+        f.write(json.dumps(row) + "\n")
+print("queued for the keeper console (collected within ~30s)")
+PY
+    ;;
+esac
+FLEETMSG
+fi
+
+[ "$DO_SNAP" = 1 ] && { log "Snapshotting 'baseline'"; lxc snapshot "$NAME" baseline; }
+
+echo
+log "Built '$NAME'."
+lxc list "$NAME" -c ns4 2>&1 | sed 's/^/  /'
+lxc exec "$NAME" -- sudo -u ubuntu -H bash -lc \
+  'for b in claude hugpy-agent opencode qwen clawd tmux fleet-msg; do
+     if command -v "$b" >/dev/null 2>&1 || [ -x "$HOME/.local/bin/$b" ]; then
+       echo "  seat $b : ok"; else echo "  seat $b : MISSING"; fi; done' 2>/dev/null || true
+echo "  host shell : lxc exec $NAME -- bash"
+SSH_IP=$(lxc list "$NAME" -c4 --format csv 2>/dev/null | head -1 | tr -d '"' | awk '{print $1}')
+[ -n "$SSH_IP" ] && echo "  ssh        : ssh ubuntu@$SSH_IP"
+exit 0

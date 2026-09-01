@@ -1,0 +1,31 @@
+[Unit]
+Description=bugreport-scanner — VM-side log scanner + local-LLM digest engine (lane #4)
+Documentation=file:///opt/bugreport/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+Environment=HOME=/home/ubuntu
+Environment=PYTHONUNBUFFERED=1
+# SELF-CONTAINED install (teststation, 2026-07-26): the code lives IN this VM
+# under /opt/bugreport, not /srv/share/projects/blackbird/bugreport. teststation's
+# share carries only its own (empty) project dir, so the share-based unit would
+# have failed at ExecStart on every boot. Same reasoning as keeper-relay's
+# self-contained unit and install-keeper-console.sh's copy-don't-symlink rule:
+# a VM must not depend on a host-granted mount to keep itself.
+WorkingDirectory=/opt/bugreport
+# report["status"].key_units — this VM's real units. The upstream default is
+# blackbird's and includes console-ui-dev, which never runs here and so reported
+# a permanent "inactive" that read as a fault in the drawer.
+Environment=BUGREPORT_KEY_UNITS=keeper-relay,station-keeper,hugpy-keeper,bugreport-scanner
+ExecStart=/usr/bin/python3 /opt/bugreport/scanner.py --serve
+Restart=on-failure
+RestartSec=10
+# hardening: this only reads logs, writes to $HOME dot-dirs, and calls the LLM
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

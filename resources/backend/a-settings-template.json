@@ -1,0 +1,17 @@
+{
+  "enableWorkflows": false,
+  "workflowKeywordTriggerEnabled": false,
+  "workflowSizeGuideline": "small",
+  "enableArtifact": false,
+  "autoCompactEnabled": false,
+  "autoScrollEnabled": false,
+  "terminalProgressBarEnabled": false,
+  "showTurnDuration": false,
+  "useAutoModeDuringPlan": true,
+  "permissions": {
+    "defaultMode": "auto"
+  },
+  "worktree": {
+    "baseRef": "head"
+  }
+}

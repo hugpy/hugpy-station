@@ -1,0 +1,10 @@
+[Unit]
+Description=Keep the station keeper alive — recreate the keeper session on boot and if it dies
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=2min
+Unit=station-keeper.service
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,160 @@
+#!/bin/bash
+# hugpy Station launcher — the .desktop / /usr/bin entry point.
+# Installed to /opt/hugpy-station/hugpy-station-launch (mode 755); postinst
+# points the `hugpy-station` alternative here, never at the raw Electron
+# binary (it crashes from a shell: zygote sandbox + space in path).
+#
+# 1.0.42: this file is now SOURCE (station-app/resources/); it used to live
+# only in the build root. Changes: --version/--help answered before Electron
+# is touched; no display -> clear error, exit 2 (Electron used to SIGSEGV on
+# its own exit path over ssh); the backend interpreter is probed for aiohttp
+# instead of trusting whatever `python3` is first on PATH (conda shadowing
+# produced a window with ERR_CONNECTION_REFUSED and a dead backend).
+
+# --- where am I? -------------------------------------------------------------
+# 1.0.42 (packaging revamp): this same script is installed under TWO names —
+#   /opt/hugpy-station/hugpy-station-launch   (deb / rpm / pacman entry point)
+#   <AppDir>/AppRun                           (AppImage entry point)
+# so APP_ROOT is derived, never hardcoded. $0 may be reached through
+# /usr/bin/hugpy-station -> /etc/alternatives/hugpy-station -> here, hence
+# readlink -f. The /opt fallback keeps a hand-copied launcher working.
+if [ -n "${APPDIR:-}" ] && [ -x "$APPDIR/hugpy-station" ]; then
+    APP_ROOT="$APPDIR"
+else
+    _self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+    APP_ROOT="$(cd "$(dirname "$_self")" 2>/dev/null && pwd)"
+    [ -n "$APP_ROOT" ] && [ -x "$APP_ROOT/hugpy-station" ] || APP_ROOT="/opt/hugpy-station"
+fi
+BIN="$APP_ROOT/hugpy-station"
+
+station_version() {
+    if [ -r "$APP_ROOT/resources/VERSION" ]; then
+        tr -d '[:space:]' < "$APP_ROOT/resources/VERSION"
+    elif [ -r "$APP_ROOT/resources/app.asar" ]; then
+        # asar stores package.json uncompressed; the first match is the app's.
+        grep -ao '"version": *"[0-9][0-9A-Za-z.+-]*"' "$APP_ROOT/resources/app.asar" \
+            | head -1 | sed -E 's/.*"([^"]+)"$/\1/'
+    else
+        echo "unknown"
+    fi
+}
+
+# --- CLI answered in-shell, BEFORE the log redirect and BEFORE Electron -----
+case "${1:-}" in
+    --version|-V|version)
+        echo "hugpy-station $(station_version)"
+        exit 0 ;;
+    --help|-h|help)
+        cat <<EOF
+hugpy-station $(station_version) — hugpy Station desktop cockpit
+
+usage: hugpy-station [--version] [--help] [electron/chromium switches...]
+
+Needs a graphical session (\$DISPLAY or \$WAYLAND_DISPLAY). Launch log:
+  \${XDG_CACHE_HOME:-~/.cache}/hugpy-station-launch.log
+Environment:
+  CONSOLE_PORT            backend port (default 8899)
+  HUGPY_STATION_PYTHON    interpreter for the backend (must import aiohttp)
+  FLEETVIEW_TERM_CMD, KEEPER_DEFAULT_BACKEND   see station docs
+EOF
+        exit 0 ;;
+esac
+
+# --- AppImage: the environment the stock AppRun would have set --------------
+# We REPLACE electron-builder's generated AppRun with this script so the
+# preflights above/below run inside the AppImage too. Everything the stock
+# AppRun exports is reproduced here EXCEPT LD_LIBRARY_PATH: $APPDIR/usr/lib
+# holds the AppImage runtime's own libraries, and the backend we spawn is the
+# SYSTEM python3 — pointing it at those libs is how you get an import error
+# that looks like a bug in server.py. Electron itself resolves via $ORIGIN.
+if [ -n "${APPDIR:-}" ]; then
+    export PATH="${APPDIR}:${APPDIR}/usr/sbin${PATH:+:$PATH}"
+    export XDG_DATA_DIRS="${APPDIR}/usr/share:${XDG_DATA_DIRS:-/usr/local/share/:/usr/share/}"
+    [ -d "${APPDIR}/usr/share/glib-2.0/schemas" ] && \
+        export GSETTINGS_SCHEMA_DIR="${APPDIR}/usr/share/glib-2.0/schemas"
+    export APPIMAGE="${APPIMAGE:-$APPDIR/AppRun}"
+fi
+
+# --- preflight: display ------------------------------------------------------
+if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+    echo "hugpy-station: no graphical display (\$DISPLAY and \$WAYLAND_DISPLAY are" \
+         "unset; session type: ${XDG_SESSION_TYPE:-unknown})." >&2
+    echo "  Start it from the desktop session, or over ssh -X, or under xvfb-run." >&2
+    echo "  (--version / --help work without a display.)" >&2
+    exit 2
+fi
+
+# --- preflight: backend interpreter -----------------------------------------
+# The backend (resources/backend/server.py) needs aiohttp. Prefer an
+# interpreter that has it natively (system python3-aiohttp); otherwise accept
+# one that can import it from the vendored copy shipped in the package
+# (resources/backend/vendor, compiled for Ubuntu noble / py3.12).
+# A conda/pyenv `python3` first on PATH may lack it or carry a half-installed
+# copy. The chosen interpreter is exported for main.js.
+VENDOR_DIR="$APP_ROOT/resources/backend/vendor"
+pick_python() {
+    local cand
+    for cand in "${HUGPY_STATION_PYTHON:-}" /usr/bin/python3 /usr/local/bin/python3 \
+                "$(command -v python3 2>/dev/null)" "$(command -v python 2>/dev/null)"; do
+        [ -n "$cand" ] && [ -x "$cand" ] || continue
+        if "$cand" -c 'import aiohttp' >/dev/null 2>&1; then
+            echo "$cand"; return 0
+        fi
+        if [ -d "$VENDOR_DIR" ] && PYTHONPATH="$VENDOR_DIR" "$cand" -c 'import aiohttp' >/dev/null 2>&1; then
+            echo "$cand"; return 0
+        fi
+    done
+    return 1
+}
+if ! PY="$(pick_python)"; then
+    echo "hugpy-station: no Python interpreter with aiohttp found (tried" \
+         "\$HUGPY_STATION_PYTHON, /usr/bin/python3, python3 on PATH)." >&2
+    echo "  Install it for the interpreter you want:  /usr/bin/python3 -m pip install aiohttp" >&2
+    echo "  (Debian/Ubuntu: apt install python3-aiohttp; Fedora: dnf install python3-aiohttp)" >&2
+    echo "  or point HUGPY_STATION_PYTHON at one that has it." >&2
+    exit 3
+fi
+export HUGPY_STATION_PYTHON="$PY"
+# vendored fallback engages only when the interpreter lacks aiohttp natively
+if ! "$PY" -c 'import aiohttp' >/dev/null 2>&1; then
+    export PYTHONPATH="$VENDOR_DIR${PYTHONPATH:+:$PYTHONPATH}"
+fi
+
+# --- from here on, everything goes to the launch log -------------------------
+LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}"
+mkdir -p "$LOG_DIR" 2>/dev/null
+exec >>"$LOG_DIR/hugpy-station-launch.log" 2>&1
+echo "=== launch $(date '+%F %T') === version $(station_version) python $PY"
+
+PORT="${CONSOLE_PORT:-8899}"
+if ss -ltn 2>/dev/null | grep -q ":$PORT "; then
+    echo "port $PORT busy — reaping stale hugpy-station instance(s)"
+    pkill -f "hugpy-station/hugpy-station" 2>/dev/null
+    pkill -f "resources/backend/server.py" 2>/dev/null
+    sleep 1
+    # a suspended (^Z) holder survives SIGTERM-by-name; force-kill by port
+    if ss -ltn 2>/dev/null | grep -q ":$PORT "; then
+        fuser -k -9 "$PORT/tcp" 2>/dev/null
+        sleep 1
+    fi
+fi
+
+export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
+export FLEETVIEW_TERM_CMD="${FLEETVIEW_TERM_CMD:-hugpy-agent mct}"
+export KEEPER_DEFAULT_BACKEND="${KEEPER_DEFAULT_BACKEND:-hugpy-agent::claude-code}"
+
+ARGS=(--disable-gpu --disable-gpu-compositing --disable-gpu-sandbox --no-sandbox)
+# lxd access: if this session lacks the lxd group but the user is a member,
+# re-exec through sg so `lxc` works without a re-login (restored from 1.0.6 —
+# without it every keeper `lxc exec` fails and claude keepers cannot start).
+if ! id -nG | grep -qw lxd && getent group lxd | grep -qw "$USER" \
+   && command -v sg >/dev/null 2>&1; then
+    echo "re-exec via sg lxd (session lacks the lxd group)"
+    exec sg lxd -c "\"$BIN\" ${ARGS[*]} \"$@\""
+fi
+if ! id -nG | grep -qw lxd; then
+    echo "note: this session lacks the lxd group — fleet VMs will be invisible" \
+         "(the 'self' VM still works). Log out and back in once to fix."
+fi
+
+exec "$BIN" "${ARGS[@]}" "$@"

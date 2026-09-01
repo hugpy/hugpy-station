@@ -1,0 +1,113 @@
+#!/usr/bin/env bash
+# agent-sudo — manual toggle for temporary passwordless sudo.
+#
+#   agent-sudo on      grant the agent NOPASSWD sudo
+#   agent-sudo off     revoke it
+#   agent-sudo status  show current state
+#
+# Editing /etc/sudoers.d requires root, so this script re-execs itself under
+# sudo (you enter YOUR password once). That human step is the switch: the
+# agent cannot turn on its own sudo — only you can.
+set -euo pipefail
+
+DROPIN="/etc/sudoers.d/agent-temp"
+LOGFILE="/var/log/agent-sudo.log"
+# User the grant applies to. Resolution order (so it is correct under both sudo
+# and pkexec, and overridable): AGENT_SUDO_USER, then the pkexec caller
+# (PKEXEC_UID), then the sudo caller (SUDO_USER), else the first login user.
+_default_grantee() {
+  if [[ -n "${AGENT_SUDO_USER:-}" ]]; then echo "$AGENT_SUDO_USER"; return; fi
+  if [[ -n "${PKEXEC_UID:-}" ]]; then id -nu "$PKEXEC_UID" 2>/dev/null && return; fi
+  if [[ -n "${SUDO_USER:-}" && "${SUDO_USER}" != "root" ]]; then echo "$SUDO_USER"; return; fi
+  getent passwd 1000 | cut -d: -f1
+}
+GRANTEE="$(_default_grantee)"
+
+die() { echo "agent-sudo: $*" >&2; exit 1; }
+
+reexec_root() {
+  if [[ $EUID -ne 0 ]]; then
+    exec sudo AGENT_SUDO_USER="$GRANTEE" "$0" "$@"
+  fi
+}
+
+cmd_status() {
+  if [[ -f "$DROPIN" ]]; then
+    echo "ON  — passwordless sudo is GRANTED via $DROPIN"
+    # File is root-only (0440); only show the rule line if we can read it.
+    if [[ -r "$DROPIN" ]]; then
+      echo "      $(grep -v '^#' "$DROPIN" | grep -v '^[[:space:]]*$' || true)"
+    fi
+  else
+    echo "OFF — no temporary grant ($DROPIN absent); sudo behaves normally"
+  fi
+}
+
+cmd_on() {
+  reexec_root "on"
+  id -u "$GRANTEE" >/dev/null 2>&1 || die "user '$GRANTEE' does not exist"
+
+  local tmp
+  tmp="$(mktemp /etc/sudoers.d/.agent-temp.XXXXXX)"
+  {
+    echo "# Managed by agent-sudo. Temporary passwordless sudo — remove with: agent-sudo off"
+    # Log every command this user runs via sudo, one line each, to a dedicated file.
+    echo "Defaults:$GRANTEE logfile=\"$LOGFILE\", loglinelen=0, log_year"
+    echo "$GRANTEE ALL=(ALL) NOPASSWD:ALL"
+  } > "$tmp"
+
+  # Validate BEFORE activating — a bad sudoers file can lock you out.
+  if ! visudo -cf "$tmp" >/dev/null; then
+    rm -f "$tmp"
+    die "generated sudoers file failed validation; no changes made"
+  fi
+
+  chown root:root "$tmp"
+  chmod 0440 "$tmp"
+  mv -f "$tmp" "$DROPIN"
+  echo "agent-sudo: ON — '$GRANTEE' now has passwordless sudo."
+  echo "            Every sudo command is logged to $LOGFILE (view: agent-sudo log)"
+  echo "            Turn it back off when done:  agent-sudo off"
+}
+
+cmd_log() {
+  reexec_root "log"
+  if [[ -f "$LOGFILE" ]]; then
+    cat "$LOGFILE"
+  else
+    echo "agent-sudo: no log yet ($LOGFILE does not exist)."
+  fi
+}
+
+cmd_off() {
+  reexec_root "off"
+  if [[ -f "$DROPIN" ]]; then
+    rm -f "$DROPIN"
+    echo "agent-sudo: OFF — temporary grant removed."
+  else
+    echo "agent-sudo: already OFF (nothing to remove)."
+  fi
+}
+
+case "${1:-}" in
+  on)      cmd_on ;;
+  off)     cmd_off ;;
+  status)  cmd_status ;;
+  log)     cmd_log ;;
+  ""|-h|--help|help)
+    cat <<'EOF'
+agent-sudo — manual toggle for temporary passwordless sudo.
+
+  agent-sudo on      grant the agent NOPASSWD sudo
+  agent-sudo off     revoke it
+  agent-sudo status  show current state
+
+Editing /etc/sudoers.d requires root, so this script re-execs itself under
+sudo (you enter YOUR password once). That human step is the switch: the
+agent cannot turn on its own sudo — only you can.
+
+Grant a different user with:  AGENT_SUDO_USER=someuser agent-sudo on
+EOF
+    ;;
+  *) die "unknown command '$1' (use: on | off | status)" ;;
+esac

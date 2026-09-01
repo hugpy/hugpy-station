@@ -1,0 +1,17 @@
+Post-condition probes for fleet patches (board p1, accepted 2026-07-27).
+
+A fleet push proves it DELIVERED files; a probe proves the patch actually took
+EFFECT on this VM. Scope agreed in p1: required only for patches that change
+RUNTIME behavior (tmux options, service config, env) -- not for pure file drops.
+
+Format: probes.d/<name>.probe, an executable POSIX sh script.
+  exit 0       -> PASS
+  exit non-0   -> FAIL; whatever it printed becomes the reason
+  line 2 (# desc: ...) -> one-line human description
+
+Run them all:  station-probe            (human summary; exit 1 if any FAIL)
+               station-probe --json     (machine-readable, for the console)
+               station-probe <name>     (one probe)
+
+Keep each probe to one cheap, side-effect-free check. A probe that mutates
+state is a bug: probes run unattended, repeatedly, after every push.

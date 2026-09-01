@@ -1,0 +1,1436 @@
+#!/usr/bin/env python3
+"""console-api — the thin management backend the ttyd rewrite dropped (P1).
+
+Serves the /api the SPA needs to be a real console: live VM state, power
+actions, keeper launch/status, and a health view that makes the silent
+comms failures visible. Port of the disabled console/server.py ACTIONS —
+reuse, don't reinvent (CONSOLE-OVERHAUL.md §3B).
+
+Security model:
+  - binds 127.0.0.1 only; nginx fronts it under the authed, LAN-allowed
+    console vhost.
+  - POSTs require the X-Console header (browsers won't attach custom
+    headers cross-origin without CORS, so this kills drive-by CSRF).
+  - VM names validated against a strict regex AND the live `lxc list`.
+  - PROTECTED VMs (same set as keeper-broker) refuse stop/restart; start
+    is always allowed — powering ON is additive.
+  - every action appends to the shared control-audit.jsonl.
+
+Stdlib only (http.server + subprocess) — no venv to rot.
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import threading
+import time
+import urllib.parse
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+ROOT = Path(os.environ.get("ROOT_DIR", "/srv/vm_mgr"))
+BRIDGE_STATE = Path(os.environ.get("BRIDGE_STATE", str(ROOT / "bridge-state")))
+AUDIT = ROOT / "keeper" / "logs" / "control-audit.jsonl"
+FLEET_JSON = ROOT / "keeper" / "state" / "fleet.json"
+VMS_JSON = ROOT / "web-console" / "vms.json"
+
+# Same set keeper-broker enforces (keep in sync via env like the broker).
+PROTECTED = set(filter(None, os.environ.get(
+    "KEEPER_PROTECTED",
+    "solcatcher,hugpy,abstractendeavors,blackbird,keeper,sandbox").split(",")))
+
+NAME_RE = re.compile(r"^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$")
+BIND = ("127.0.0.1", int(os.environ.get("CONSOLE_API_PORT", "8765")))
+
+# Design drawer (wireframe.js in the SPA): the canonical per-VM wireframe file
+# the drawer pushes/pulls and the keeper reads/writes. Same read/write surface
+# the terminal already grants (lxc exec as ubuntu) — no new privilege.
+DESIGN_PATH = "/home/ubuntu/wireframe.json"
+DESIGN_MAX = 262_144            # a wireframe is a few dozen shapes; cap abuse
+WF_FETCH_MAX = 2_500_000        # URL-import HTML proxy read cap
+
+# To-do drawer: the per-VM queue/bookmark file (~ubuntu/todo.json) shared the
+# same way — the console edits it via these endpoints, the keeper edits it
+# directly in the VM, so requests queue up WITHOUT interrupting the keeper.
+# Schema todo.v1: {"schema":"todo.v1","items":[{id,type:todo|request|bookmark,
+# text,note,status:open|doing|done,by,ts}]}.
+TODO_PATH = "/home/ubuntu/todo.json"
+TODO_TYPES = {"todo", "request", "bookmark", "operator", "proposal"}
+TODO_STATUS = {"open", "doing", "done"}
+TODO_MAX_ITEMS = 500
+# hugpy = the local-model gateway. It runs INSIDE the hugpy VM (gunicorn on
+# 0.0.0.0:7002), so from this host the base is the VM's LAN address — NOT
+# localhost (the old host-local assumption) and NOT https://dev.hugpy.ai
+# (its /health & friends are SPA catch-alls). It acts as the to-do section's
+# own keeper: parses free-text asks into items and proposes tidied lists.
+# Down → these endpoints 502, everything else works.
+HUGPY_URL = os.environ.get("HUGPY_URL", "http://192.168.1.250:7002")
+
+# Keeper agents advertised to the console UI. The UI renders a per-agent
+# launch chooser ONLY when this list has >1 entry; a fleet without the
+# in-VM hugpy launcher keeps the default single "claude" (classic one
+# button). Opt in per-deployment via the service env (KEEPER_AGENTS,
+# comma-separated, e.g. "claude,hugpy") — NEVER hardcoded-on. The first
+# entry is the UI default; empty-body launches always mean "claude".
+KEEPER_AGENTS = [a for a in (s.strip() for s in os.environ.get(
+    "KEEPER_AGENTS", "mct,claude").split(",")) if a] or ["mct", "claude"]
+# name -> in-VM ensure launcher; validation only lets these through.
+KEEPER_LAUNCHERS = ('claude', 'hugpy')
+# The ✨ todo assist model. Pinned to Qwen3-Coder-Next (operator, 2026-07-16 —
+# the auto-picked Qwen2.5-3B was too weak for reliable structured-item output;
+# the coder model is slower but far more reliable at JSON). Override via env.
+TODO_LLM_MODEL = os.environ.get("TODO_LLM_MODEL", "Qwen~Qwen3-Coder-Next-GGUF")
+
+# Steward-editable hugpy key/model (board t66 / o-assist-401). console-api had
+# NO key mechanism before this patch (recon-assist-env-20260722.txt) -- the
+# gateway now requires one. Small dotenv-style file under the same 0600
+# ~/.fleet dir as every other per-VM/agent secret on this host; loaded at
+# import and kept live in _HUGPY_CFG so a POST to /api/console/assist-env
+# takes effect on the next hugpy_chat()/hugpy_model() call, no restart.
+HUGPY_ENV_FILE = Path(os.environ.get(
+    "HUGPY_ENV_FILE", "/home/solcatcher/.fleet/console-hugpy.env"))
+_hugpy_cfg_lock = threading.Lock()
+
+
+def _hugpy_env_read() -> dict:
+    out = {}
+    try:
+        for line in HUGPY_ENV_FILE.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            out[k.strip()] = v.strip()
+    except OSError:
+        pass
+    return out
+
+
+def _hugpy_env_write(updates: dict) -> None:
+    with _hugpy_cfg_lock:
+        cur = _hugpy_env_read()
+        cur.update(updates)
+        HUGPY_ENV_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = HUGPY_ENV_FILE.with_suffix(".tmp")
+        tmp.write_text("".join(f"{k}={v}\n" for k, v in cur.items() if v))
+        os.chmod(tmp, 0o600)
+        tmp.replace(HUGPY_ENV_FILE)
+        _HUGPY_CFG.update(cur)
+
+
+_HUGPY_CFG = {"HUGPY_API_KEY": os.environ.get("HUGPY_API_KEY", ""),
+              "HUGPY_ASSIST_MODEL": ""}
+_HUGPY_CFG.update(_hugpy_env_read())
+
+
+def hugpy_api_key() -> str:
+    return _HUGPY_CFG.get("HUGPY_API_KEY") or ""
+
+
+def hugpy_assist_model() -> str:
+    return _HUGPY_CFG.get("HUGPY_ASSIST_MODEL") or TODO_LLM_MODEL
+
+
+def _hugpy_auth_headers() -> dict:
+    k = hugpy_api_key()
+    return {"Authorization": f"Bearer {k}"} if k else {}
+# Discord ↔ todo bridge: each VM's todo board can be attached to a hugpy
+# comms-session endpoint (operator-minted, e.g.
+# https://dev.hugpy.ai/api/discord/session/<token>). The bridge POLLS
+# <endpoint>/messages for operator messages (direction "in") and turns them
+# into todo ops — so Discord adds ride the same non-interrupting file channel —
+# and POSTs confirmations back via <endpoint>/send. Outbound-only from this
+# host: no inbound port, no console credentials anywhere.
+# Config file maps vm -> {endpoint, since, channel, last_ok, last_error};
+# the endpoint URL IS a capability token, hence 0600 under ~/.fleet and never
+# echoed back whole by the status route.
+TODO_DISCORD_FILE = Path(os.environ.get(
+    "TODO_DISCORD_FILE", "/home/solcatcher/.fleet/todo-discord.json"))
+TODO_DISCORD_POLL = max(10, int(os.environ.get("TODO_DISCORD_POLL", "30")))
+_discord_lock = threading.Lock()
+_todo_lock = threading.Lock()      # o10 v4: serializes every console-side todo RMW
+
+
+# --- keeper-mode: this machine IS the keeper console, addressable as "keeper" 
+KEEPER_VM = (os.environ.get("FLEET_KEEPER_NAME")
+             or os.environ.get("FLEET_SELF_NAME") or "keeper")
+KEEPER_HOME = os.path.expanduser("~")
+
+
+def _keeperify(argv):
+    """Translate an lxc invocation aimed at the keeper console into a local command.
+    None = not keeper-targeted; "__refuse__" = disallowed on the keeper console (lifecycle)."""
+    if not argv or argv[0] != "lxc" or KEEPER_VM not in argv[1:3]:
+        return None
+    if len(argv) > 2 and argv[1] == "exec" and argv[2] == KEEPER_VM:
+        rest = list(argv[3:])
+        if rest[:1] == ["--"]:
+            rest = rest[1:]
+        while rest[:1] == ["sudo"]:          # drop "sudo -u ubuntu -H" shim
+            rest = rest[4:]
+        return [a.replace("/home/ubuntu", KEEPER_HOME) for a in rest]
+    return "__refuse__"
+
+
+def run(argv: list[str], timeout: float = 180,
+        input: str | None = None) -> tuple[int, str]:
+    local = _keeperify(argv)
+    if local == "__refuse__":
+        return 1, "refusing lifecycle action on the keeper console"
+    if local is not None:
+        argv = local
+    try:
+        p = subprocess.run(argv, capture_output=True, text=True,
+                           timeout=timeout, input=input)
+        return p.returncode, (p.stdout + p.stderr).strip()
+    except subprocess.TimeoutExpired:
+        return 124, f"timeout after {timeout}s"
+    except Exception as exc:
+        return 1, f"{type(exc).__name__}: {exc}"
+
+
+def audit(rec: dict) -> None:
+    rec = {"t": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "src": "console-api",
+           **rec}
+    try:
+        AUDIT.parent.mkdir(parents=True, exist_ok=True)
+        with open(AUDIT, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec) + "\n")
+    except OSError:
+        pass
+
+
+def vm_rows() -> list[dict]:
+    rc, out = run(["lxc", "list", "-c", "ns", "--format", "csv"], timeout=20)
+    rows = []
+    if rc == 0:
+        for line in sorted(out.splitlines()):
+            if "," in line:
+                name, state = line.split(",", 1)
+                rows.append({"name": name.strip(), "state": state.strip()})
+    if all(r["name"] != KEEPER_VM for r in rows):
+        rows.append({"name": KEEPER_VM, "state": "RUNNING"})
+    return rows
+
+
+def vm_state(name: str) -> str | None:
+    for r in vm_rows():
+        if r["name"] == name:
+            return r["state"]
+    return None
+
+
+# Which tmux session each agent owns. They run SIDE BY SIDE (operator: the free
+# local keeper stays available to absorb work the metered claude one would
+# otherwise pay for), so they cannot share a session name.
+# One EXPLICIT session per backend (operator, 2026-08-22) — MUST match
+# BACKEND_TMUX_SESSION in server.py and the table in
+# station-stack/opt/station-keeper/keeper-ensure.sh. The in-VM ensure creates
+# `keeper-mct` (KEEPER_BACKEND=claude → `keeper-claude`).
+AGENT_SESSION = {"mct": "keeper-mct", "claude": "keeper-claude", "hugpy": "keeper-local"}
+# Legacy names still probed so a VM that has not been re-synced
+# (station-stack-install) keeps reporting honestly instead of looking dead:
+# `keeper` was the shared frontier name (mct or claude, whoever got there
+# first); `keeper-hugpy` the local keeper before 2026-07-27.
+AGENT_SESSION_ALT = {"mct": ["keeper"], "claude": ["keeper"], "hugpy": ["keeper-hugpy"]}
+
+# Per-VM enable flags. Presence of the file == that agent may be (re)started by
+# its timer. Only claude is gated: it spends metered tokens, the local keeper is
+# free and is the fleet default.
+GATE_DIR = "/opt/llm-station/keeper-agents.d"
+GATEABLE = {"claude"}
+
+
+def _sh(name: str, script: str, timeout: int = 15) -> tuple[int, str]:
+    """Run a shell snippet in the VM as ubuntu. One place for the lxc-exec shape."""
+    return run(["lxc", "exec", name, "--", "sudo", "-u", "ubuntu", "-H",
+                "bash", "-lc", script], timeout=timeout)
+
+
+def session_of(agent: str) -> str:
+    return AGENT_SESSION.get(agent, "keeper-mct")
+
+
+def keeper_session(name: str, agent: str = "claude") -> bool:
+    """Is that agent's tmux session live?
+
+    `-t =<sess>` is ANCHORED: tmux prefix-matches by default and `keeper` is a
+    prefix of `keeper-local`, so an unanchored probe reports the claude keeper
+    as live whenever only the local one is running. That silent misattribution
+    is worse than a missing answer, so every target here carries the '='.
+    """
+    for sess in [session_of(agent)] + AGENT_SESSION_ALT.get(agent, []):
+        rc, _ = run(["lxc", "exec", name, "--", "sudo", "-u", "ubuntu", "-H",
+                     "tmux", "-L", "console", "has-session", "-t", "=" + sess],
+                    timeout=15)
+        if rc == 0:
+            return True
+    return False
+
+
+def keeper_agent(name: str) -> str | None:
+    # Which frontier agent is live, by its OWN named session (explicit wiring).
+    # Legacy shared `keeper` session: read KEEPER_AGENT from the tmux session
+    # environment (the hugpy ensure set it; the classic claude ensure set
+    # nothing -> None -> the caller reports "claude").
+    for agent in ("mct", "claude"):
+        rc, _ = _sh(name, "tmux -L console has-session -t =" + AGENT_SESSION[agent] + " 2>/dev/null")
+        if rc == 0:
+            return agent
+    rc, out = _sh(name,
+                  "tmux -L console show-environment -t =keeper KEEPER_AGENT "
+                  "2>/dev/null | sed -n 's/^KEEPER_AGENT=//p'")
+    return (out.strip() or None) if rc == 0 else None
+
+
+def keeper_gate(name: str) -> dict:
+    """{agent: bool} — is each gateable agent allowed to (re)start on this VM?"""
+    out_map = {}
+    for agent in sorted(GATEABLE):
+        rc, _ = _sh(name, f"test -e {GATE_DIR}/{agent}.enabled")
+        out_map[agent] = (rc == 0)
+    return out_map
+
+
+def keeper_gate_set(name: str, agent: str, enabled: bool) -> tuple[int, str]:
+    """Create/remove the enable flag. Disabling never kills a live session --
+    it only stops the timer bringing the keeper back, which is the documented
+    contract in that directory's README."""
+    if enabled:
+        script = f"mkdir -p {GATE_DIR} && touch {GATE_DIR}/{agent}.enabled"
+    else:
+        script = f"rm -f {GATE_DIR}/{agent}.enabled"
+    return _sh(name, script)
+
+
+def keeper_kill(name: str, agent: str = "claude") -> tuple[int, str]:
+    # Tear down that agent's session (replace:true launches, and the UI's
+    # explicit stop). ANCHORED: unanchored, killing "keeper" would destroy a
+    # live `keeper-local` instead -- the most damaging form of the prefix bug.
+    # Killing an absent session returns nonzero harmlessly (callers ignore rc).
+    return run(["lxc", "exec", name, "--", "sudo", "-u", "ubuntu", "-H",
+                "tmux", "-L", "console", "kill-session",
+                "-t", "=" + session_of(agent)], timeout=15)
+
+
+def keeper_launch(name: str) -> tuple[int, str]:
+    # The in-VM ensure script starts the real keeper claude in the session
+    # (idempotent; exits 0 when already running). It self-gates on
+    # claude.enabled and says so on stderr when disabled -- which the launch
+    # route surfaces verbatim rather than reporting a bare failure.
+    return _sh(name,
+               "for e in /opt/station-keeper/keeper-ensure.sh "
+               "/opt/llm-station/keeper-ensure.sh; do "
+               "[ -x \"$e\" ] && exec \"$e\" \"$(hostname)\"; done; "
+               "echo 'no keeper-ensure script installed in this VM'; exit 2",
+               timeout=60)
+
+
+def keeper_launch_hugpy(name: str) -> tuple[int, str]:
+    # Local-LLM keeper: same shape, its own ensure. HUGPY_KEEPER_SESSION is
+    # passed explicitly so it builds ITS session even on a VM whose env file
+    # has not been pinned yet -- otherwise it would claim the shared "keeper"
+    # name and evict the claude keeper, which is the thing this split exists to
+    # prevent. It tags the session env KEEPER_AGENT=hugpy so GET self-reports.
+    sess = session_of("hugpy")
+    return _sh(name,
+               f"export HUGPY_KEEPER_SESSION={sess}; "
+               "for e in /opt/station-keeper/hugpy-keeper-ensure.sh "
+               "/opt/llm-station/hugpy-keeper-ensure.sh; do "
+               "[ -x \"$e\" ] && exec \"$e\" \"$(hostname)\"; done; "
+               "echo 'no hugpy-keeper-ensure script installed in this VM'; exit 2",
+               timeout=60)
+
+
+def design_read(name: str) -> tuple[int, str]:
+    return run(["lxc", "exec", name, "--", "sudo", "-u", "ubuntu", "-H",
+                "cat", DESIGN_PATH], timeout=20)
+
+
+def design_write(name: str, payload: str) -> tuple[int, str]:
+    return run(["lxc", "exec", name, "--", "sudo", "-u", "ubuntu", "-H",
+                "bash", "-c", f"cat > {DESIGN_PATH}"], timeout=20,
+               input=payload)
+
+
+def todo_read(name: str) -> tuple[dict | None, str]:
+    """Read the VM's todo file. Missing file -> blank list; unparseable file ->
+    error (never clobber something the keeper wrote by treating it as blank)."""
+    rc, out = run(["lxc", "exec", name, "--", "sudo", "-u", "ubuntu", "-H",
+                   "flock", "-w", "10", "/home/ubuntu/.todo.lock",
+                   "cat", TODO_PATH], timeout=20)  # o13: shared VM-side lock
+    if rc != 0:
+        return {"schema": "todo.v1", "items": []}, ""
+    try:
+        data = json.loads(out)
+        items = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            raise ValueError("no items list")
+        return {"schema": "todo.v1", "items": items}, ""
+    except ValueError:
+        return None, f"{TODO_PATH} in {name} is not valid todo JSON — fix or remove it in the VM"
+
+
+def todo_write(name: str, state: dict) -> tuple[int, str]:
+    # o10 v4: atomic replace — a concurrent reader never sees a torn board
+    return run(["lxc", "exec", name, "--", "sudo", "-u", "ubuntu", "-H",
+                "flock", "-w", "10", "/home/ubuntu/.todo.lock",
+                "bash", "-c", f"cat > {TODO_PATH}.tmp && mv {TODO_PATH}.tmp {TODO_PATH}"],
+               timeout=20, input=json.dumps(state, indent=2) + "\n")  # o13: shared VM-side lock
+
+
+def todo_next_id(items: list) -> int:
+    n = 0
+    for it in items:
+        m = re.match(r"^t(\d+)$", str(it.get("id", "")))
+        if m:
+            n = max(n, int(m.group(1)))
+    return n + 1
+
+
+def todo_norm(raw: dict, by: str, nid: int) -> dict | None:
+    if not isinstance(raw, dict):
+        return None
+    text = str(raw.get("text", "")).strip()[:500]
+    if not text:
+        return None
+    typ = str(raw.get("type", "todo")).strip().lower()
+    status = str(raw.get("status", "open")).strip().lower()
+    return {"id": f"t{nid}",
+            "type": typ if typ in TODO_TYPES else "todo",
+            "text": text,
+            "note": str(raw.get("note", "") or "").strip()[:2000],  # o5/t104: raised from 500 (p9), note-body path
+            **({"priority": str(raw.get("priority")).strip().lower()}
+               if str(raw.get("priority", "")).strip().lower() in ("medium", "high")
+               else {}),
+            "status": status if status in TODO_STATUS else "open",
+            "by": str(raw.get("by") or by)[:24],
+            "ts": int(time.time())}
+
+
+def todo_apply(state: dict, body: dict) -> tuple[dict | None, str]:
+    """Apply one op ({op:add|update|del|replace, ...}) to the state, in place."""
+    items = state["items"]
+    op = body.get("op")
+    if op == "add":
+        it = todo_norm(body.get("item") or {}, "user", todo_next_id(items))
+        if not it:
+            return None, "item needs non-empty text"
+        if len(items) >= TODO_MAX_ITEMS:
+            return None, f"list is full (>{TODO_MAX_ITEMS})"
+        # o10: never mint an id any existing item already holds (any type/prefix)
+        _o10_ids = {str(x.get("id")) for x in items if isinstance(x, dict)}
+        while str(it.get("id")) in _o10_ids:
+            _o10_m = re.match(r"^([A-Za-z]+)(\d+)$", str(it.get("id")))
+            it["id"] = (_o10_m.group(1) + str(int(_o10_m.group(2)) + 1)) if _o10_m else (str(it.get("id")) + "x")
+        items.append(it)
+        return state, ""
+    if op == "update":
+        # o10 ambiguity (update): a shared id means by-id ops hit the wrong twin — refuse
+        _o10_tid = str(body.get("id", ""))
+        _o10_twins = [_x for _x in items if isinstance(_x, dict) and str(_x.get("id")) == _o10_tid]
+        if len(_o10_twins) > 1:
+            return None, f"ambiguous id {_o10_tid!r}: " + str(len(_o10_twins)) + " items share it - re-id required (o10)"
+        it = next((i for i in items if i.get("id") == body.get("id")), None)
+
+        if not it:
+            return None, f"no item {body.get('id')}"
+        f = body.get("fields") or {}
+        if "text" in f and str(f["text"]).strip():
+            it["text"] = str(f["text"]).strip()[:500]
+        if "note" in f:
+            it["note"] = str(f["note"] or "").strip()[:2000]  # o5/t104: raised from 500 (p9) — this path ate accepted proposal bodies
+        if str(f.get("priority", "")).strip().lower() in ("low", "medium", "high"):
+            p = str(f["priority"]).strip().lower()
+            if p == "low":
+                it.pop("priority", None)
+            else:
+                it["priority"] = p
+        if str(f.get("status", "")).lower() in TODO_STATUS:
+            it["status"] = str(f["status"]).lower()
+        if str(f.get("type", "")).lower() in TODO_TYPES:
+            it["type"] = str(f["type"]).lower()
+        if isinstance(f.get("comments"), list):
+            clean = []
+            for c in f["comments"][:50]:
+                if not isinstance(c, dict):
+                    continue
+                ctext = str(c.get("text", "")).strip()[:2000]  # p9: raised from 500
+                if not ctext:
+                    continue
+                cts = c.get("ts")
+                clean.append({"by": str(c.get("by") or "operator")[:24],
+                              "ts": int(cts) if isinstance(cts, (int, float)) else int(time.time()),
+                              "text": ctext})
+            it["comments"] = clean
+        if "query" in f:
+            q = str(f.get("query") or "").strip()[:500]
+            if q:
+                it["query"] = q
+            else:
+                it.pop("query", None)
+        it["ts"] = int(time.time())
+        return state, ""
+    if op == "del":
+        # o10 ambiguity (del): a shared id would silently delete BOTH twins - refuse
+        _o10_twins = [i for i in items if i.get("id") == body.get("id")]
+        if len(_o10_twins) > 1:
+            return None, f"ambiguous id {body.get('id')!r}: {len(_o10_twins)} items share it - re-id required (o10)"
+        n = len(items)
+        state["items"] = [i for i in items if i.get("id") != body.get("id")]
+        return (state, "") if len(state["items"]) < n else (None, f"no item {body.get('id')}")
+    if op == "replace":
+        new = body.get("items")
+        if not isinstance(new, list) or len(new) > TODO_MAX_ITEMS:
+            return None, "replace needs items: [...]"
+        out, nid = [], todo_next_id(new)   # keep survivors' ids; re-id the rest
+        # o15: count incoming ids ONCE — only a non-empty id that is UNIQUE
+        # within the incoming list is kept verbatim; missing/empty/duplicated
+        # ids are re-id'd below. Fixes the tidy-apply mangle: kebab ids
+        # ("o-assist-401", "bm-promptstudio") failed the old ^[A-Za-z]+\d+$
+        # keep test and were silently renamed to sequential t<n>.
+        _o15_counts: dict = {}
+        for _o15_raw in new:
+            if isinstance(_o15_raw, dict):
+                _o15_k = str(_o15_raw.get("id", "") or "").strip()
+                if _o15_k:
+                    _o15_counts[_o15_k] = _o15_counts.get(_o15_k, 0) + 1
+        for raw in new:
+            it = todo_norm(raw, str(raw.get("by") or "user") if isinstance(raw, dict) else "user", 0)
+            if not it:
+                continue
+            # o15 (was o10 letters+digits only): keep ANY non-empty id that is
+            # unique within the incoming list, whatever its shape, so a
+            # tidy/replace apply can never rename keeper- or CLI-authored ids
+            _o15_id = str(raw.get("id", "") or "").strip() if isinstance(raw, dict) else ""
+            keep = bool(_o15_id) and _o15_counts.get(_o15_id, 0) == 1
+            if keep:
+                it["id"] = _o15_id
+                it["ts"] = int(raw.get("ts") or it["ts"])
+            else:
+                it["id"] = f"t{nid}"
+                nid += 1
+            # o10: ids stay unique within the replaced list too
+            _o10_seen = {str(x.get("id")) for x in out}
+            while str(it.get("id")) in _o10_seen:
+                _o10_m = re.match(r"^([A-Za-z]+)(\d+)$", str(it.get("id")))
+                it["id"] = (_o10_m.group(1) + str(int(_o10_m.group(2)) + 1)) if _o10_m else (str(it.get("id")) + "x")
+            out.append(it)
+        state["items"] = out
+        return state, ""
+    return None, f"unknown op {op!r}"
+
+
+# -- hugpy: the to-do section's own keeper (parse asks, tidy the queue) -------
+def hugpy_model() -> tuple[str | None, str]:
+    model = hugpy_assist_model()
+    if model:
+        return model, ""
+    try:
+        req = urllib.request.Request(HUGPY_URL + "/v1/models",
+                                     headers=_hugpy_auth_headers())
+        with urllib.request.urlopen(req, timeout=10) as r:
+            data = json.loads(r.read().decode("utf-8", "replace")).get("data", [])
+    except Exception as exc:
+        return None, f"hugpy unavailable at {HUGPY_URL} ({type(exc).__name__})"
+    ids = [m.get("id", "") for m in data if m.get("id")]
+    # prefer a plain text model over a vision one for list work
+    text_ids = [i for i in ids if not re.search(r"vl|vision|llava", i, re.I)]
+    pick = (text_ids or ids or [None])[0]
+    return (pick, "") if pick else (None, "hugpy lists no models")
+
+
+def hugpy_chat(prompt: str, max_tokens: int = 1200) -> tuple[str | None, str]:
+    model, err = hugpy_model()
+    if not model:
+        return None, err
+    body = json.dumps({"model": model, "max_tokens": max_tokens,
+                       "temperature": 0.1,
+                       "messages": [{"role": "user", "content": prompt}]}).encode()
+    req = urllib.request.Request(
+        HUGPY_URL + "/v1/chat/completions", data=body,
+        headers={"Content-Type": "application/json", **_hugpy_auth_headers()})
+    last = ""
+    for attempt in range(2):                     # swap-slot models cold-load
+        try:
+            with urllib.request.urlopen(req, timeout=150) as r:
+                data = json.loads(r.read().decode("utf-8", "replace"))
+            return data["choices"][0]["message"]["content"], ""
+        except urllib.error.HTTPError as exc:
+            last = f"hugpy HTTP {exc.code}"
+            if exc.code not in (500, 502, 503) or attempt:
+                break
+            time.sleep(10)
+        except Exception as exc:
+            return None, f"hugpy unreachable ({type(exc).__name__}: {exc})"
+    return None, last or "hugpy request failed"
+
+
+# -- /api/models: thin cached proxy of the hugpy gateway's model list --------
+_MODELS_CACHE: dict = {"ts": 0.0, "code": None, "body": None}
+_MODELS_CACHE_TTL = 60
+_models_lock = threading.Lock()
+
+
+def _models_auth_headers() -> dict:
+    # Cooperate with apply-assist-env.sh's hugpy_api_key() if/when that patch
+    # is present, without hard-depending on it (see script header).
+    fn = globals().get("hugpy_api_key")
+    if callable(fn):
+        k = fn() or ""
+        if k:
+            return {"Authorization": f"Bearer {k}"}
+    return {}
+
+
+def hugpy_models_list() -> tuple[int, dict]:
+    with _models_lock:
+        now = time.time()
+        if _MODELS_CACHE["body"] is not None and \
+                now - _MODELS_CACHE["ts"] < _MODELS_CACHE_TTL:
+            return _MODELS_CACHE["code"], _MODELS_CACHE["body"]
+        try:
+            req = urllib.request.Request(HUGPY_URL + "/v1/models",
+                                         headers=_models_auth_headers())
+            with urllib.request.urlopen(req, timeout=8) as r:
+                data = json.loads(r.read().decode("utf-8", "replace"))
+            models = [{"id": m.get("id")} for m in data.get("data", [])
+                      if m.get("id")]
+            code, body = 200, {"ok": True, "models": models}
+        except urllib.error.HTTPError as exc:
+            code, body = exc.code, {"ok": False, "error": f"hugpy HTTP {exc.code}"}
+        except Exception as exc:
+            code, body = 502, {"ok": False,
+                               "error": f"hugpy unreachable ({type(exc).__name__})"}
+        _MODELS_CACHE.update(ts=now, code=code, body=body)
+        return code, body
+
+
+def parse_items_reply(text: str) -> list[dict]:
+    """Pull a JSON array of items out of a model reply (fences/prose tolerated)."""
+    t = text or ""
+    m = re.search(r"```[a-zA-Z]*\s*\n(.*?)```", t, re.DOTALL)
+    if m:
+        t = m.group(1)
+    a, b = t.find("["), t.rfind("]")
+    if a < 0 or b <= a:
+        return []
+    t = t[a:b + 1]
+    for candidate in (t, re.sub(r",\s*([}\]])", r"\1", t)):
+        try:
+            data = json.loads(candidate)
+            return [d for d in data if isinstance(d, dict)] if isinstance(data, list) else []
+        except ValueError:
+            continue
+    return []
+
+
+# -- Discord ↔ todo bridge ----------------------------------------------------
+def discord_cfg_load() -> dict:
+    try:
+        data = json.loads(TODO_DISCORD_FILE.read_text())
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def discord_cfg_update(vm: str, ent: dict | None) -> None:
+    """Merge one VM's bridge entry into the config file (None = remove)."""
+    with _discord_lock:
+        cfg = discord_cfg_load()
+        if ent is None:
+            cfg.pop(vm, None)
+        else:
+            cfg[vm] = ent
+        TODO_DISCORD_FILE.parent.mkdir(parents=True, exist_ok=True)
+        tmp = TODO_DISCORD_FILE.with_suffix(".tmp")
+        tmp.write_text(json.dumps(cfg, indent=2))
+        os.chmod(tmp, 0o600)
+        tmp.replace(TODO_DISCORD_FILE)
+
+
+def _http_json(url: str, payload: dict | None = None, timeout: float = 20):
+    data = json.dumps(payload).encode() if payload is not None else None
+    req = urllib.request.Request(
+        url, data=data,
+        headers={"Content-Type": "application/json"} if data else {})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8", "replace"))
+
+
+def _todo_render(items: list) -> str:
+    """Compact Discord rendering of a queue (≤1900 chars)."""
+    if not items:
+        return "(queue is empty)"
+    icon = {"todo": "☑", "request": "✋", "bookmark": "🔖"}
+    st = {"open": "○", "doing": "…", "done": "✓"}
+    lines = []
+    for i in items:
+        note = f" — {i['note']}" if i.get("note") else ""
+        lines.append(f"`{i['id']}` {st.get(i.get('status'), '○')} "
+                     f"{icon.get(i.get('type'), '☑')} {i['text']}{note}")
+    out = "\n".join(lines)
+    return out[:1880] + ("\n…(truncated)" if len(out) > 1880 else "")
+
+
+def todo_discord_handle(vm: str, text: str, author: str) -> str:
+    """One operator Discord message -> todo action -> reply text.
+    Grammar: `list` · `done|doing|open|del tN` · `add|req|bm <text>` ·
+    anything else = ✨ assist-add (falls back to a plain request item)."""
+    state, err = todo_read(vm)
+    if state is None:
+        return f"⚠ {err}"
+    by = ("discord:" + author)[:24]
+    t = text.strip()
+    low = t.lower()
+
+    if low in ("list", "todo", "todos", "queue", "status"):
+        return f"☑ {vm} queue:\n" + _todo_render(state["items"])
+
+    m = re.match(r"^(done|doing|open|del(?:ete)?)\s+(t\d+)$", low)
+    if m:
+        verb, tid = m.group(1), m.group(2)
+        op = ({"op": "del", "id": tid} if verb.startswith("del")
+              else {"op": "update", "id": tid, "fields": {"status": verb}})
+        with _todo_lock:                         # o10 v4
+            state, err = todo_read(vm)
+            if state is None:
+                return f"⚠ {err}"
+            state, err = todo_apply(state, op)
+            if state is None:
+                return f"⚠ {err}"
+            rc, _ = todo_write(vm, state)
+        audit({"event": "todo_op", "vm": vm, "op": op["op"], "via": "discord",
+               "by": by, "ok": rc == 0, "n": len(state["items"])})
+        return (f"{'🗑 removed' if op['op'] == 'del' else '↻ ' + verb} {tid}"
+                if rc == 0 else "⚠ write failed")
+
+    m = re.match(r"^(add|todo|req|request|bm|bookmark)\s+(.+)$", t,
+                 re.IGNORECASE | re.DOTALL)
+    plain = None
+    if m:
+        typ = {"add": "todo", "todo": "todo", "req": "request",
+               "request": "request", "bm": "bookmark",
+               "bookmark": "bookmark"}[m.group(1).lower()]
+        plain = {"type": typ, "text": m.group(2).strip(), "by": by}
+    else:
+        # free text → the ✨ assist parses it into items; plain fallback below
+        reply, aerr = hugpy_chat(
+            f"You maintain the development to-do list for VM '{vm}'. Convert "
+            f"the user's message into 1 to 6 to-do items. Each item is a JSON "
+            f"object: {{\"type\":\"todo|request|bookmark\",\"text\":\"short "
+            f"imperative summary\",\"note\":\"optional detail\"}}. Use "
+            f"'request' for asks directed at the keeper, 'bookmark' for "
+            f"checkpoints worth returning to, else 'todo'. Output ONLY a JSON "
+            f"array, no prose, no fences.\n\nUser message:\n{t[:4000]}")
+        new = parse_items_reply(reply) if reply else []
+        if new:
+            with _todo_lock:                     # o10 v4: fresh read after the LLM call
+                state, err = todo_read(vm)
+                if state is None:
+                    return f"⚠ {err}"
+                nid = todo_next_id(state["items"])
+                added = []
+                for raw in new[:6]:
+                    it = todo_norm(raw, by, nid)
+                    if it:
+                        state["items"].append(it)
+                        added.append(it)
+                        nid += 1
+                rc, _ = todo_write(vm, state) if added else (0, "")
+            if added:
+                audit({"event": "todo_assist", "vm": vm, "mode": "add",
+                       "via": "discord", "by": by, "ok": rc == 0,
+                       "added": len(added)})
+                return (f"✨ queued {len(added)} item(s) for {vm}:\n"
+                        + _todo_render(added) if rc == 0 else "⚠ write failed")
+        plain = {"type": "request", "text": t[:500], "by": by}
+
+    with _todo_lock:                             # o10 v4
+        state, err = todo_read(vm)
+        if state is None:
+            return f"⚠ {err}"
+        state, err = todo_apply(state, {"op": "add", "item": plain})
+        if state is None:
+            return f"⚠ {err}"
+        rc, _ = todo_write(vm, state)
+    it = state["items"][-1]
+    audit({"event": "todo_op", "vm": vm, "op": "add", "via": "discord",
+           "by": by, "ok": rc == 0, "n": len(state["items"])})
+    return (f"➕ queued `{it['id']}` ({it['type']}) for {vm}: {it['text']}"
+            if rc == 0 else "⚠ write failed")
+
+
+def _todo_discord_cycle() -> None:
+    for vm, ent in list(discord_cfg_load().items()):
+        ep = (ent or {}).get("endpoint")
+        if not ep:
+            continue
+        since = float(ent.get("since") or 0)
+        try:
+            data = _http_json(f"{ep}/messages?since={since}")
+        except Exception as exc:
+            ent["last_error"] = f"{type(exc).__name__}: {exc}"
+            discord_cfg_update(vm, ent)
+            continue
+        new_since = since
+        replies = []
+        for msg in sorted(data.get("messages") or [],
+                          key=lambda x: float(x.get("ts") or 0)):
+            ts = float(msg.get("ts") or 0)
+            if ts > new_since:
+                new_since = ts
+            if msg.get("direction") != "in" or ts <= since:
+                continue                     # our own posts / already handled
+            content = (msg.get("content") or "").strip()
+            if not content:
+                continue
+            if vm_state(vm) != "RUNNING":
+                replies.append(f"⚠ {vm} is not running — ignored: {content[:80]}")
+                continue
+            try:
+                replies.append(todo_discord_handle(
+                    vm, content, str(msg.get("author") or "?")))
+            except Exception as exc:         # one bad message must not stall the bridge
+                replies.append(f"⚠ error handling that: {type(exc).__name__}: {exc}")
+        for r in replies:
+            try:
+                _http_json(f"{ep}/send", {"content": r[:1900]})
+            except Exception:
+                pass
+        ent.update(since=new_since, last_ok=time.time())
+        ent.pop("last_error", None)
+        discord_cfg_update(vm, ent)
+
+
+def todo_discord_loop() -> None:
+    print(f"todo-discord bridge polling every {TODO_DISCORD_POLL}s "
+          f"(config: {TODO_DISCORD_FILE})", flush=True)
+    while True:
+        try:
+            _todo_discord_cycle()
+        except Exception as exc:             # the loop must survive anything
+            print(f"todo-discord cycle error: {type(exc).__name__}: {exc}",
+                  flush=True)
+        time.sleep(TODO_DISCORD_POLL)
+
+
+# -- /api/vm/<vm>/compose: refine an operator draft, or send it to the keeper -
+# "send" reuses the Discord bridge's non-interrupting delivery channel: it
+# appends ONE type:"request" item to the VM's ~/todo.json board (the SAME
+# _todo_lock -> todo_read -> todo_norm -> todo_write path todo_discord_handle
+# uses). Inside the VM, keeper-relay's board watcher announces the new item
+# into the keeper's tmux pane through its idle-gated [board] injection —
+# console-api NEVER types into the pane directly, so a turn in flight is never
+# interrupted. todo_norm caps item text at 500 chars; a longer draft keeps its
+# FULL text in one attached comment (comments carry 2000 chars post-p9).
+COMPOSE_REFINE_MAX = 8000   # draft chars fed to the model for op=refine
+COMPOSE_SEND_MAX = 2000     # draft chars accepted for op=send (a live keeper reads it)
+COMPOSE_REFINE_PROMPT = (
+    "Rewrite the user's draft below into a clear, well-structured prompt for "
+    "a keeper agent (an autonomous coding agent working on this station). "
+    "Keep the author's intent and every fact, path, name, and command EXACTLY "
+    "as written; do not add requirements, invent details, or answer the "
+    "request yourself. State the goal first; prefer short paragraphs or '- ' "
+    "bullets for multi-part asks. Return ONLY the rewritten prompt - no "
+    "preamble, no commentary, no code fences.")
+
+
+def wf_fetch(url: str) -> tuple[int, dict]:
+    """Fetch a page's HTML for the design drawer's URL import (the browser
+    can't read a cross-origin DOM; the SPA measures the returned HTML in a
+    scripts-off sandboxed iframe)."""
+    if not re.match(r"^https?://", url):
+        return 400, {"error": "url must be http(s)"}
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) hugpy-station-wireframe"})
+    try:
+        with urllib.request.urlopen(req, timeout=25) as r:
+            ctype = r.headers.get("Content-Type", "")
+            if ctype and "html" not in ctype and "text" not in ctype:
+                return 415, {"error": f"not an HTML page ({ctype})"}
+            raw = r.read(WF_FETCH_MAX)
+            cs = r.headers.get_content_charset() or "utf-8"
+            return 200, {"html": raw.decode(cs, "replace"), "base": r.geturl()}
+    except Exception as exc:
+        return 502, {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def mtime_age(path: Path) -> float | None:
+    try:
+        return round(time.time() - path.stat().st_mtime, 1)
+    except OSError:
+        return None
+
+
+def health() -> dict:
+    gates = {}
+    try:
+        for p in sorted(BRIDGE_STATE.glob("*.gate")):
+            gates[p.stem] = "open"
+    except OSError:
+        pass
+    rc, _ = run(["systemctl", "is-active", "--quiet", "keeper-broker"],
+                timeout=10)
+    rc2, _ = run(["systemctl", "is-active", "--quiet", "vm-bridge"],
+                 timeout=10)
+    tail = []
+    try:
+        with open(AUDIT, encoding="utf-8") as f:
+            tail = [json.loads(x) for x in f.readlines()[-10:]]
+    except (OSError, ValueError):
+        pass
+    return {
+        "fleet_feed_age_s": mtime_age(FLEET_JSON),
+        "vms_json_age_s": mtime_age(VMS_JSON),
+        "keeper_broker": "active" if rc == 0 else "inactive",
+        "vm_bridge": "active" if rc2 == 0 else "inactive",
+        "gates": gates,
+        "protected": sorted(PROTECTED),
+        "audit_tail": tail,
+    }
+
+
+class Handler(BaseHTTPRequestHandler):
+    server_version = "console-api/1.0"
+
+    def _send(self, code: int, obj: dict) -> None:
+        body = json.dumps(obj).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):  # journald gets one line per request
+        print("%s %s" % (self.address_string(), fmt % args), flush=True)
+
+    def _body_json(self, cap: int = DESIGN_MAX) -> dict | None:
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return None
+        if n <= 0 or n > cap:
+            return None
+        try:
+            data = json.loads(self.rfile.read(n).decode("utf-8", "replace"))
+        except ValueError:
+            return None
+        return data if isinstance(data, dict) else None
+
+    # -- GET -----------------------------------------------------------------
+    def do_GET(self):
+        path = self.path.split("?", 1)[0].rstrip("/")
+        if path == "/api/vms":
+            return self._send(200, {"vms": vm_rows()})
+        if path == "/api/health":
+            return self._send(200, health())
+        if path == "/api/models":
+            code, body = hugpy_models_list()
+            return self._send(code, body)
+        if path == "/api/console/assist-env":
+            return self._send(200, {"ok": True, "fields": {
+                "HUGPY_API_KEY": {"set": bool(hugpy_api_key())},
+                "HUGPY_ASSIST_MODEL": {
+                    "value": _HUGPY_CFG.get("HUGPY_ASSIST_MODEL") or None},
+            }})
+        if path == "/api/wf/fetch":
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            code, obj = wf_fetch((qs.get("url") or [""])[0].strip())
+            return self._send(code, obj)
+        m = re.match(r"^/api/vm/([^/]+)/todo/discord$", path)
+        if m:                                # bridge status (endpoint never echoed)
+            name = m.group(1)
+            ent = discord_cfg_load().get(name)
+            if not ent or not ent.get("endpoint"):
+                return self._send(200, {"vm": name, "configured": False})
+            return self._send(200, {
+                "vm": name, "configured": True,
+                "channel": ent.get("channel", "?"),
+                "since": ent.get("since"), "last_ok": ent.get("last_ok"),
+                "last_error": ent.get("last_error"),
+                "poll_s": TODO_DISCORD_POLL})
+        m = re.match(r"^/api/vm/([^/]+)/design$", path)
+        if m:
+            name = m.group(1)
+            if not NAME_RE.match(name) or vm_state(name) is None:
+                return self._send(404, {"error": f"unknown vm {name}"})
+            if vm_state(name) != "RUNNING":
+                return self._send(409, {"error": f"{name} is not running"})
+            rc, out = design_read(name)
+            if rc != 0:
+                return self._send(404, {"ok": False,
+                                        "error": f"no {DESIGN_PATH} in {name}"})
+            try:
+                state = json.loads(out)
+            except ValueError:
+                return self._send(502, {"ok": False,
+                                        "error": f"{DESIGN_PATH} is not valid JSON"})
+            return self._send(200, {"ok": True, "vm": name,
+                                    "path": DESIGN_PATH, "state": state})
+        m = re.match(r"^/api/vm/([^/]+)/todo$", path)
+        if m:
+            name = m.group(1)
+            if not NAME_RE.match(name) or vm_state(name) is None:
+                return self._send(404, {"error": f"unknown vm {name}"})
+            if vm_state(name) != "RUNNING":
+                return self._send(409, {"error": f"{name} is not running"})
+            state, err = todo_read(name)
+            if state is None:
+                return self._send(502, {"ok": False, "error": err})
+            return self._send(200, {"ok": True, "vm": name,
+                                    "path": TODO_PATH, "state": state})
+        m = re.match(r"^/api/vm/([^/]+)/keeper$", path)
+        if m:
+            name = m.group(1)
+            if not NAME_RE.match(name) or vm_state(name) is None:
+                return self._send(404, {"error": f"unknown vm {name}"})
+            if vm_state(name) != "RUNNING":
+                return self._send(200, {"vm": name, "keeper": False,
+                                        "reason": "vm not running",
+                                        "agents": KEEPER_AGENTS})
+            live = keeper_session(name)
+            resp = {"vm": name, "keeper": live, "agents": KEEPER_AGENTS}
+            if live:
+                agent = keeper_agent(name)
+                if agent:
+                    resp["agent"] = agent
+            # Additive per-agent detail (2026-07-27) so the console can show and
+            # control each keeper independently instead of guessing from one
+            # bool. `keeper`/`agents`/`agent` above keep their old meaning, so an
+            # older UI is unaffected.
+            gate = keeper_gate(name)
+            resp["sessions"] = {
+                a: {"session": session_of(a),
+                    "live": keeper_session(name, a),
+                    # enabled is null for an ungated agent -- meaningfully
+                    # different from false ("blocked"), which a bare bool
+                    # would flatten into "off".
+                    "enabled": gate.get(a) if a in GATEABLE else None,
+                    "gateable": a in GATEABLE}
+                for a in KEEPER_AGENTS}
+            return self._send(200, resp)
+        return self._send(404, {"error": "unknown endpoint"})
+
+    # -- POST ----------------------------------------------------------------
+    def do_POST(self):
+        if self.headers.get("X-Console") != "1":
+            return self._send(403, {"error": "missing X-Console header"})
+        path = self.path.split("?", 1)[0].rstrip("/")
+
+        if path == "/api/console/assist-env":
+            body = self._body_json() or {}
+            if body.get("op") != "set":
+                return self._send(400, {"error": "expected {op:'set', fields:{...}}"})
+            fields = body.get("fields")
+            if not isinstance(fields, dict) or not fields:
+                return self._send(400, {"error": "fields required"})
+            allowed = {"HUGPY_API_KEY", "HUGPY_ASSIST_MODEL"}
+            bad = [k for k in fields if k not in allowed]
+            if bad:
+                return self._send(400, {"error": f"unknown field(s): {bad}"})
+            updates, updated = {}, []
+            for k, v in fields.items():
+                updates[k] = str(v or "").strip()
+                updated.append(k)
+            _hugpy_env_write(updates)
+            audit({"event": "assist_env_set", "fields": updated})
+            return self._send(200, {"ok": True, "updated": updated})
+
+        m = re.match(r"^/api/vm/([^/]+)/(start|stop|restart)$", path)
+        if m:
+            name, verb = m.group(1), m.group(2)
+            if not NAME_RE.match(name):
+                return self._send(400, {"error": "bad vm name"})
+            state = vm_state(name)
+            if state is None:
+                return self._send(404, {"error": f"unknown vm {name}"})
+            if verb in ("stop", "restart") and name in PROTECTED:
+                audit({"event": "denied", "action": verb, "vm": name,
+                       "reason": "protected"})
+                return self._send(403, {"error": f"{name} is protected — "
+                                        f"{verb} refused (start is allowed)"})
+            forced = False
+            if verb == "start":
+                rc, out = run(["lxc", "start", name], timeout=120)
+            else:
+                # Graceful first (a guest without its agent up can't answer a
+                # shutdown request and would hang forever), then force — a
+                # console button must resolve, not time out silently.
+                rc, out = run(["lxc", verb, name, "--timeout", "60"],
+                              timeout=90)
+                if rc != 0:
+                    forced = True
+                    rc, out2 = run(["lxc", verb, name, "--force"], timeout=60)
+                    out = f"{out}\n[forced] {out2}".strip()
+            audit({"event": "action", "action": verb, "vm": name,
+                   "ok": rc == 0, "forced": forced, "output": out[-500:]})
+            return self._send(200 if rc == 0 else 502,
+                              {"ok": rc == 0, "action": verb, "vm": name,
+                               "forced": forced, "state": vm_state(name),
+                               "output": out[-1000:]})
+
+        m = re.match(r"^/api/vm/([^/]+)/design$", path)
+        if m:
+            name = m.group(1)
+            if not NAME_RE.match(name) or vm_state(name) is None:
+                return self._send(404, {"error": f"unknown vm {name}"})
+            if vm_state(name) != "RUNNING":
+                return self._send(409, {"error": f"{name} is not running"})
+            body = self._body_json()
+            state = (body or {}).get("state")
+            if not isinstance(state, dict) or \
+                    not isinstance(state.get("shapes"), list) or \
+                    len(state["shapes"]) > 300:
+                return self._send(400, {"error": "body must be {state: "
+                                        "{shapes: [...]}} (≤300 shapes)"})
+            rc, out = design_write(name, json.dumps(state, indent=2) + "\n")
+            audit({"event": "design_push", "vm": name, "ok": rc == 0,
+                   "shapes": len(state["shapes"])})
+            return self._send(200 if rc == 0 else 502,
+                              {"ok": rc == 0, "vm": name, "path": DESIGN_PATH,
+                               "output": out[-300:]})
+
+        m = re.match(r"^/api/vm/([^/]+)/todo/discord$", path)
+        if m:
+            # attach/detach a hugpy comms-session endpoint to this VM's board.
+            # Body {endpoint:"https://…/api/discord/session/<tok>"} or
+            # {endpoint:null} to disconnect. Probed before storing; the since
+            # cursor starts NOW so channel history is never replayed as commands.
+            name = m.group(1)
+            if not NAME_RE.match(name) or vm_state(name) is None:
+                return self._send(404, {"error": f"unknown vm {name}"})
+            body = self._body_json() or {}
+            ep = (body.get("endpoint") or "").strip().rstrip("/")
+            if not ep:
+                discord_cfg_update(name, None)
+                audit({"event": "todo_discord", "vm": name, "op": "clear"})
+                return self._send(200, {"ok": True, "vm": name,
+                                        "configured": False})
+            if not re.match(r"^https?://\S+/discord/session/\S+$", ep):
+                return self._send(400, {"error": "not a comms-session endpoint "
+                                        "URL (…/api/discord/session/<token>)"})
+            try:
+                usage = _http_json(ep, timeout=15)
+                label = str(usage.get("label") or usage.get("channel") or "?")
+            except Exception as exc:
+                return self._send(502, {"error": f"endpoint probe failed: "
+                                        f"{type(exc).__name__}: {exc}"})
+            discord_cfg_update(name, {"endpoint": ep, "since": time.time(),
+                                      "channel": label})
+            audit({"event": "todo_discord", "vm": name, "op": "set",
+                   "channel": label})
+            try:                              # hello post doubles as a send test
+                _http_json(f"{ep}/send", {"content":
+                    f"☑ todo bridge connected for **{name}** — say `list`, "
+                    f"`done tN` / `doing tN` / `del tN`, `req|add|bm <text>`, "
+                    f"or just describe work and ✨ hugpy will queue it."},
+                    timeout=15)
+            except Exception:
+                pass
+            return self._send(200, {"ok": True, "vm": name, "configured": True,
+                                    "channel": label})
+
+        m = re.match(r"^/api/vm/([^/]+)/todo(/assist)?$", path)
+        if m:
+            name, assist = m.group(1), bool(m.group(2))
+            if not NAME_RE.match(name) or vm_state(name) is None:
+                return self._send(404, {"error": f"unknown vm {name}"})
+            if vm_state(name) != "RUNNING":
+                return self._send(409, {"error": f"{name} is not running"})
+            body = self._body_json() or {}
+            state, err = todo_read(name)
+            if state is None:
+                return self._send(502, {"ok": False, "error": err})
+
+            if not assist:                       # plain op: add/update/del/replace
+                with _todo_lock:                 # o10 v4: fresh read -> apply -> write, serialized
+                    state, err = todo_read(name)
+                    if state is None:
+                        return self._send(502, {"ok": False, "error": err})
+                    state, err = todo_apply(state, body)
+                    if state is None:
+                        return self._send(400, {"ok": False, "error": err})
+                    rc, out = todo_write(name, state)
+                audit({"event": "todo_op", "vm": name, "op": body.get("op"),
+                       "ok": rc == 0, "n": len(state["items"])})
+                return self._send(200 if rc == 0 else 502,
+                                  {"ok": rc == 0, "vm": name, "state": state,
+                                   "output": out[-300:]})
+
+            # assist: hugpy acts as the to-do keeper.
+            #   mode=add  — parse a free-text ask into items and append them.
+            #   mode=tidy — PROPOSE a revised list; nothing is written until the
+            #               user applies it (op=replace) — a small local model
+            #               never silently rewrites the queue.
+            mode = body.get("mode", "add")
+            instruction = str(body.get("instruction") or "").strip()[:4000]
+            if mode == "add":
+                if not instruction:
+                    return self._send(400, {"error": "instruction required"})
+                prompt = (
+                    f"You maintain the development to-do list for VM '{name}'. "
+                    f"Convert the user's message into 1 to 6 to-do items. Each item is a "
+                    f"JSON object: {{\"type\":\"todo|request|bookmark\",\"text\":\"short "
+                    f"imperative summary\",\"note\":\"optional detail\"}}. Use type "
+                    f"'request' for asks directed at the keeper, 'bookmark' for "
+                    f"checkpoints/builds worth returning to, else 'todo'. Output ONLY a "
+                    f"JSON array of the new items, no prose, no code fences.\n\n"
+                    f"User message:\n{instruction}")
+                reply, err = hugpy_chat(prompt)
+                if reply is None:
+                    return self._send(502, {"ok": False, "error": err})
+                new = parse_items_reply(reply)
+                if not new:
+                    return self._send(502, {"ok": False,
+                                            "error": "model returned no usable items"})
+                with _todo_lock:                 # o10 v4: never append onto a pre-LLM snapshot
+                    state, err = todo_read(name)
+                    if state is None:
+                        return self._send(502, {"ok": False, "error": err})
+                    nid = todo_next_id(state["items"])
+                    added = 0
+                    for raw in new[:6]:
+                        it = todo_norm(raw, "hugpy", nid)
+                        if it:
+                            state["items"].append(it)
+                            nid += 1
+                            added += 1
+                    rc, out = todo_write(name, state)
+                audit({"event": "todo_assist", "vm": name, "mode": "add",
+                       "ok": rc == 0, "added": added})
+                return self._send(200 if rc == 0 else 502,
+                                  {"ok": rc == 0, "vm": name, "added": added,
+                                   "state": state, "output": out[-300:]})
+            if mode == "tidy":
+                prompt = (
+                    f"You maintain the development to-do list for VM '{name}'. Current "
+                    f"items as JSON:\n{json.dumps(state['items'])}\n\nRevise the list: "
+                    f"{instruction or 'deduplicate, merge related items, clarify wording, order by priority'}. "
+                    f"Rules: never drop an item whose status is not 'done' unless it "
+                    f"duplicates another; keep every bookmark; keep the same JSON item "
+                    f"shape (id,type,text,note,status,by,ts) and preserve ids of items "
+                    f"that survive. Output ONLY the full revised JSON array, no prose, "
+                    f"no code fences.")
+                reply, err = hugpy_chat(prompt, max_tokens=2000)
+                if reply is None:
+                    return self._send(502, {"ok": False, "error": err})
+                proposal = parse_items_reply(reply)
+                if not proposal:
+                    return self._send(502, {"ok": False,
+                                            "error": "model returned no usable list"})
+                audit({"event": "todo_assist", "vm": name, "mode": "tidy",
+                       "ok": True, "n": len(proposal)})
+                return self._send(200, {"ok": True, "vm": name,
+                                        "proposal": proposal})
+            if mode == "format":
+                kind = str(body.get("kind") or "").strip().lower()
+                text = str(body.get("text") or "").strip()[:4000]
+                if not text:
+                    return self._send(400, {"error": "text required"})
+                prompts = {
+                    "readability": "Restructure the text below for visual readability using minimal markdown: short paragraphs separated by blank lines; '- ' bullet lists where content enumerates; fenced code blocks (```bash or ```) around commands, paths-with-flags, code, or log excerpts; `inline code` for single identifiers. Preserve every fact, path, command, id, and number EXACTLY as written \u2014 never add, drop, or reword technical content. Return ONLY the restructured markdown, no preamble.",
+                    "listify": "Convert the text below into a markdown bullet list: one '- ' bullet per distinct point, sub-points indented two spaces under their parent. Preserve every fact, path, command, id, and number EXACTLY as written; add nothing. Return ONLY the list, no preamble.",
+                    "proposal": "Rewrite the text below as a concise decision brief with exactly three labelled sections: a line 'Pros:' then one '- ' bullet per pro, a line 'Cons:' then one '- ' bullet per con, and a line 'Recommendation:' then a single line naming the recommended choice and the one reason that decides it. Use only pros and cons the text states or directly implies; preserve every fact, path, command, id, and number EXACTLY as written. Return ONLY those three sections, no preamble.",
+                }
+                p = prompts.get(kind)
+                if not p:
+                    return self._send(400, {"error": f"unknown format kind {kind!r}"})
+                reply, err = hugpy_chat(p + "\n\nText:\n" + text, max_tokens=1500)
+                if reply is None:
+                    return self._send(502, {"ok": False, "error": err})
+                out_text = (reply or "").strip()
+                # v2 (t99): replies now legitimately EMIT fences, so unwrap only a
+                # whole-reply PROSE wrapper (bare/markdown lang, no interior fence).
+                # A ```bash reply IS the answer, never packaging.
+                fence = re.match(r"^```(?:markdown|md)?\s*\n(.*)\n```$", out_text, re.DOTALL)
+                if fence and "```" not in fence.group(1):
+                    out_text = fence.group(1).strip()
+                if not out_text:
+                    return self._send(502, {"ok": False, "error": "model returned empty text"})
+                audit({"event": "todo_assist", "vm": name, "mode": "format",
+                       "kind": kind, "ok": True})
+                return self._send(200, {"ok": True, "vm": name, "kind": kind,
+                                        "result": out_text})
+            return self._send(400, {"error": f"unknown mode {mode!r}"})
+
+        m = re.match(r"^/api/vm/([^/]+)/compose$", path)
+        if m:
+            name = m.group(1)
+            if not NAME_RE.match(name) or vm_state(name) is None:
+                return self._send(404, {"ok": False,
+                                        "error": f"unknown vm {name}"})
+            body = self._body_json() or {}
+            op = body.get("op")
+            text = str(body.get("text") or "").strip()
+            if op == "refine":
+                # host-side only (no VM touch), so a stopped VM may still refine
+                if not text:
+                    return self._send(400, {"ok": False, "error": "text required"})
+                reply, err = hugpy_chat(
+                    COMPOSE_REFINE_PROMPT + "\n\nDraft:\n" + text[:COMPOSE_REFINE_MAX],
+                    max_tokens=2000)   # hugpy_chat: 150s/attempt + 1 cold-load retry
+                if reply is None:
+                    return self._send(502, {"ok": False, "error": err})
+                out_text = (reply or "").strip()
+                fence = re.match(r"^```[a-zA-Z]*\s*\n(.*)\n```$", out_text, re.DOTALL)
+                if fence:
+                    out_text = fence.group(1).strip()
+                if not out_text:
+                    return self._send(502, {"ok": False,
+                                            "error": "model returned empty text"})
+                audit({"event": "compose", "vm": name, "op": "refine",
+                       "ok": True, "chars": len(out_text)})
+                return self._send(200, {"ok": True, "vm": name,
+                                        "refined": out_text})
+            if op == "send":
+                if not text:
+                    return self._send(400, {"ok": False, "error": "text required"})
+                if len(text) > COMPOSE_SEND_MAX:
+                    return self._send(400, {"ok": False, "error":
+                                            f"text too long (max {COMPOSE_SEND_MAX} chars)"})
+                if vm_state(name) != "RUNNING":
+                    return self._send(409, {"ok": False,
+                                            "error": f"{name} is not running"})
+                # conservative shape control before a live keeper reads it:
+                # C0 controls (except \n \t) -> spaces. The MEANING is the
+                # operator's own — same accepted core as the Discord relay.
+                text = re.sub(r"[\x00-\x08\x0b-\x1f\x7f]", " ", text)
+                with _todo_lock:                 # o10 v4: same serialized RMW
+                    state, err = todo_read(name)
+                    if state is None:
+                        return self._send(502, {"ok": False, "error": err})
+                    if len(state["items"]) >= TODO_MAX_ITEMS:
+                        return self._send(400, {"ok": False, "error":
+                                                f"list is full (>{TODO_MAX_ITEMS})"})
+                    it = todo_norm({"type": "request", "text": text}, "console",
+                                   todo_next_id(state["items"]))
+                    if not it:
+                        return self._send(400, {"ok": False, "error": "text required"})
+                    if len(text) > 500:   # todo_norm truncated it; keep the whole
+                        it["comments"] = [{"by": "console", "ts": int(time.time()),
+                                           "text": text[:2000]}]
+                    # o10: never mint an id an existing item already holds
+                    _ids = {str(x.get("id")) for x in state["items"] if isinstance(x, dict)}
+                    while str(it.get("id")) in _ids:
+                        _m = re.match(r"^([A-Za-z]+)(\d+)$", str(it.get("id")))
+                        it["id"] = (_m.group(1) + str(int(_m.group(2)) + 1)) if _m else (str(it.get("id")) + "x")
+                    state["items"].append(it)
+                    rc, out = todo_write(name, state)
+                audit({"event": "compose", "vm": name, "op": "send",
+                       "ok": rc == 0, "id": it["id"], "chars": len(text)})
+                if rc != 0:
+                    return self._send(502, {"ok": False, "error":
+                                            "board write failed: " + out[-200:]})
+                return self._send(200, {"ok": True, "vm": name, "id": it["id"]})
+            return self._send(400, {"ok": False, "error": "unknown op"})
+
+        # POST /api/vm/<vm>/keeper/gate {agent, enabled} — the enable flag the
+        # keeper timers read. Previously an SSH-only `touch`/`rm`, so the
+        # console could not show or change whether a keeper was even allowed to
+        # run. Disabling deliberately does NOT kill a live session (that is the
+        # flag's documented contract); the UI offers stop separately.
+        m = re.match(r"^/api/vm/([^/]+)/keeper/gate$", path)
+        if m:
+            name = m.group(1)
+            if not NAME_RE.match(name) or vm_state(name) is None:
+                return self._send(404, {"error": f"unknown vm {name}"})
+            if vm_state(name) != "RUNNING":
+                return self._send(409, {"error": f"{name} is not running"})
+            body = self._body_json() or {}
+            agent = str(body.get("agent") or "claude").strip()
+            if agent not in GATEABLE:
+                return self._send(400, {"ok": False, "vm": name,
+                                        "error": f"agent {agent!r} is not gateable "
+                                                 f"(gateable: {sorted(GATEABLE)})"})
+            if "enabled" not in body:
+                return self._send(400, {"ok": False, "vm": name,
+                                        "error": "body must carry 'enabled' (bool)"})
+            enabled = bool(body.get("enabled"))
+            rc, out = keeper_gate_set(name, agent, enabled)
+            audit({"event": "keeper_gate", "vm": name, "agent": agent,
+                   "enabled": enabled, "ok": rc == 0, "output": out[-300:]})
+            return self._send(200 if rc == 0 else 502,
+                              {"ok": rc == 0, "vm": name, "agent": agent,
+                               "enabled": keeper_gate(name).get(agent),
+                               "output": out[-500:]})
+
+        # POST /api/vm/<vm>/keeper/stop {agent} — kill THAT agent's session.
+        # Needed alongside the gate because disabling only stops the keeper
+        # coming back; without this the UI could never stop a running one.
+        m = re.match(r"^/api/vm/([^/]+)/keeper/stop$", path)
+        if m:
+            name = m.group(1)
+            if not NAME_RE.match(name) or vm_state(name) is None:
+                return self._send(404, {"error": f"unknown vm {name}"})
+            if vm_state(name) != "RUNNING":
+                return self._send(409, {"error": f"{name} is not running"})
+            body = self._body_json() or {}
+            agent = str(body.get("agent") or "claude").strip()
+            if agent not in KEEPER_AGENTS:
+                return self._send(400, {"ok": False, "vm": name,
+                                        "error": f"unknown agent {agent!r}"})
+            rc, out = keeper_kill(name, agent)
+            audit({"event": "keeper_stop", "vm": name, "agent": agent,
+                   "ok": rc == 0, "output": out[-300:]})
+            # rc is not the verdict: killing an absent session is nonzero but
+            # the postcondition (that agent not running) still holds.
+            still = keeper_session(name, agent)
+            return self._send(200, {"ok": not still, "vm": name, "agent": agent,
+                                    "keeper": still, "output": out[-500:]})
+
+        m = re.match(r"^/api/vm/([^/]+)/keeper/launch$", path)
+        if m:
+            name = m.group(1)
+            if not NAME_RE.match(name) or vm_state(name) is None:
+                return self._send(404, {"error": f"unknown vm {name}"})
+            if vm_state(name) != "RUNNING":
+                return self._send(409, {"error": f"{name} is not running"})
+            body = self._body_json() or {}
+            # agent optional; empty/absent body == "claude" (today's only
+            # path, byte-compatible). Must be one of the advertised agents;
+            # an unknown name is refused (a UI chooser bug surfaces here
+            # rather than silently defaulting to claude).
+            agent = str(body.get("agent") or "claude").strip()
+            if agent not in KEEPER_AGENTS or agent not in KEEPER_LAUNCHERS:
+                return self._send(400, {"ok": False, "vm": name,
+                                        "error": f"unknown agent {agent!r}"})
+            # replace:true SWITCHES a live keeper — kill the shared session
+            # first, then launch the chosen agent. Without it, launching
+            # while a session exists keeps the post-o16 no-op/ensure
+            # semantics untouched. Killing an absent session is a harmless
+            # no-op (rc ignored).
+            replace = bool(body.get("replace"))
+            if replace:
+                keeper_kill(name, agent)
+            launcher = keeper_launch_hugpy if agent == "hugpy" else keeper_launch
+            rc, out = launcher(name)
+            rec = {"event": "keeper_launch", "vm": name, "agent": agent,
+                   "ok": rc == 0, "output": out[-300:]}
+            if replace:
+                rec["replace"] = True
+            audit(rec)
+            return self._send(200 if rc == 0 else 502,
+                              {"ok": rc == 0, "vm": name, "agent": agent,
+                               "keeper": keeper_session(name, agent),
+                               "output": out[-500:]})
+
+        return self._send(404, {"error": "unknown endpoint"})
+
+
+def main() -> None:
+    srv = ThreadingHTTPServer(BIND, Handler)
+    print(f"console-api listening on {BIND[0]}:{BIND[1]} "
+          f"(protected: {sorted(PROTECTED)})", flush=True)
+    audit({"event": "console_api_start"})
+    threading.Thread(target=todo_discord_loop, daemon=True,
+                     name="todo-discord").start()
+    srv.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

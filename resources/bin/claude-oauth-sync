@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# claude-oauth-sync — ONE long-lived Claude OAuth token for the whole fleet.
+#
+# Why: every Claude seat (frontier seat, mct's `claude -p` child, in-VM keeper)
+# used to share ~/.claude/.credentials.json, whose refresh token ROTATES on use;
+# atomic rewrites turned the shared symlink into diverging copies and seats
+# started failing auth ("Failed to authenticate") at random. A `claude
+# setup-token` token is long-lived and read from $CLAUDE_CODE_OAUTH_TOKEN, so
+# nothing rotates and nothing is shared on disk between seats.
+#
+#   claude-oauth-sync --set            # paste the token from `claude setup-token` on stdin
+#   claude-oauth-sync                  # (re)install on host + every LXC VM + every ssh host
+#   claude-oauth-sync --host           # this host only
+#   claude-oauth-sync --vm NAME        # one LXC VM (vm-new calls this)
+#   claude-oauth-sync --ssh NAME       # one ssh host from ssh-hosts.json
+#   claude-oauth-sync --status         # where the token is installed
+#
+# Source of truth: $HUGPY_STATION_STATE/claude-oauth-token (mode 600).
+# On each locus the token lands in ~/.claude-oauth.env and is sourced from
+# ~/.profile (every seat is launched through `bash -lc`) and from
+# ~/.config/environment.d (systemd --user units, e.g. the keeper timer).
+set -u
+STATE="${HUGPY_STATION_STATE:-$HOME/.config/hugpy-station}"
+TOKEN_FILE="$STATE/claude-oauth-token"
+ENV_FILE='.claude-oauth.env'     # relative to the locus user's $HOME
+HOOK='[ -r "$HOME/.claude-oauth.env" ] && . "$HOME/.claude-oauth.env"  # claude-oauth-sync'
+
+die() { echo "claude-oauth-sync: $*" >&2; exit 1; }
+
+# The bash snippet that installs the token on ONE locus; $1 = token.
+install_snippet() {
+  local tok=$1
+  cat <<EOF
+set -u
+umask 077
+printf 'export CLAUDE_CODE_OAUTH_TOKEN=%q\n' '$tok' > "\$HOME/$ENV_FILE"
+chmod 600 "\$HOME/$ENV_FILE"
+touch "\$HOME/.profile"
+grep -qF 'claude-oauth-sync' "\$HOME/.profile" || printf '\n%s\n' '$HOOK' >> "\$HOME/.profile"
+mkdir -p "\$HOME/.config/environment.d"
+printf 'CLAUDE_CODE_OAUTH_TOKEN=%s\n' '$tok' > "\$HOME/.config/environment.d/90-claude-oauth.conf"
+chmod 600 "\$HOME/.config/environment.d/90-claude-oauth.conf"
+echo "  installed for \$(id -un)@\$(hostname) -> \$HOME/$ENV_FILE"
+EOF
+}
+
+read_token() {
+  [ -r "$TOKEN_FILE" ] || die "no token yet — run: claude setup-token   then: claude-oauth-sync --set"
+  tr -d ' \r\n' < "$TOKEN_FILE"
+}
+
+do_set() {
+  mkdir -p "$STATE"; chmod 700 "$STATE" 2>/dev/null || true
+  local tok
+  if [ -t 0 ]; then
+    printf 'Paste the token printed by `claude setup-token` (sk-ant-oat01-…): '
+    IFS= read -r tok
+  else
+    tok=$(cat)
+  fi
+  tok=$(printf '%s' "$tok" | tr -d ' \r\n')
+  case "$tok" in sk-ant-oat*) ;; *) die "that does not look like a setup-token (expected sk-ant-oat…)";; esac
+  ( umask 077; printf '%s\n' "$tok" > "$TOKEN_FILE" )
+  echo "stored $TOKEN_FILE"
+}
+
+sync_host() { bash -c "$(install_snippet "$1")"; }
+
+sync_vm() {   # $1 token, $2 vm
+  lxc info "$2" >/dev/null 2>&1 || { echo "  vm $2: not found" >&2; return 1; }
+  lxc exec "$2" -- sudo -u ubuntu -H bash -c "$(install_snippet "$1")" \
+    || echo "  vm $2: FAILED" >&2
+}
+
+ssh_argv() {  # $1 host name -> prints an ssh command line for it
+  python3 - "$STATE/ssh-hosts.json" "$1" "$STATE/fleet_ssh_key" <<'PY'
+import json, sys, shlex, os
+hosts = json.load(open(sys.argv[1])); h = hosts[sys.argv[2]]
+argv = ["ssh", "-o", "StrictHostKeyChecking=accept-new", "-o", "LogLevel=ERROR",
+        "-o", "ConnectTimeout=8", "-p", str(h.get("port", 22))]
+key = h.get("key") or (sys.argv[3] if os.path.exists(sys.argv[3]) else "")
+if key: argv += ["-o", "IdentitiesOnly=yes", "-i", key]
+argv.append(f"{h.get('user', 'root')}@{h['host']}")
+print(" ".join(shlex.quote(a) for a in argv))
+PY
+}
+
+sync_ssh() {  # $1 token, $2 host name
+  local cmd; cmd=$(ssh_argv "$2") || { echo "  ssh $2: unknown host" >&2; return 1; }
+  install_snippet "$1" | eval "$cmd bash -s" || echo "  ssh $2: FAILED" >&2
+}
+
+all_vms()  { lxc list -c n --format csv 2>/dev/null; }
+all_ssh()  { [ -r "$STATE/ssh-hosts.json" ] && python3 -c 'import json,sys;print("\n".join(json.load(open(sys.argv[1]))))' "$STATE/ssh-hosts.json"; }
+
+case "${1:-}" in
+  --set)    do_set ;;
+  --status)
+    if [ -r "$TOKEN_FILE" ]; then echo "token: $TOKEN_FILE ($(stat -c %y "$TOKEN_FILE" | cut -c1-19))"; else echo "token: NOT SET"; fi
+    [ -r "$HOME/$ENV_FILE" ] && echo "host : installed" || echo "host : missing"
+    for v in $(all_vms); do
+      lxc exec "$v" -- sudo -u ubuntu -H test -r "/home/ubuntu/$ENV_FILE" 2>/dev/null && echo "vm   $v: installed" || echo "vm   $v: missing"
+    done
+    for s in $(all_ssh); do
+      cmd=$(ssh_argv "$s") && eval "$cmd test -r \"\\\$HOME/$ENV_FILE\"" 2>/dev/null && echo "ssh  $s: installed" || echo "ssh  $s: missing"
+    done ;;
+  --host)   sync_host "$(read_token)" ;;
+  --vm)     sync_vm  "$(read_token)" "${2:?vm name}" ;;
+  --ssh)    sync_ssh "$(read_token)" "${2:?ssh host name}" ;;
+  -h|--help) sed -n '2,20p' "$0" ;;
+  "")
+    tok=$(read_token)
+    echo "host:";  sync_host "$tok"
+    for v in $(all_vms); do echo "vm $v:";  sync_vm  "$tok" "$v"; done
+    for s in $(all_ssh); do echo "ssh $s:"; sync_ssh "$tok" "$s"; done
+    echo "done. Restart the station app (or relaunch seats) so running processes pick the token up." ;;
+  *) die "unknown option $1 (see --help)" ;;
+esac

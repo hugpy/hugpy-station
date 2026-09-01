@@ -1,0 +1,15 @@
+Per-agent keeper enable flags for THIS vm.
+
+  claude.enabled   present -> the Claude keeper (station-keeper.timer) may run.
+                   absent  -> it does nothing. Claude spends metered API tokens,
+                              so it is opt-in per VM, never a silent default.
+
+The hugpy keeper is NOT gated here: it runs on the local fleet gateway, costs
+nothing, and is the fleet default -- it should just run.
+
+  enable  claude:  touch /opt/llm-station/keeper-agents.d/claude.enabled
+  disable claude:  rm    /opt/llm-station/keeper-agents.d/claude.enabled
+
+Disabling stops the keeper COMING BACK; it never kills a live session. To stop
+one that is already running:  tmux -L console kill-session -t =keeper   (the = is REQUIRED: without it
+                                       tmux prefix-matches and kills keeper-local)

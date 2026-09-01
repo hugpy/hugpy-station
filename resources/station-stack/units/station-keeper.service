@@ -1,0 +1,14 @@
+[Unit]
+Description=Station keeper — persistent in-VM Claude warden (tmux socket 'console', session 'keeper-mct' — one named session per backend)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=%GROUP%
+Environment=HOME=/home/ubuntu
+ExecStart=/opt/station-keeper/keeper-ensure.sh %STATION%
+# The keeper lives in a tmux server that this oneshot forks off. Without this,
+# systemd's default cgroup cleanup kills that server the moment ExecStart exits.
+KillMode=process

@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VM console</title>
+<style>
+  :root { color-scheme: dark; --bg:#0e1116; --fg:#d7dde5; --dim:#8b95a3; --line:#222a35;
+          --ok:#3fb950; --bad:#f85149; --warn:#d29922; --accent:#2f81f7; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.45 ui-sans-serif,system-ui,sans-serif;
+         height:100vh; display:flex; flex-direction:column; }
+  header { display:flex; align-items:center; gap:12px; padding:8px 12px; border-bottom:1px solid var(--line);
+           flex-wrap:wrap; }
+  h1 { font-size:15px; margin:0; font-weight:600; }
+  select, button { font:inherit; color:var(--fg); background:#161b22; border:1px solid var(--line);
+                   border-radius:6px; padding:5px 10px; cursor:pointer; }
+  button:hover:not(:disabled) { border-color:var(--accent); }
+  button:disabled { opacity:.5; cursor:default; }
+  .pill { display:inline-flex; align-items:center; gap:6px; padding:3px 9px; border-radius:999px;
+          border:1px solid var(--line); font-size:12px; }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--dim); }
+  .dot.ok { background:var(--ok); } .dot.bad { background:var(--bad); } .dot.warn { background:var(--warn); }
+  .spacer { flex:1; }
+  #msg { font-size:12px; min-height:16px; padding:0 12px 6px; color:var(--dim); }
+  #msg.ok { color:var(--ok); } #msg.bad { color:var(--bad); }
+  main { flex:1; display:flex; gap:1px; background:var(--line); min-height:0; }
+  .pane { flex:1; display:flex; flex-direction:column; background:var(--bg); min-width:0; }
+  .pane > .cap { font-size:11px; letter-spacing:.06em; text-transform:uppercase; color:var(--dim);
+                 padding:4px 10px; display:flex; align-items:center; gap:8px; }
+  .pane iframe { flex:1; width:100%; border:0; background:#000; }
+  .cap button { padding:1px 7px; font-size:11px; }
+  a { color:var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>VM console</h1>
+  <select id="vm" title="virtual machine"></select>
+  <span class="pill"><span class="dot" id="dot"></span><span id="state">…</span></span>
+  <span class="spacer"></span>
+  <button id="b-start">start</button>
+  <button id="b-restart">restart</button>
+  <button id="b-stop">stop</button>
+  <a id="fleet" href="/" title="full fleet console">fleet console →</a>
+</header>
+<div id="msg"></div>
+<main id="panes"></main>
+
+<script>
+/* Single-VM console page — the vm-console surface (dual keeper/shell panes +
+   power) served under console.abstractendeavors.com, behind the SAME auth wall
+   as everything else here. Additive by design: this file is new, so the fleet
+   console's index.html — the operator's live channel to every keeper — is not
+   touched by shipping it.
+
+   It speaks the HOST contract, not the in-VM one. That distinction is the whole
+   reason the in-VM page could not simply be mounted here:
+     in-VM   /term/?arg=<MODE>          (arg is the session; the VM is implicit)
+     host    /term/?arg=<VM>&arg=<SESS> (arg #1 is the VM, validated against
+                                         live `lxc list` by term-wrapper.sh)
+   Mounting the in-VM page unchanged would have made "shell" mean the VM named
+   shell — a 404 at best, the wrong machine at worst. Same for its /api/state|
+   service|keeper calls, which here live under /api/vm/<vm>/*. */
+var TERM_BASE = "/term";
+var MODES = [
+  { mode: "keeper",       sess: "keeper",       label: "keeper" },
+  { mode: "keeper:hugpy", sess: "keeper-local", label: "local keeper" },
+  { mode: "shell",        sess: null,           label: "shell" }
+];
+var busy = false, vms = [], current = null;
+
+function qs(k) { return new URLSearchParams(location.search).get(k); }
+function msg(t, kind) { var e = document.getElementById("msg"); e.textContent = t || ""; e.className = kind || ""; }
+
+/* Mirrors the fleet console's api(): a non-2xx NEVER resolves, and console-api
+   reports failure as {"error": "..."} with no ok field. Every POST carries
+   X-Console: 1 — console-api hard-403s without it. */
+function api(path, opts) {
+  opts = opts || {};
+  var h = { "Content-Type": "application/json" };
+  if (opts.method && opts.method !== "GET") h["X-Console"] = "1";
+  return fetch("/api" + path, { method: opts.method || "GET", headers: h,
+                                body: opts.body ? JSON.stringify(opts.body) : undefined,
+                                cache: "no-store" })
+    .then(function (r) {
+      return r.text().then(function (t) {
+        var j = null; try { j = t ? JSON.parse(t) : null; } catch (e) {}
+        if (!r.ok) throw new Error((j && j.error) || ("HTTP " + r.status));
+        return j;
+      });
+    });
+}
+
+function termURL(vm, m) {
+  return TERM_BASE + "/?arg=" + encodeURIComponent(vm) +
+         (m.sess ? "&arg=" + encodeURIComponent(m.sess) : "");
+}
+
+/* One iframe per (vm, mode). Reload = remount, never a fragment bump: changing
+   only a fragment is not a navigation, so it would never reload the terminal
+   (the lesson already paid for in the fleet console's pane code). */
+function renderPanes(vm) {
+  var host = document.getElementById("panes");
+  host.textContent = "";
+  MODES.forEach(function (m) {
+    var pane = document.createElement("div"); pane.className = "pane";
+    var cap = document.createElement("div"); cap.className = "cap";
+    var name = document.createElement("span"); name.textContent = m.label;
+    var re = document.createElement("button"); re.textContent = "reload";
+    cap.appendChild(name); cap.appendChild(re);
+    var f = document.createElement("iframe");
+    f.src = termURL(vm, m); f.title = vm + " " + m.label;
+    re.onclick = function () { var s = f.src; f.src = "about:blank"; setTimeout(function () { f.src = s; }, 60); };
+    pane.appendChild(cap); pane.appendChild(f); host.appendChild(pane);
+  });
+}
+
+function paintState() {
+  var v = vms.filter(function (x) { return x.name === current; })[0];
+  var st = v ? (v.state || "?") : "?";
+  document.getElementById("state").textContent = st;
+  document.getElementById("dot").className = "dot " +
+    (st === "RUNNING" ? "ok" : st === "STOPPED" ? "bad" : "warn");
+  var running = st === "RUNNING";
+  document.getElementById("b-start").disabled = busy || running;
+  document.getElementById("b-stop").disabled = busy || !running;
+  document.getElementById("b-restart").disabled = busy || !running;
+}
+
+function loadVMs() {
+  return api("/vms").then(function (j) {
+    vms = (j && j.vms) || [];
+    var sel = document.getElementById("vm");
+    sel.textContent = "";
+    vms.forEach(function (v) {
+      var o = document.createElement("option");
+      o.value = v.name; o.textContent = v.name; sel.appendChild(o);
+    });
+    if (!current || !vms.some(function (v) { return v.name === current; }))
+      current = (vms[0] || {}).name || null;
+    sel.value = current;
+    paintState();
+  }).catch(function (e) { msg("Could not load the VM list: " + e.message, "bad"); });
+}
+
+/* Power actions are PROTECTED-guarded and audited server-side; a refusal comes
+   back as a 4xx {"error"} and is shown as-is rather than retried or worked
+   around — the guard is the point. */
+function power(op) {
+  if (busy || !current) return;
+  busy = true; paintState(); msg(op + "ing " + current + "…");
+  api("/vm/" + encodeURIComponent(current) + "/" + op, { method: "POST" })
+    .then(function () { msg(current + " " + op + " requested", "ok"); })
+    .catch(function (e) { msg(current + ": " + e.message, "bad"); })
+    .then(function () { busy = false; return loadVMs(); })
+    .then(function () { if (op !== "stop") renderPanes(current); });
+}
+
+document.getElementById("vm").onchange = function (e) {
+  current = e.target.value;
+  history.replaceState(null, "", "?vm=" + encodeURIComponent(current));
+  paintState(); renderPanes(current); msg("");
+};
+document.getElementById("b-start").onclick = function () { power("start"); };
+document.getElementById("b-stop").onclick = function () { power("stop"); };
+document.getElementById("b-restart").onclick = function () { power("restart"); };
+
+current = qs("vm") || "console-vm";
+loadVMs().then(function () { if (current) renderPanes(current); });
+setInterval(function () { if (!busy) loadVMs(); }, 15000);
+</script>
+</body>
+</html>
