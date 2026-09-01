@@ -4007,6 +4007,30 @@ CLAUDE_OAUTH_SYNC_BIN = shutil.which("claude-oauth-sync") or (
     else "")
 
 
+# Per-locus seat-CLI provisioning (2026-09-01): a hand-added ssh host — unlike
+# a VM (vm-new installs claude) — lacks the seat user's ~/.local/bin/claude, and
+# /usr/local/bin/claude (claude-home-guard) requires exactly that, so the frontier
+# claude-code seat dies 'claude is not installed for <user>'. On ssh-host-add we
+# install the seat CLIs on the locus (claude-code needs `claude`; mct needs
+# `abstract-claude`), mirroring the token sync. Best effort; run over the locus's
+# own ssh transport via _locus_run. The check is ~/.local/bin/claude specifically
+# (the shim requires it — a PATH hit on the shim itself is not enough).
+_SEAT_CLI_PROVISION_SH = (
+    'export PATH="$HOME/.local/bin:$PATH"; '
+    'if [ ! -x "$HOME/.local/bin/claude" ]; then '
+    'curl -fsSL https://claude.ai/install.sh | bash '
+    '|| { command -v npm >/dev/null 2>&1 && npm i -g @anthropic-ai/claude-code; } || true; '
+    'fi; '
+    'if ! command -v abstract-claude >/dev/null 2>&1 && [ ! -x "$HOME/.local/bin/abstract-claude" ]; then '
+    '{ command -v pipx >/dev/null 2>&1 && pipx install abstract-claude; } '
+    '|| python3 -m pip install --user abstract-claude || true; '
+    'fi; '
+    'echo seat-provision-ssh: '
+    'claude=$([ -x "$HOME/.local/bin/claude" ] && echo ok || echo MISSING) '
+    'abstract-claude=$(command -v abstract-claude >/dev/null 2>&1 && echo ok || echo MISSING)'
+)
+
+
 def _export_fleet_oauth_token() -> bool:
     try:
         tok = CLAUDE_OAUTH_TOKEN_PATH.read_text().strip()
@@ -4166,6 +4190,10 @@ async def api_ssh_hosts(request):
             # it like a new VM does — best effort, never blocks the add.
             if CLAUDE_OAUTH_TOKEN_PATH.is_file() and CLAUDE_OAUTH_SYNC_BIN:
                 asyncio.create_task(_run(CLAUDE_OAUTH_SYNC_BIN, "--ssh", name))
+            # Install the seat CLIs on the new locus so both frontier backends
+            # work (claude-code + mct); a hand-added ssh host is not provisioned
+            # like a VM. Best effort, long timeout, never blocks the add.
+            asyncio.create_task(_locus_run(name, _SEAT_CLI_PROVISION_SH, timeout=900))
         elif op == "delete":
             if hosts.pop(name, None) is None:
                 return web.json_response({"error": "no such ssh host"}, status=404)
