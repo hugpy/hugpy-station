@@ -37,6 +37,17 @@ cp -f "$DEB" "$DEB.sha256" "$SHELF/edit/"
 echo ">> promoting $VER"
 "$SHELF/release.sh" promote "$VER"
 
+# Mirror the committed station-app tree to github.com/hugpy/hugpy-station.
+# Best effort: a failed mirror WARNS, it never fails the promote above.
+GH_SYNC="${HUGPY_STATION_GH_SYNC:-/srv/vm_mgr/bin/sync-hugpy-station-github.sh}"
+if [ "${HUGPY_STATION_GH_SYNC_SKIP:-0}" != 1 ] && [ -x "$GH_SYNC" ]; then
+  echo ">> mirroring station-app @ HEAD to GitHub ($GH_SYNC)"
+  "$GH_SYNC" "$(git -C "$SRC" rev-parse HEAD)" \
+    || echo "WARN: GitHub mirror failed (rc=$?) — promote stands; re-run: $GH_SYNC" >&2
+else
+  echo "WARN: GitHub mirror skipped (HUGPY_STATION_GH_SYNC_SKIP=1 or $GH_SYNC not executable)" >&2
+fi
+
 echo
 echo ">> release status:"
 "$SHELF/release.sh" status
