@@ -5,7 +5,7 @@
 # (0600). The backend loads it at startup, uses it for every toolserver call
 # (loci-sync, handoffs, exchanges) and exports it to every seat it spawns.
 #
-#   hugpy-station-toolserver set <token> [--url https://toolserver.hugpy.ai]
+#   hugpy-station-toolserver set <token> [--url https://dev.hugpy.ai/toolserver]   # url only for a REMOTE toolserver
 #   hugpy-station-toolserver status
 #   hugpy-station-toolserver test          # loci/list against the toolserver with the stored token
 #
@@ -17,6 +17,9 @@ F="$STATE/toolserver.env"
 die() { echo "hugpy-station-toolserver: $*" >&2; exit 1; }
 url_of() { sed -n 's/^STATION_CONSOLE_TOOLSERVER=//p' "$F" 2>/dev/null | head -1; }
 tok_of() { sed -n 's/^HUGPY_OPERATOR_TOKEN=//p' "$F" 2>/dev/null | head -1; }
+# no configured url -> the toolserver ADVERTISED on this host (abstract-toolserver)
+disc_url() { local c; c="$(command -v abstract-toolserver 2>/dev/null || echo "$HOME/.local/share/station-seats/venv/bin/abstract-toolserver")"
+             [ -x "$c" ] && "$c" endpoint 2>/dev/null | head -1; }
 case "${1:-}" in
   set)
     TOK="${2:-}"; URL=""
@@ -30,14 +33,14 @@ case "${1:-}" in
         [ -n "$URL" ] && echo "STATION_CONSOLE_TOOLSERVER=$URL"
         echo "HUGPY_OPERATOR_TOKEN=$TOK"; } > "$F.tmp" && mv -f "$F.tmp" "$F" )
     chmod 600 "$F"
-    echo "stored $F (url: ${URL:-default https://toolserver.hugpy.ai})"
+    echo "stored $F (url: ${URL:-none — discovered on this host: $(disc_url || true)})"
     echo "restart hugpy-station (or POST /api/toolserver/config) for the running station to pick it up" ;;
   status)
-    if [ -r "$F" ]; then t="$(tok_of)"; echo "file : $F"; echo "url  : $(url_of)"; [ -z "$(url_of)" ] && echo "       (default https://toolserver.hugpy.ai)"; echo "token: ${t:0:4}…${t: -2} (${#t} chars)"
+    if [ -r "$F" ]; then t="$(tok_of)"; echo "file : $F"; echo "url  : $(url_of)"; [ -z "$(url_of)" ] && echo "       (not configured; discovered: $(disc_url || echo none))"; echo "token: ${t:0:4}…${t: -2} (${#t} chars)"
     else echo "no credential: $F absent — run: hugpy-station-toolserver set <token>"; exit 1; fi ;;
   test)
     t="$(tok_of)"; [ -n "$t" ] || die "no token stored (set one first)"
-    u="$(url_of)"; u="${u:-https://toolserver.hugpy.ai}"
+    u="$(url_of)"; [ -n "$u" ] || u="$(disc_url || true)"; [ -n "$u" ] || die "no toolserver url configured and none advertised on this host"
     code=$(curl -s -m 10 -o /tmp/.hst.$$ -w '%{http_code}' -H "X-Operator-Token: $t" -H 'Content-Type: application/json' "$u/loci/list" -d '{}' || true)
     if [ "$code" = 200 ]; then echo "ok: $u accepts the token; loci: $(python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["result"]; print(len(d if isinstance(d,list) else d.get("loci") or d.get("rows") or []))' /tmp/.hst.$$ 2>/dev/null)"; rm -f /tmp/.hst.$$
     else rm -f /tmp/.hst.$$; die "$u answered $code (401 = wrong token, 000 = unreachable)"; fi ;;

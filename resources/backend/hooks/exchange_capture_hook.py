@@ -16,8 +16,8 @@ Design notes:
     immediately.
   - SELF-CONTAINED auth: URL + token come from the seat's own toolserver MCP
     config (~/.claude.json → mcpServers.toolserver.env), overridable by env.
-    EXCHANGE_INGEST_URL is preferred (lets a same-host seat use 127.0.0.1:7004
-    instead of the public TLS endpoint).
+    EXCHANGE_INGEST_URL is preferred; with nothing configured, the toolserver
+    ADVERTISED on this host is discovered (abstract-toolserver discovery).
 """
 import json
 import os
@@ -25,8 +25,33 @@ import sys
 import urllib.request
 
 
+def _discovered_toolserver():
+    """The toolserver advertised on this host (abstract-toolserver discovery):
+    the package when importable, else its CLI; '' when neither finds one."""
+    try:
+        from abstract_toolserver import discovery
+        return ((discovery.find_endpoint() or {}).get("url") or "").rstrip("/")
+    except ImportError:
+        pass
+    except Exception:
+        return ""
+    import shutil
+    import subprocess
+    for cli in (shutil.which("abstract-toolserver"),
+                os.path.expanduser("~/.local/share/station-seats/venv/bin/abstract-toolserver")):
+        if cli and os.path.exists(cli):
+            try:
+                r = subprocess.run([cli, "endpoint"], capture_output=True, text=True, timeout=10)
+                if r.returncode == 0 and r.stdout.strip():
+                    return r.stdout.strip().splitlines()[0].rstrip("/")
+            except Exception:
+                pass
+            break
+    return ""
+
+
 def _config():
-    url = (os.environ.get("EXCHANGE_INGEST_URL")
+    url = (os.environ.get("EXCHANGE_INGEST_URL") or os.environ.get("HUGPY_TOOLSERVER_URL")
            or os.environ.get("TOOLSERVER_URL") or "")
     tok = (os.environ.get("TOOLSERVER_TOKEN")
            or os.environ.get("TOOLSERVER_OPERATOR_TOKEN") or "")
@@ -38,7 +63,7 @@ def _config():
             tok = tok or env.get("TOOLSERVER_TOKEN", "")
         except Exception:
             pass
-    return url.rstrip("/"), tok
+    return (url.rstrip("/") or _discovered_toolserver()), tok
 
 
 def _locus(payload):

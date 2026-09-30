@@ -17,16 +17,22 @@
 # station version — the next install re-provisions every venv to the new pins.
 #
 # Tier 1 — per-seat LIBRARIES (installed into every venv):
-abstract-claude==0.1.64
-abstract-serve-core==0.1.4
-abstract-gpt==0.1.11
-hugpy-agent[mct,serve]==0.1.80
+abstract-claude==0.1.65
+abstract-serve-core==0.1.6
+abstract-gpt==0.1.12
+hugpy-agent[mct,serve]==0.1.82
 abstract-search==0.0.0.42
+# the shared toolserver CLIENT side (client / discovery / MCP bridge / CLI;
+# stdlib-only — the service itself needs the [server] extra, not installed here)
+abstract-toolserver==0.0.31
 #
-# Tier 2 — runtime SERVICE floor (NOT installed; a singleton the station CALLS).
-# The toolserver (abstract_toolserver, the :7004 MCP/DB/backend-data arm) is a
-# shared service, never installed per-seat; its MCP client already ships inside
-# abstract-claude above. hugpy-station-firstrun handshakes $TOOLSERVER_URL/version
-# and warns (does not hard-fail) if it is below this floor. Declared here for one
-# source of truth; parsed by firstrun, ignored by pip (leading '# @service').
-# @service toolserver min_version=0.0.27 url_env=TOOLSERVER_URL
+# Tier 2 — runtime SERVICE floor (a singleton the station CALLS, never started
+# per-seat). The toolserver is ONE Flask service per host; it ADVERTISES itself
+# locally (endpoint.json, see abstract-toolserver CENTRALIZATION.md) and every
+# consumer finds it via abstract_toolserver.discovery / `abstract-toolserver
+# endpoint` unless a URL is explicitly configured (HUGPY_TOOLSERVER_URL /
+# STATION_CONSOLE_TOOLSERVER / TOOLSERVER_URL). hugpy-station-firstrun
+# handshakes the discovered/configured endpoint's /healthz version and warns
+# (does not hard-fail) if it is below this floor. Parsed by firstrun, ignored by
+# pip (leading '# @service').
+# @service toolserver min_version=0.0.31 url_env=HUGPY_TOOLSERVER_URL

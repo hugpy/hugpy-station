@@ -3,6 +3,23 @@
 Versions before 1.0.91 are recorded in git history and in README.md; this file
 starts at the release that introduced it.
 
+## 1.0.130 — 2026-09-30 — toolserver centralized (abstract-toolserver 0.0.31)
+
+* Pin `abstract-toolserver==0.0.31` (Tier 1, client side: client / discovery / MCP bridge;
+  stdlib-only). Service floor 0.0.31 (`# @service … url_env=HUGPY_TOOLSERVER_URL`).
+* Consumers re-pinned on the shared client/bridge: `abstract-claude==0.1.65`,
+  `abstract-serve-core==0.1.6`, `abstract-gpt==0.1.12`, `hugpy-agent[mct,serve]==0.1.82`.
+* No hardcoded toolserver URL: backend `TS_UPSTREAM`, seat MCP entries, hooks and
+  firstrun use explicit config (HUGPY_TOOLSERVER_URL / STATION_CONSOLE_TOOLSERVER /
+  TOOLSERVER_URL) else the toolserver ADVERTISED on this host (abstract-toolserver
+  discovery). Seat MCP entries carry TOOLSERVER_URL only when configured; the
+  settings template drops `EXCHANGE_INGEST_URL=127.0.0.1:7004`.
+* firstrun: no default STATION_CONSOLE_TOOLSERVER; handshake via
+  `abstract-toolserver ensure --no-start` + `/healthz` version.
+* Built with FORCE_DRIFT=1: drift rows were source-ahead-of-install (this release's
+  own backend changes), the new pin not yet provisioned, and the dev abstract_claude
+  tree (0.1.61) lagging the release lineage (0.1.65).
+
 ## 1.0.129 — 2026-09-30 — hugpy-agent 0.1.80
 
 * Pin `hugpy-agent[mct,serve]==0.1.80` (codex lineage: OpenCode-default launch with

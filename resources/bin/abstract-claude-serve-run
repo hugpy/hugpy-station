@@ -44,7 +44,11 @@ if [ -r "$_senv" ]; then set -a; . "$_senv"; set +a; fi
 if [ -z "${STATION_CONSOLE_TOOLSERVER_TOKEN:-}${HUGPY_OPERATOR_TOKEN:-}" ] && [ -r "$HUGPY_STATION_STATE/toolserver.env" ]; then
     set -a; . "$HUGPY_STATION_STATE/toolserver.env"; set +a
 fi
-export TOOLSERVER_URL="${TOOLSERVER_URL:-${STATION_CONSOLE_TOOLSERVER:-https://toolserver.hugpy.ai}}"
+# 2026-09-30: no hardcoded toolserver URL — export one only when configured;
+# otherwise abstract-claude (abstract_toolserver.discovery) finds the toolserver
+# advertised on this host.
+_tsu="${HUGPY_TOOLSERVER_URL:-${TOOLSERVER_URL:-${STATION_CONSOLE_TOOLSERVER:-}}}"
+[ -n "$_tsu" ] && export TOOLSERVER_URL="$_tsu"
 [ -n "${TOOLSERVER_TOKEN:-}" ] || export TOOLSERVER_TOKEN="${STATION_CONSOLE_TOOLSERVER_TOKEN:-${HUGPY_OPERATOR_TOKEN:-}}"
 [ -n "${HUGPY_OPERATOR_TOKEN:-}" ] && [ -z "${TOOLSERVER_OPERATOR_TOKEN:-}" ] && export TOOLSERVER_OPERATOR_TOKEN="$HUGPY_OPERATOR_TOKEN"
 export EXCHANGE_LOCUS="${EXCHANGE_LOCUS:-${STATION_LOCUS:-keeper}}"

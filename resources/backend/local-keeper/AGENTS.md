@@ -18,7 +18,7 @@ output) so its tokens go to judgement, and you return pointers, not dumps.
 ## Your tools
 
 ### 1. The toolserver MCP bridge (native tools)
-`abstract-claude mcp` bridges https://toolserver.hugpy.ai into your seat: every
+`abstract-claude mcp` bridges the toolserver (discovered on this host, or your configured URL) into your seat: every
 tool `/<prefix>/<name>` is the native tool `<prefix>_<name>`. The compact map that
 fits your context is **./docs/STATION-TOOLS-DIGEST.md** — read it first; the full
 reference with every signature is ./docs/STATION-TOOLS.md — open ONE section of it

@@ -1481,6 +1481,65 @@ def _write_toolserver_env(token, url=""):
 
 
 _TOOLSERVER_ENV_LOADED = _load_toolserver_env()
+
+
+# --- toolserver ENDPOINT (2026-09-30, abstract-toolserver CENTRALIZATION.md) ---
+# No hardcoded toolserver URL. Explicit configuration wins (HUGPY_TOOLSERVER_URL,
+# STATION_CONSOLE_TOOLSERVER from toolserver.env, TOOLSERVER_URL); otherwise the
+# toolserver ADVERTISED on this host is discovered via abstract_toolserver
+# (pinned in REQUIREMENTS.txt). The backend may run under a python without the
+# package, so the seat venv's `abstract-toolserver endpoint` CLI is the fallback.
+_TS_URL_KEYS = ("HUGPY_TOOLSERVER_URL", "STATION_CONSOLE_TOOLSERVER", "TOOLSERVER_URL")
+_TS_LOCAL_DEFAULT = "http://127.0.0.1:7004"   # last resort only (no package, no CLI)
+
+
+def _ts_configured_url():
+    """The operator's explicit toolserver URL, or '' (then: discover)."""
+    for k in _TS_URL_KEYS:
+        v = (os.environ.get(k) or "").strip()
+        if v:
+            return v.rstrip("/")
+    return ""
+
+
+def _ts_discovered_url():
+    """The toolserver advertised on this host ('' when none)."""
+    try:
+        from abstract_toolserver import discovery as _tsd
+        ad = _tsd.find_endpoint()
+        return (ad or {}).get("url", "")
+    except ImportError:
+        pass
+    except Exception:
+        return ""
+    import shutil
+    import subprocess
+    cli = (shutil.which("abstract-toolserver")
+           or str(Path.home() / ".local/share/station-seats/venv/bin/abstract-toolserver"))
+    if not os.path.exists(cli):
+        return ""
+    try:
+        r = subprocess.run([cli, "endpoint"], capture_output=True, text=True, timeout=15)
+        return r.stdout.strip().splitlines()[0].strip() if r.returncode == 0 and r.stdout.strip() else ""
+    except Exception:
+        return ""
+
+
+def _ts_resolve_url():
+    """configured -> discovered -> local default."""
+    return _ts_configured_url() or _ts_discovered_url() or _TS_LOCAL_DEFAULT
+
+
+def _ts_shared_client(url=None, token=None, timeout=None):
+    """abstract_toolserver.client.ToolserverClient when importable, else None."""
+    try:
+        from abstract_toolserver.client import ToolserverClient
+    except ImportError:
+        return None
+    # url None -> the client's own resolution (configured -> advertised, with the
+    # advertised token_file as a token source)
+    return ToolserverClient(url=url or _ts_configured_url() or None, token=token or None,
+                            timeout=timeout or 120)
 A_SETTINGS_TEMPLATE_PATH = (Path(os.environ["A_SETTINGS_TEMPLATE"])
                             if os.environ.get("A_SETTINGS_TEMPLATE")
                             else FV_STATE_HOME / "a-settings-template.json")
@@ -4735,7 +4794,7 @@ output) so its tokens go to judgement, and you return pointers, not dumps.
 ## Your tools
 
 ### 1. The toolserver MCP bridge (native tools)
-`abstract-claude mcp` bridges https://toolserver.hugpy.ai into your seat: every
+`abstract-claude mcp` bridges the toolserver (discovered on this host, or your configured URL) into your seat: every
 tool `/<prefix>/<name>` is the native tool `<prefix>_<name>`. The full reference
 with every signature is **./docs/STATION-TOOLS.md** — read it first. Families:
 
@@ -4846,10 +4905,9 @@ def _fit_local_seat_tools(lk):
     every backend start / seat launch; a custom server is never touched. One
     audit line, only when something changed."""
     changed = []
-    # TS_UPSTREAM is defined further down the module — resolved here at call
-    # time (both callers run after import), never at import.
-    url = (os.environ.get("STATION_CONSOLE_TOOLSERVER") or globals().get("TS_UPSTREAM")
-           or "https://toolserver.hugpy.ai")
+    # 2026-09-30: only an EXPLICITLY configured URL is written into a seat's
+    # MCP entry; without one the bridge discovers the local toolserver itself.
+    url = _ts_configured_url()
     home = Path.home()
     # a. opencode — global config (~/.config/opencode/opencode.jsonc wins when it
     #    parses as JSON; comments/trailing commas → leave it alone, fit .json).
@@ -4876,10 +4934,11 @@ def _fit_local_seat_tools(lk):
             cmd0 = (cmd[0] if isinstance(cmd, list) and cmd else
                     (cmd.split() or [""])[0] if isinstance(cmd, str) else "")
             if not cur:
+                _env = {"TOOLSERVER_TOKEN": "{env:HUGPY_OPERATOR_TOKEN}"}
+                if url:
+                    _env["TOOLSERVER_URL"] = url
                 mcp["toolserver"] = {"type": "local", "command": ["abstract-claude", "mcp"],
-                                     "environment": {"TOOLSERVER_URL": url,
-                                                     "TOOLSERVER_TOKEN": "{env:HUGPY_OPERATOR_TOKEN}"},
-                                     "enabled": True}
+                                     "environment": _env, "enabled": True}
             elif cmd0 == "abstract-claude":
                 # ours — merge, never assign: an operator's enabled:false / own
                 # URL / timeout / extra keys are theirs to keep.
@@ -4887,7 +4946,8 @@ def _fit_local_seat_tools(lk):
                 cur.setdefault("command", ["abstract-claude", "mcp"])
                 cur.setdefault("enabled", True)
                 env = cur.get("environment") if isinstance(cur.get("environment"), dict) else {}
-                env.setdefault("TOOLSERVER_URL", url)
+                if url:
+                    env.setdefault("TOOLSERVER_URL", url)
                 env.setdefault("TOOLSERVER_TOKEN", "{env:HUGPY_OPERATOR_TOKEN}")
                 cur["environment"] = env
                 mcp["toolserver"] = cur
@@ -4920,14 +4980,16 @@ def _fit_local_seat_tools(lk):
             ms = doc.get("mcpServers") if isinstance(doc.get("mcpServers"), dict) else {}
             cur = ms.get("toolserver") if isinstance(ms.get("toolserver"), dict) else {}
             if not cur:
-                ms["toolserver"] = {"command": "abstract-claude", "args": ["mcp"],
-                                    "env": {"TOOLSERVER_URL": url,
-                                            "TOOLSERVER_TOKEN": "$HUGPY_OPERATOR_TOKEN"}}
+                _env = {"TOOLSERVER_TOKEN": "$HUGPY_OPERATOR_TOKEN"}
+                if url:
+                    _env["TOOLSERVER_URL"] = url
+                ms["toolserver"] = {"command": "abstract-claude", "args": ["mcp"], "env": _env}
             elif cur.get("command") == "abstract-claude":
                 # ours — merge (see the opencode branch above)
                 cur.setdefault("args", ["mcp"])
                 env = cur.get("env") if isinstance(cur.get("env"), dict) else {}
-                env.setdefault("TOOLSERVER_URL", url)
+                if url:
+                    env.setdefault("TOOLSERVER_URL", url)
                 env.setdefault("TOOLSERVER_TOKEN", "$HUGPY_OPERATOR_TOKEN")
                 cur["env"] = env
                 ms["toolserver"] = cur
@@ -6096,8 +6158,7 @@ async def ac_proxy(request):
 # read-only SELECT/WITH gate is enforced upstream by db/query), comms/ (pings +
 # inbox), canvas/ (design/flow documents), seat/ and prompt/ join the list so
 # the UI and scripts reach them through the station.
-TS_UPSTREAM = os.environ.get("STATION_CONSOLE_TOOLSERVER",
-                             "https://toolserver.hugpy.ai")
+TS_UPSTREAM = _ts_resolve_url()     # configured -> advertised on this host -> local default
 _TS_ALLOWED = ("assess/", "handoff/", "exchange/", "todo/", "loci/", "board/", "session/",
                "db/", "comms/", "canvas/", "seat/", "prompt/")   # 1.0.85: + db/comms/canvas/seat/prompt
 
@@ -6260,7 +6321,7 @@ async def handoff_spawn(request):
     inner = (f"cd {shlex.quote(dirp)} 2>/dev/null; "
              # 1.0.63: pre-seed folder trust (same snippet the frontier seat uses) so a
              # freshly spawned seat never stalls at Claude Code's trust dialog
-             f'printf %s {_SEAT_TRUST_B64} | base64 -d | python3 - "$HOME/.claude.json" "$(pwd)" {shlex.quote(TS_UPSTREAM)} >/dev/null 2>&1 || true; '
+             f'printf %s {_SEAT_TRUST_B64} | base64 -d | python3 - "$HOME/.claude.json" "$(pwd)" {shlex.quote(_ts_configured_url())} >/dev/null 2>&1 || true; '
              "claude")
     if resume:
         inner += " --resume " + shlex.quote(resume) + (" --fork-session" if fork else "")
@@ -6440,7 +6501,7 @@ _AC_ENSURE = (
     'python3 -c \'import sys;t=lambda v:tuple(int(x) for x in v.split("."));'
     'sys.exit(0 if t(sys.argv[1])>=t(sys.argv[2]) else 1)\' "${ac_v:-0}" ' + AC_MIN_VERSION + ' '
     '>/dev/null 2>&1 && ac_ok=1; fi; fi; ')
-_SEAT_TRUST_B64 = "aW1wb3J0IGpzb24sc3lzLG9zLHJlCnAsd3M9c3lzLmFyZ3ZbMV0sc3lzLmFyZ3ZbMl0KdXJsPXN5cy5hcmd2WzNdIGlmIGxlbihzeXMuYXJndik+MyBlbHNlICIiCnRyeToKICAgIGQ9anNvbi5sb2FkKG9wZW4ocCkpCmV4Y2VwdCBFeGNlcHRpb246CiAgICBkPXt9CmQuc2V0ZGVmYXVsdCgnaGFzQ29tcGxldGVkT25ib2FyZGluZycsVHJ1ZSkKZC5zZXRkZWZhdWx0KCdieXBhc3NQZXJtaXNzaW9uc01vZGVBY2NlcHRlZCcsVHJ1ZSkKZC5zZXRkZWZhdWx0KCdwcm9qZWN0cycse30pLnNldGRlZmF1bHQod3Mse30pWydoYXNUcnVzdERpYWxvZ0FjY2VwdGVkJ109VHJ1ZQojIHRvb2xzZXJ2ZXIgTUNQIGJyaWRnZSAoMS4wLjcwKTogZXZlcnkgY2xhdWRlLWNvZGUgc2VhdCBnZXRzIGl0LCBmcm9tIHRoZSBzZWF0IHVzZXIncyBPV04KIyBjcmVkZW50aWFsIGZpbGVzIChkZWItcHJvdmlzaW9uZWQpIC0gdGhlIHRva2VuIG5ldmVyIHJpZGVzIHRoZSBsYXVuY2ggY29tbWFuZCBsaW5lLgp0b2s9IiIKaG9tZT1vcy5wYXRoLmV4cGFuZHVzZXIoIn4iKQpmb3IgZiBpbiAob3MucGF0aC5qb2luKGhvbWUsIi5jb25maWciLCJodWdweSIsIm9wZXJhdG9yLmVudiIpLCBvcy5wYXRoLmpvaW4oaG9tZSwiLmNvbmZpZyIsImh1Z3B5LXN0YXRpb24iLCJ0b29sc2VydmVyLmVudiIpKToKICAgIHRyeToKICAgICAgICBmb3IgbG4gaW4gb3BlbihmKToKICAgICAgICAgICAgbT1yZS5tYXRjaChyIl4oVE9PTFNFUlZFUl9UT0tFTnxIVUdQWV9PUEVSQVRPUl9UT0tFTnxUT09MU0VSVkVSX09QRVJBVE9SX1RPS0VOKT0oLispJCIsbG4uc3RyaXAoKSkKICAgICAgICAgICAgaWYgbSBhbmQgbS5ncm91cCgyKS5zdHJpcCgpOiB0b2s9bS5ncm91cCgyKS5zdHJpcCgpLnN0cmlwKCciJyk7IGJyZWFrCiAgICBleGNlcHQgT1NFcnJvcjoKICAgICAgICBwYXNzCiAgICBpZiB0b2s6IGJyZWFrCmlmIHRvazoKICAgIG1zPWQuc2V0ZGVmYXVsdCgnbWNwU2VydmVycycse30pCiAgICBjdXI9bXMuZ2V0KCd0b29sc2VydmVyJykgb3Ige30KICAgIGlmIG5vdCBjdXIgb3IgY3VyLmdldCgnY29tbWFuZCcpPT0nYWJzdHJhY3QtY2xhdWRlJzoKICAgICAgICBtc1sndG9vbHNlcnZlciddPXsndHlwZSc6J3N0ZGlvJywnY29tbWFuZCc6J2Fic3RyYWN0LWNsYXVkZScsJ2FyZ3MnOlsnbWNwJ10sCiAgICAgICAgICAgICAgICAgICAgICAgICAgJ2Vudic6eydUT09MU0VSVkVSX1VSTCc6dXJsIG9yIChjdXIuZ2V0KCdlbnYnKSBvciB7fSkuZ2V0KCdUT09MU0VSVkVSX1VSTCcpIG9yICdodHRwczovL3Rvb2xzZXJ2ZXIuaHVncHkuYWknLCdUT09MU0VSVkVSX1RPS0VOJzp0b2t9fQpqc29uLmR1bXAoZCxvcGVuKHAsJ3cnKSkK"
+_SEAT_TRUST_B64 = "aW1wb3J0IGpzb24sc3lzLG9zLHJlCnAsd3M9c3lzLmFyZ3ZbMV0sc3lzLmFyZ3ZbMl0KdXJsPXN5cy5hcmd2WzNdIGlmIGxlbihzeXMuYXJndik+MyBlbHNlICIiCnRyeToKICAgIGQ9anNvbi5sb2FkKG9wZW4ocCkpCmV4Y2VwdCBFeGNlcHRpb246CiAgICBkPXt9CmQuc2V0ZGVmYXVsdCgnaGFzQ29tcGxldGVkT25ib2FyZGluZycsVHJ1ZSkKZC5zZXRkZWZhdWx0KCdieXBhc3NQZXJtaXNzaW9uc01vZGVBY2NlcHRlZCcsVHJ1ZSkKZC5zZXRkZWZhdWx0KCdwcm9qZWN0cycse30pLnNldGRlZmF1bHQod3Mse30pWydoYXNUcnVzdERpYWxvZ0FjY2VwdGVkJ109VHJ1ZQojIHRvb2xzZXJ2ZXIgTUNQIGJyaWRnZSAoMS4wLjcwKTogZXZlcnkgY2xhdWRlLWNvZGUgc2VhdCBnZXRzIGl0LCBmcm9tIHRoZSBzZWF0IHVzZXIncyBPV04KIyBjcmVkZW50aWFsIGZpbGVzIChkZWItcHJvdmlzaW9uZWQpIC0gdGhlIHRva2VuIG5ldmVyIHJpZGVzIHRoZSBsYXVuY2ggY29tbWFuZCBsaW5lLgp0b2s9IiIKaG9tZT1vcy5wYXRoLmV4cGFuZHVzZXIoIn4iKQpmb3IgZiBpbiAob3MucGF0aC5qb2luKGhvbWUsIi5jb25maWciLCJodWdweSIsIm9wZXJhdG9yLmVudiIpLCBvcy5wYXRoLmpvaW4oaG9tZSwiLmNvbmZpZyIsImh1Z3B5LXN0YXRpb24iLCJ0b29sc2VydmVyLmVudiIpKToKICAgIHRyeToKICAgICAgICBmb3IgbG4gaW4gb3BlbihmKToKICAgICAgICAgICAgbT1yZS5tYXRjaChyIl4oVE9PTFNFUlZFUl9UT0tFTnxIVUdQWV9PUEVSQVRPUl9UT0tFTnxUT09MU0VSVkVSX09QRVJBVE9SX1RPS0VOKT0oLispJCIsbG4uc3RyaXAoKSkKICAgICAgICAgICAgaWYgbSBhbmQgbS5ncm91cCgyKS5zdHJpcCgpOiB0b2s9bS5ncm91cCgyKS5zdHJpcCgpLnN0cmlwKCciJyk7IGJyZWFrCiAgICBleGNlcHQgT1NFcnJvcjoKICAgICAgICBwYXNzCiAgICBpZiB0b2s6IGJyZWFrCmlmIHRvazoKICAgIG1zPWQuc2V0ZGVmYXVsdCgnbWNwU2VydmVycycse30pCiAgICBjdXI9bXMuZ2V0KCd0b29sc2VydmVyJykgb3Ige30KICAgIGlmIG5vdCBjdXIgb3IgY3VyLmdldCgnY29tbWFuZCcpPT0nYWJzdHJhY3QtY2xhdWRlJzoKICAgICAgICAjIDIwMjYtMDktMzA6IFVSTCBvbmx5IHdoZW4gY29uZmlndXJlZCAoZWxzZSB0aGUgYnJpZGdlIGRpc2NvdmVycyB0aGUgbG9jYWwgdG9vbHNlcnZlcikKICAgICAgICB1PXVybCBvciAoY3VyLmdldCgnZW52Jykgb3Ige30pLmdldCgnVE9PTFNFUlZFUl9VUkwnKSBvciAnJwogICAgICAgIGVudj17J1RPT0xTRVJWRVJfVE9LRU4nOnRva30KICAgICAgICBpZiB1OiBlbnZbJ1RPT0xTRVJWRVJfVVJMJ109dQogICAgICAgIG1zWyd0b29sc2VydmVyJ109eyd0eXBlJzonc3RkaW8nLCdjb21tYW5kJzonYWJzdHJhY3QtY2xhdWRlJywnYXJncyc6WydtY3AnXSwnZW52JzplbnZ9Cmpzb24uZHVtcChkLG9wZW4ocCwndycpKQo="
 
 
 def _claude_seat_cmd(label: str, model_key: str = "claude-code") -> str:
@@ -6535,7 +6596,7 @@ def _claude_seat_cmd(label: str, model_key: str = "claude-code") -> str:
             'ln -sf "$j" "$c/.claude.json"; '
             # seed folder-trust for the workspace (see _SEAT_TRUST_B64) so a
             # fresh locus's first claude-code seat does not die at the trust dialog
-            f'printf %s {_SEAT_TRUST_B64} | base64 -d | python3 - "$j" "$(pwd)" {shlex.quote(TS_UPSTREAM)} >/dev/null 2>&1 || true; '
+            f'printf %s {_SEAT_TRUST_B64} | base64 -d | python3 - "$j" "$(pwd)" {shlex.quote(_ts_configured_url())} >/dev/null 2>&1 || true; '
             f'printf %s {tmpl} > "$c/settings.json"; '
             # 1.0.65: the session init prompt was folded into {sysp} above; this
             # launch consumes it — the file goes so it never rides a later session.
@@ -6546,8 +6607,14 @@ def _claude_seat_cmd(label: str, model_key: str = "claude-code") -> str:
             # `abstract-claude launch` writes (abstract-claude mcp + token).
             '__MCP=""; __tok="${TOOLSERVER_TOKEN:-${HUGPY_OPERATOR_TOKEN:-${STATION_CONSOLE_TOOLSERVER_TOKEN:-}}}"; '
             'if [ -n "$__tok" ] && command -v abstract-claude >/dev/null 2>&1; then '
+            # 2026-09-30: TOOLSERVER_URL only when explicitly configured; else the
+            # bridge discovers the toolserver advertised on this host.
+            '__tsu="${HUGPY_TOOLSERVER_URL:-${TOOLSERVER_URL:-${STATION_CONSOLE_TOOLSERVER:-}}}"; '
+            'if [ -n "$__tsu" ]; then '
             '__MCP=$(printf \'{"mcpServers":{"toolserver":{"type":"stdio","command":"abstract-claude","args":["mcp"],"env":{"TOOLSERVER_URL":"%s","TOOLSERVER_TOKEN":"%s"}}}}\' '
-            '"${TOOLSERVER_URL:-${STATION_CONSOLE_TOOLSERVER:-https://toolserver.hugpy.ai}}" "$__tok"); fi; '
+            '"$__tsu" "$__tok"); else '
+            '__MCP=$(printf \'{"mcpServers":{"toolserver":{"type":"stdio","command":"abstract-claude","args":["mcp"],"env":{"TOOLSERVER_TOKEN":"%s"}}}}\' '
+            '"$__tok"); fi; fi; '
             f'CLAUDE_CONFIG_DIR="$c" claude --dangerously-skip-permissions{mflag} --session-id "$__sid" '
             '${__MCP:+--mcp-config "$__MCP"} --append-system-prompt "$__SYSP"')
 
@@ -6652,8 +6719,17 @@ def _fetch_toolserver_oauth_token(timeout=5):
           or os.environ.get("HUGPY_OPERATOR_TOKEN") or "").strip()
     if not op:
         return ""
-    bases = [b for b in (TS_UPSTREAM, "http://127.0.0.1:7004", "https://toolserver.hugpy.ai") if b]
-    for base in dict.fromkeys(bases):
+    # 2026-09-30: one resolved endpoint (TS_UPSTREAM = configured -> discovered),
+    # no hardcoded fallback hosts; the shared client when the package is here.
+    client = _ts_shared_client(None, op, timeout)
+    if client is not None:
+        try:
+            doc = client.post("/claude/oauth_token", {})
+            t = ((doc or {}).get("CLAUDE_CODE_OAUTH_TOKEN") or "").strip() if isinstance(doc, dict) else ""
+            return t if t.startswith("sk-ant-oat") and len(t) >= 80 else ""
+        except Exception:
+            return ""
+    for base in [TS_UPSTREAM]:
         req = urllib.request.Request(base.rstrip("/") + "/claude/oauth_token", data=b"{}", method="POST",
                                      headers={"X-Operator-Token": op, "Content-Type": "application/json"})
         try:

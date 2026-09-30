@@ -446,10 +446,27 @@ if [ -n "$tadd" ]; then
     install -m 0600 "$tmp" "$TS_USER" && own "$TS_USER"; rm -f "$tmp"
     log "toolserver.env $TS_USER: added $(printf '%b' "$tadd" | cut -d= -f1 | tr '\n' ' ')"
 fi
-[ -n "$ts_url" ] || ts_url="$(env_get "$TS_USER" STATION_CONSOLE_TOOLSERVER)"; [ -n "$ts_url" ] || ts_url="https://toolserver.hugpy.ai"
+[ -n "$ts_url" ] || ts_url="$(env_get "$TS_USER" STATION_CONSOLE_TOOLSERVER)"
+# 2026-09-30 (abstract-toolserver CENTRALIZATION.md): no hardcoded default URL.
+# Not configured -> DISCOVER the toolserver advertised on this host (the seat
+# venv ships abstract-toolserver; `ensure --no-start` never starts one here).
+# The discovered endpoint is used for the handshake only, never persisted.
+if [ -z "$ts_url" ]; then
+    _atsbin="$HOME_DIR/.local/share/station-seats/venv/bin/abstract-toolserver"
+    [ -x "$_atsbin" ] || _atsbin="$(command -v abstract-toolserver 2>/dev/null || true)"
+    if [ -n "$_atsbin" ]; then
+        ts_url="$(HOME="$HOME_DIR" timeout 20 "$_atsbin" ensure --no-start 2>/dev/null | head -1 || true)"
+        [ -n "$ts_url" ] && log "toolserver discovered (local advertisement): $ts_url" \
+            || warn "no toolserver configured or advertised on this host (set STATION_CONSOLE_TOOLSERVER / HUGPY_TOOLSERVER_URL for a remote one)"
+    else
+        warn "abstract-toolserver CLI not found — cannot discover the local toolserver (not fatal)"
+    fi
+fi
 [ -n "$ts_tok" ] || ts_tok="$(env_get "$TS_USER" HUGPY_OPERATOR_TOKEN)"
 if [ -z "$ts_tok" ]; then
     warn "no toolserver token for $USER_NAME — fleet comms and the MCP bridge are OFF until $TS_ENV carries STATION_CONSOLE_TOOLSERVER_TOKEN (then re-run)"
+elif [ -z "$ts_url" ]; then
+    warn "toolserver handshake skipped: no endpoint configured or discovered"
 elif command -v curl >/dev/null 2>&1; then
     code="$(curl -s -m 8 -o /dev/null -w '%{http_code}' -H "X-Operator-Token: $ts_tok" "${ts_url%/}/endpoints" 2>/dev/null || echo 000)"
     if [ "$code" = 200 ]; then log "MCP bridge: $ts_url accepts the token (endpoints ok)"
@@ -463,14 +480,17 @@ elif command -v curl >/dev/null 2>&1; then
     if [ "$code" = 200 ] && [ -r "$_req" ]; then
         _floor="$(sed -n 's/^# @service[[:space:]]\+toolserver[[:space:]].*min_version=\([0-9.][0-9.]*\).*/\1/p' "$_req" | head -1)"
         if [ -n "$_floor" ]; then
-            _tsv="$(curl -s -m 8 -H "X-Operator-Token: $ts_tok" "${ts_url%/}/version" 2>/dev/null \
+            # /healthz carries {"version"} since abstract-toolserver 0.0.31
+            _tsv="$(curl -s -m 8 "${ts_url%/}/healthz" 2>/dev/null \
+                    | sed -n 's/.*"version"[: ]*"\([0-9.][0-9.]*\)".*/\1/p' | head -1)"
+            [ -n "$_tsv" ] || _tsv="$(curl -s -m 8 -H "X-Operator-Token: $ts_tok" "${ts_url%/}/version" 2>/dev/null \
                     | sed -n 's/.*"version"[: ]*"\([0-9.][0-9.]*\)".*/\1/p' | head -1)"
             if [ -z "$_tsv" ]; then
                 log "toolserver version handshake: $ts_url/version gave no version (floor $_floor) — skipped"
             elif [ "$(printf '%s\n%s\n' "$_floor" "$_tsv" | sort -V | head -1)" = "$_floor" ]; then
                 log "toolserver $_tsv >= required $_floor OK"
             else
-                warn "toolserver $_tsv is BELOW this station's required $_floor — update the :7004 toolserver (abstract_toolserver); fleet DB/MCP features may misbehave (not fatal)"
+                warn "toolserver $_tsv is BELOW this station's required $_floor — update the toolserver (pip install abstract-toolserver[server]==<pin>; see CENTRALIZATION.md); fleet DB/MCP features may misbehave (not fatal)"
             fi
         fi
     fi

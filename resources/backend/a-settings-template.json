@@ -36,9 +36,6 @@
   "worktree": {
     "baseRef": "head"
   },
-  "env": {
-    "EXCHANGE_INGEST_URL": "http://127.0.0.1:7004"
-  },
   "hooks": {
     "Stop": [
       {

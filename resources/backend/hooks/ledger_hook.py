@@ -30,8 +30,34 @@ import urllib.request
 MAX_CHARS = int(os.environ.get("LEDGER_MAX_CHARS", "12000") or 12000)
 
 
+def _discovered_toolserver():
+    """The toolserver advertised on this host (abstract-toolserver discovery):
+    the package when importable, else its CLI; '' when neither finds one."""
+    try:
+        from abstract_toolserver import discovery
+        return ((discovery.find_endpoint() or {}).get("url") or "").rstrip("/")
+    except ImportError:
+        pass
+    except Exception:
+        return ""
+    import shutil
+    import subprocess
+    for cli in (shutil.which("abstract-toolserver"),
+                os.path.expanduser("~/.local/share/station-seats/venv/bin/abstract-toolserver")):
+        if cli and os.path.exists(cli):
+            try:
+                r = subprocess.run([cli, "endpoint"], capture_output=True, text=True, timeout=10)
+                if r.returncode == 0 and r.stdout.strip():
+                    return r.stdout.strip().splitlines()[0].rstrip("/")
+            except Exception:
+                pass
+            break
+    return ""
+
+
 def _url_tok():
-    url = (os.environ.get("EXCHANGE_INGEST_URL") or os.environ.get("TOOLSERVER_URL") or "").rstrip("/")
+    url = (os.environ.get("EXCHANGE_INGEST_URL") or os.environ.get("HUGPY_TOOLSERVER_URL")
+           or os.environ.get("TOOLSERVER_URL") or "").rstrip("/")
     tok = os.environ.get("TOOLSERVER_TOKEN") or os.environ.get("TOOLSERVER_OPERATOR_TOKEN") or ""
     try:
         d = json.load(open(os.path.expanduser("~/.claude.json")))
@@ -47,11 +73,14 @@ def _url_tok():
                     tok = line.split("=", 1)[1].strip().strip('"'); break
         except Exception:
             pass
-    return (url or "http://127.0.0.1:7004"), tok
+    # 2026-09-30: no hardcoded URL — configured, else the locally advertised toolserver
+    return (url or _discovered_toolserver()), tok
 
 
 def _call(path, body, timeout=8):
     url, tok = _url_tok()
+    if not url:
+        raise RuntimeError("no toolserver configured or advertised on this host")
     req = urllib.request.Request(url + "/" + path, data=json.dumps(body).encode(), method="POST",
                                  headers={"Content-Type": "application/json", "X-Operator-Token": tok})
     with urllib.request.urlopen(req, timeout=timeout) as r:
