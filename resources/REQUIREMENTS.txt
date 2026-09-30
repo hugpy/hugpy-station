@@ -17,8 +17,8 @@
 # station version — the next install re-provisions every venv to the new pins.
 #
 # Tier 1 — per-seat LIBRARIES (installed into every venv):
-abstract-claude==0.1.65
-abstract-serve-core==0.1.6
+abstract-claude==0.1.67
+abstract-serve-core==0.1.7
 abstract-gpt==0.1.12
 hugpy-agent[mct,serve]==0.1.82
 abstract-search==0.0.0.42

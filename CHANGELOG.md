@@ -3,6 +3,19 @@
 Versions before 1.0.91 are recorded in git history and in README.md; this file
 starts at the release that introduced it.
 
+## 1.0.131 — 2026-09-29
+
+### abstract-claude 0.1.67 / abstract-serve-core 0.1.7 — the collator goes away after send
+
+* Pin `abstract-claude==0.1.67`, `abstract-serve-core==0.1.7`.
+* A sent prompt no longer reappears in the console collator (#kl-qpanel): a turn that
+  failed or was interrupted after its prompt reached the conversation used to re-queue
+  the originals as HELD. serve-core now marks a delivered batch `failed`; the console
+  drops delivered ids that come back, closes the collator on every send, and reopens
+  it only for a new explicit queue.
+* abstract-claude main now carries the whole 2026-09-29 line in one release:
+  permission cards, session rollover banner (session-rollover.js), central toolserver.
+
 ## 1.0.130 — 2026-09-30 — toolserver centralized (abstract-toolserver 0.0.31)
 
 * Pin `abstract-toolserver==0.0.31` (Tier 1, client side: client / discovery / MCP bridge;
