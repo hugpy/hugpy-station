@@ -7,78 +7,96 @@ shared task board between you, the operator, and the fleet console. The file IS
 the interface: the console edits it host-side, you edit it in-VM, and the
 keeper-relay watches it. Treat it as the single source of truth for what you
 owe, what you decided, and what you shipped.
-*(Fleet SOP v1, 2026-07-18 — maintained by the blackbird keeper in
-`console-ui/docs/TODO-BOARD-SOP.md`; propose changes there.)*
+*(Fleet SOP v2, 2026-09-18 — canonical source
+`resources/backend/static/docs/TODO-BOARD-SOP.md` in the station-app tree;
+propose changes there.)*
 
-## 1. The file and its schema
+## 1. Pick the lane — the six item types
 
-`~/todo.json`, schema `todo.v1`:
+Choose the type first; it decides the tab, the id-prefix, and the note shape.
 
-```json
-{"schema": "todo.v1", "items": [
-  {"id": "t12", "type": "todo|request|bookmark|operator|proposal",
-   "text": "...", "note": "...", "status": "open|doing|done",
-   "by": "<locus>-keeper|operator|user|...", "ts": 1784300000}
-]}
-```
+| type | tab · glyph | id | when to use / when NOT | required fields | note template |
+|---|---|---|---|---|---|
+| `todo` | queue · ☑ | `t<N>` | a unit of work on YOUR queue — incl. anything the operator MIGHT want done. NOT for asks the operator must action (that is `operator`). | `text`, `status`, `by` | `SCOPE: … — DONE: …` |
+| `request` | queue · ✋ | `t<N>` | an ask directed AT the keeper (operator or a peer filed it). NOT a self-note — that is a `todo`. | `text`, `by` | `ASK <who>: … — DONE: …` |
+| `bookmark` | 🔖 | `bm<N>` | a checkpoint at every stable build / shipped commit / verified state. NOT a wish or a plan. | `text`, `note` (id + receipt), `by` | `SHIPPED <UTC>: … — VERIFIED: … — ROLLBACK: …` |
+| `operator` | ⚑ | `o<N>` | ONE concrete action only the operator can take — behind a privilege you lack (root/sudo, a credential, a physical/account step), with a copyable `cmd`. NOT the operator's wish-list (those are `todo`). | `text`, `worker`, `task`, `cmd`, `by` | `@worker: … task: … ` + `cmd:` block |
+| `proposal` | ⚖ | `p<N>` | a decision you want FROM the operator, with pros/cons/rec. NOT something you may decide yourself. | `text`, `pros`, `cons`, `rec`, `by` | `PROBLEM: … / OPTIONS: A) … B) … / REC: …` |
+| `direction` | queue · 🧭 | `d<N>` | a standing ruling / invariant from the operator — a determination that governs later work ("always X", "never Y"). NOT a one-off task and NOT your own opinion; only the operator's word becomes a direction. | `text`, `note` (the ruling), `status`, `by` | `RULING (<who, date>): "<quote>" — STATE: <APPLIED\|FOLDED\|CLOSED where>` |
 
-- **Sign explicitly (nomenclature ruling 2026-08-27).** A keeper signs
-  `by: "<locus>-keeper"` — the host's keeper signs `host-keeper`, hugpy's
-  signs `hugpy-keeper`. The operator is `operator` (console) or `user`
-  (items filed on their behalf); host agents comment as `A`/`B`. The bare
-  `keeper` is LEGACY: readers still accept it as "this board's own keeper",
-  writers must never mint it again. Same rule for `via` (who wrote):
-  `via: "<locus>-keeper"`, never bare `keeper`. See docs → nomenclature.
-- **Keep the JSON valid.** The console refuses a malformed file rather than
-  repairing it; a broken board is an outage for the operator.
-- Extra fields survive round-trips (the console passes unknown fields through
-  verbatim) — richness like `pros`/`cons`/`rec`/`comments`/`via` is safe.
-- **Write through a validating tool, not by hand.** Use the `todo` CLI where
-  provisioned. If you must write raw JSON, re-validate before saving.
+`direction` has no dedicated console tab today; it renders in the **queue**
+lane. It is nonetheless a live, first-class type (~20 items in flight) — a
+persisted operator ruling you carry forward, distinct from a `proposal` (a
+question) or a `request` (a task).
 
-## 2. Item types — what each one means
+## 2. Note-format templates — one per type
 
-| type | glyph | meaning | who creates |
-|---|---|---|---|
-| `todo` | ☑ | a unit of work on your queue | anyone |
-| `request` | ✋ | an ask directed at the keeper | operator (console/Discord), peers |
-| `bookmark` | 🔖 | a checkpoint: stable build, shipped commit, verified state | keeper, at every stable point |
-| `operator` | ⚑ | an action ONLY the operator can take (host-side/root step) | keeper |
-| `proposal` | ⚖ | a decision you want FROM the operator, with pros/cons/rec | keeper |
+Each type earns its keep with a note in a fixed shape, so a reader (operator,
+peer, or you after a restart) gets the whole picture from the note alone.
 
-- **Proposals** carry `pros: []`, `cons: []`, `rec: "..."`. The console renders
-  accept/decline buttons. A decision is recorded as **status `done` + a
-  `[accepted] ` or `[declined] ` prefix on the note** (your original note text
-  is preserved after the marker). Do not self-decide your own proposal — the
-  decision is the operator's.
-- **Operator items** should carry explicit structure when useful: `worker`
-  (which box/account), `task` (inspect/aggregate/apply/verify/…), `cmd`
-  (copyable command(s) — string or list). Make the operator's action
-  copy-paste-runnable.
-- **Bookmarks** are your rollback map: commit hash or path in the `note`,
-  enough detail that a future keeper (or you after a restart) can reconstruct
-  state from it.
+- **todo** — `SCOPE: <what/where> — DONE: <observable check>`
+  > `SCOPE: rotate toolserver cert on ae — DONE: openssl s_client shows the new expiry`
+- **request** — `ASK <who>: <exact ask> — DONE: <what closes it>`
+  > `ASK hugpy-keeper: rebuild the model index — DONE: /health lists all 6 models`
+- **bookmark** — `SHIPPED <UTC>: <build/commit id> — VERIFIED: <evidence> — ROLLBACK: <prev id/path>`
+  > `SHIPPED 2026-09-18T06:20Z: station 1.0.106 (a1b2c3d) — VERIFIED: deb installs, /health 200 — ROLLBACK: 1.0.105 (9f8e7d6)`
+- **operator** — `@worker: <box/acct>  task: <INSPECT|APPLY|VERIFY|…>` then a copy-paste `cmd:` block; `#` lines are caveats (not copied).
+  > ```
+  > @worker: ae (root)  task: APPLY
+  > cmd:
+  >   systemctl restart hugpy-station-web@hugpy
+  > # only after the 1.0.106 deb is in place
+  > ```
+- **proposal** — `PROBLEM: <one line> / OPTIONS: A) … B) … / REC: <pick + why>`
+  > `PROBLEM: cert renewal is manual and drifts / OPTIONS: A) cron certbot B) hosted ACME / REC: A — no new dependency, we already run certbot`
+- **direction** — `RULING (<operator determination, date>): "<quote>" — STATE: <APPLIED|FOLDED|CLOSED where>`
+  > `RULING (operator, 2026-08-27): "keepers always sign <locus>-keeper" — STATE: APPLIED in TODO-BOARD-SOP §3`
 
-## 3. Ids — the rules that keep writes honest
+*(A non-blocking note-format lint — warn when a note doesn't match its type's
+template — is a proposed future enhancement, not yet implemented.)*
 
-- **Ids must be unique across the whole board, regardless of type.** By-id
-  ops (accept, status, note, comments, delete) hit the FIRST match; a
-  duplicated id silently mis-routes writes. (Fleet incident 2026-07-17: a
-  proposal sharing `t33` with a done request made operator accepts "not
-  stick" and clobbered a note.)
-- Namespaces by convention: console-minted items get `t<N>`; keeper-authored
-  use a distinct prefix per type — `p<N>` proposals, `o<N>` operator items,
-  `bm<N>` bookmarks. **Never hand-mint a `t`-prefixed id** — that's the
-  console allocator's namespace and you WILL collide with it.
-- Reserved ids: `cfg-relay` (the relay settings carrier — see §6). Reserved
-  ids are keeper-minted; the console can only update them.
+## 3. Signing — who wrote it
 
-## 4. Status discipline
+**Sign explicitly (nomenclature ruling 2026-08-27).** A keeper signs
+`by: "<locus>-keeper"`. The bare `keeper` is LEGACY: readers still accept it as
+"this board's own keeper", but writers must **never mint it again**. The same
+rule holds for `via` (who physically wrote): `via: "<locus>-keeper"`, never bare
+`keeper`.
+
+| authoring context | `by` / `via` |
+|---|---|
+| the host's keeper | `host-keeper` |
+| hugpy's keeper | `hugpy-keeper` |
+| any locus keeper `<L>` | `<L>-keeper` |
+| the operator, from the console | `operator` |
+| filed on the operator's behalf | `user` |
+| a host agent commenting | `A` / `B` |
+
+Non-conformant values to avoid: bare `keeper` (legacy, read-only), `claude` /
+`assistant` / a model name, a plain hostname without `-keeper`, or an empty
+`by`. If in doubt, use `<your-locus>-keeper`. See docs → nomenclature.
+
+## 4. Lifecycle & status
 
 `open → doing → done`, kept current. `doing` means you are actively on it this
 session. Everything you finish gets `done` plus a **note or comment recording
 what shipped and how it was verified** (commit, deploy receipt, test counts).
 The board is the audit trail: "done" with no evidence is not done.
+
+- **Priority.** `high` = blocks the operator or a ship / actively breaking;
+  `medium` = should land this cycle, nothing waits on it; `low` (default) =
+  backlog. **If everything is high, nothing is.**
+- **Title convention.** `<area> — <imperative>`, e.g.
+  `toolserver — rotate the TLS cert`.
+- **Proposals** carry `pros: []`, `cons: []`, `rec: "..."`. The console renders
+  accept/decline buttons. A decision is recorded as **status `done` + a
+  `[accepted] ` or `[declined] ` prefix on the note** (your original note text
+  is preserved after the marker). Do not self-decide your own proposal — the
+  decision is the operator's.
+- **Directions** are a standing state, not a task you burn down: mark the note
+  **`APPLIED`** (folded into a doc/behavior, cite where), **`FOLDED`** (merged
+  into another ruling/doc), or **`CLOSED`** (superseded/retired). Keep the
+  operator's quote verbatim.
 
 ## 5. Comments — the discussion layer
 
@@ -87,7 +105,37 @@ operator IN-THREAD (the answer lives where the question was asked), to record
 decisions, and to hand off context. The operator's comments reach you via the
 relay; your comments are visible in the console immediately.
 
-## 6. How items reach the keeper (delivery tiers)
+## 6. The file, schema & ids (mechanics)
+
+`~/todo.json`, schema `todo.v1`:
+
+```json
+{"schema": "todo.v1", "items": [
+  {"id": "t12", "type": "todo|request|bookmark|operator|proposal|direction",
+   "text": "...", "note": "...", "status": "open|doing|done",
+   "by": "<locus>-keeper|operator|user|...", "ts": 1784300000}
+]}
+```
+
+- **Keep the JSON valid.** The console refuses a malformed file rather than
+  repairing it; a broken board is an outage for the operator.
+- Extra fields survive round-trips (the console passes unknown fields through
+  verbatim) — richness like `pros`/`cons`/`rec`/`comments`/`via` is safe.
+- **Write through a validating tool, not by hand.** Use the `todo` CLI where
+  provisioned. If you must write raw JSON, re-validate before saving.
+- **Ids must be unique across the whole board, regardless of type.** By-id
+  ops (accept, status, note, comments, delete) hit the FIRST match; a
+  duplicated id silently mis-routes writes. (Fleet incident 2026-07-17: a
+  proposal sharing `t33` with a done request made operator accepts "not
+  stick" and clobbered a note.)
+- Namespaces by convention: console-minted items get `t<N>`; keeper-authored
+  use a distinct prefix per type — `p<N>` proposals, `o<N>` operator items,
+  `bm<N>` bookmarks, `d<N>` directions. **Never hand-mint a `t`-prefixed id** —
+  that's the console allocator's namespace and you WILL collide with it.
+- Reserved ids: `cfg-relay` (the relay settings carrier — see §7). Reserved
+  ids are keeper-minted; the console can only update them.
+
+## 7. How items reach the keeper (delivery tiers)
 
 The keeper-relay watches the board and injects notices into your session:
 
@@ -107,7 +155,7 @@ The windows are per-VM, set by the **`cfg-relay` bookmark** (note =
 from the console's ⏱ knob; you may read it but should not fight the
 operator's setting.
 
-## 7. Standing intake — the loop you owe
+## 8. Standing intake — the loop you owe
 
 - **Check the board at session start and whenever you assess work.** Directives
   and tasks land there without interrupting you; the board is your queue, not
@@ -116,11 +164,16 @@ operator's setting.
   verify → record the outcome on the item → `done`.
 - File `proposal` cards BEFORE building anything that changes core behavior,
   is hard to revert, or re-scopes an ask. Build only what was accepted.
-- File `operator` items for anything needing host/root action — with a
-  copyable `cmd`. Never sit on a blocker silently.
+- File `operator` items ONLY for a blocker you cannot clear yourself — an action
+  behind a privilege you lack (root/sudo on a box, a credential, a physical or
+  account step) — with a copyable `cmd`. Never sit on a blocker silently.
+  The ⚑ operator tab is the operator's inbox of YOUR asks, not a place to park
+  the operator's own potential todos: those go on the queue as `todo`.
+- Honor open `direction` items: they are standing rulings that constrain the
+  work above. When one becomes real in a doc or behavior, mark it `APPLIED`.
 - Bookmark every stable build/promote/publish with its receipt.
 
-## 8. Honesty rules (non-negotiable)
+## 9. Honesty rules (non-negotiable)
 
 - **Verify-after-write**: a backend `ok:true` is not proof a field landed —
   re-read and check when it matters (the update op silently drops
@@ -134,19 +187,15 @@ operator's setting.
 - Test items on a live board are prefixed clearly (e.g. `KEEPER-TEST … DELETE`)
   and removed the moment the test ends.
 
-## 9. Templates
-
-The console's 📖 docs drawer carries literal 1:1 JSON examples of every item
-type ("Write items like these") — copy their shape. The proposal card p6 there
-is the canonical decision-request form.
-
 ## 10. Anti-patterns (each one has bitten a real keeper)
 
-- Hand-minting `t`-ids → id collision with the console allocator (§3).
+- Hand-minting `t`-ids → id collision with the console allocator (§6).
 - Deciding your own proposal → the decision belongs to the operator.
 - "done" with an empty note → unverifiable, treated as not done.
+- Signing bare `keeper` or a model name → non-conformant; use `<locus>-keeper` (§3).
+- Marking everything `high` → priority stops meaning anything (§4).
 - Writing settings/config into ad-hoc board fields → use the reserved
-  carriers (§6) or file an operator item; the update whitelist will silently
+  carriers (§7) or file an operator item; the update whitelist will silently
   eat anything else.
 - Leaving test residue on the board → the operator sees ghosts; always clean.
 - A malformed board file → the console goes dark on it; validate every write.

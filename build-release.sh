@@ -21,7 +21,8 @@
 #      that impossible to repeat;
 #   5. layout check     — launcher, VERSION, chrome-sandbox, backend present;
 #      install scriptlets present in deb/rpm/pacman; AppRun is OUR launcher;
-#   6. sha256 sidecars, then stage to the keeper deploy dir.
+#   6. sha256 sidecars, then stage into the shelf's edit/ (/srv/hugpy/www/station/edit);
+#      serving it is `release.sh promote` on the shelf; dist/ keeps one symlink.
 #
 # ANY check failure aborts before staging. Re-running is safe and idempotent:
 # artifacts are rebuilt in place and staging overwrites only same-named files.
@@ -36,7 +37,7 @@ SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIST="$SRC/dist"
 WORK="${HUGPY_STATION_BUILD_DIR:-$HOME/.cache/hugpy-station-build}"
 APPDIR_SRC="$WORK/app"
-STAGE_DIR="${HUGPY_STATION_STAGE_DIR:-/mnt/llm_storage/_keeper_deploy/console}"
+STAGE_DIR="${HUGPY_STATION_STAGE_DIR:-/srv/hugpy/www/station/edit}"   # the shelf's edit/ (2026-09-02): promote with release.sh
 ELECTRON_BUILDER_SPEC="electron-builder@26"
 
 TARGETS="deb rpm pacman AppImage"
@@ -79,15 +80,68 @@ VERSION_FILE="$(tr -d '[:space:]' < "$SRC/resources/VERSION")"
     || fail "package.json ($VERSION) and resources/VERSION ($VERSION_FILE) disagree"
 say "hugpy Station $VERSION -> $TARGETS"
 
+# ── 0b. DRIFT GATE ───────────────────────────────────────────────────────────
+# Refuse to build while the running system contains anything the artifact would
+# not. This is the mechanical half of a rule that convention never held: a live
+# fix that exists only in a deployed tree is a fix that the next install deletes.
+# station-drift-check.sh compares installed-vs-source for the backend, the
+# abstract_claude package, the staged wheel and the baked consoles, checks for
+# dirty/unpushed source of record, and fails on any unshipped authored artifact
+# in resources/unshipped-artifacts.tsv.
+#
+# FORCE_DRIFT=1 overrides it. That is the emergency valve, and it is loud and
+# recorded in the build log on purpose — it is not the normal path.
+DRIFT_CHECK="$SRC/resources/bin/station-drift-check.sh"
+if [ -x "$DRIFT_CHECK" ]; then
+    say "drift gate — is the running system what this build will ship?"
+    if "$DRIFT_CHECK"; then
+        :
+    elif [ "${FORCE_DRIFT:-}" = "1" ]; then
+        printf '\n\033[33m!! FORCE_DRIFT=1 — building over the drift listed above.\n'
+        printf '   Everything marked DRIFT is live work that this .deb does NOT contain\n'
+        printf '   and that installing it will overwrite. %s by %s.\033[0m\n\n' "$(date -Is)" "${SUDO_USER:-$USER}"
+    else
+        fail "drift gate: the live system is ahead of this source tree (see the table above).
+   Reconcile each DRIFT row, then re-run. To override deliberately:  FORCE_DRIFT=1 $0 $*"
+    fi
+else
+    fail "drift gate missing: $DRIFT_CHECK is not executable — it must run before every build"
+fi
+
+# ── 0c. PyPI PIN GATE ────────────────────────────────────────────────────────
+# 1.0.112: bundled wheels are deprecated — resources/REQUIREMENTS.txt installs its
+# pins from PyPI. The old build gate ("every pin has a matching bundled wheel") is
+# replaced by THIS one: every Tier-1 pin must resolve on PyPI at its exact version,
+# or the build fails. Otherwise a fresh box would get nothing (or a lagging PyPI
+# floor) at provision time. Tier-2 '# @service' lines are parsed by firstrun, not
+# pip, and are skipped here.
+REQ_FILE="$SRC/resources/REQUIREMENTS.txt"
+[ -f "$REQ_FILE" ] || fail "PyPI pin gate: $REQ_FILE is missing — it is the single pin source"
+command -v python3 >/dev/null || fail "PyPI pin gate needs python3 (for 'pip download')"
+say "PyPI pin gate — every pin in resources/REQUIREMENTS.txt resolves on PyPI?"
+PINGATE_TMP="$TMP/pypi-gate"; mkdir -p "$PINGATE_TMP"
+pin_fail=0
+while IFS= read -r pin; do
+    [ -n "$pin" ] || continue
+    if python3 -m pip download --no-deps --dest "$PINGATE_TMP" "$pin" >/dev/null 2>&1; then
+        ok "PyPI has $pin"
+    else
+        printf '   \033[31mBAD \033[0m PyPI cannot resolve pin: %s\n' "$pin" >&2
+        pin_fail=$((pin_fail + 1))
+    fi
+done < <(grep -vE '^\s*#|^\s*$' "$REQ_FILE")
+[ "$pin_fail" = 0 ] || fail "PyPI pin gate: $pin_fail pin(s) do not resolve on PyPI (see above) — publish them, then rebuild"
+
 # ── 1. scratch workspace ─────────────────────────────────────────────────────
 # rsync --delete keeps the workspace a faithful mirror of source (a file deleted
 # here must not survive into the next package), minus node_modules and minus
 # everything the sanitizer would otherwise have to catch later.
 say "syncing source -> $APPDIR_SRC"
 mkdir -p "$APPDIR_SRC"
-rsync -a --delete \
+rsync -a --delete --delete-excluded \
     --exclude '.secret' --exclude '.auth' \
     --exclude '__pycache__/' --exclude '*.pyc' \
+    --exclude '*.bak-*' --exclude '*.bak' --exclude '*.orig' --exclude '*.rej' \
     "$SRC/resources/" "$APPDIR_SRC/resources/"
 rsync -a --delete "$SRC/build/" "$APPDIR_SRC/build/"
 cp -f "$SRC/main.js" "$SRC/package.json" "$SRC/electron-builder.yml" \
@@ -146,7 +200,7 @@ for t in $TARGETS; do EB_TARGETS+=("$t"); done
     "${EB_EXTRA[@]}" )
 
 # ── verification helpers ─────────────────────────────────────────────────────
-SANITIZE_RE='(^|/)\.secret$|(^|/)\.auth$|(^|/)__pycache__(/|$)|\.pyc$'
+SANITIZE_RE='(^|/)\.secret$|(^|/)\.auth$|(^|/)__pycache__(/|$)|\.pyc$|\.bak(-|\.|$)|resources/backend/test_[^/]*\.py$'
 
 # GNU tar auto-detects gzip/xz/zstd from a real file; the explicit fallbacks are
 # for the pacman package, whose compression is fpm's choice, not ours.
@@ -211,9 +265,29 @@ check_listing() { # check_listing <label> <listing-file>
         ok "$label SANITIZE clean ($(wc -l < "$lst") paths)"
     fi
     for want in hugpy-station-launch resources/VERSION chrome-sandbox \
-                resources/backend/server.py resources/app.asar; do
+                resources/backend/server.py resources/app.asar \
+                resources/backend/mct_gateway.py resources/backend/mct_http.py \
+                resources/backend/static/mct-renderer.js \
+                resources/backend/frontier-models.default.json \
+                resources/backend/abstract-claude.default.json \
+                resources/backend/local-keeper/AGENTS.md \
+                resources/bin/mct-pull resources/bin/mct-push \
+                resources/bin/hugpy-station-firstrun resources/bin/hugpy-station-web-run \
+                resources/bin/abstract-claude-console resources/abstract-claude-console.desktop \
+                resources/bin/hugpy-station-user-install \
+                resources/bin/station-provision-venv \
+                resources/systemd/hugpy-station-web@.service \
+                resources/systemd/hugpy-station-web.user.service \
+                resources/REQUIREMENTS.txt; do
         grep -q "$want" "$lst" || bad "$label missing $want"
     done
+    # 1.0.112: bundled wheels are DEPRECATED — the pins install from PyPI. The
+    # "every pin has a matching bundled wheel" gate is gone; PyPI-resolvability of
+    # every pin is enforced at build time by the PyPI pin gate (section 0c), and
+    # nothing under resources/wheels/ should ship any more.
+    if grep -qE 'resources/wheels/' "$lst"; then
+        bad "$label ships a resources/wheels/ artifact — bundled wheels were retired in 1.0.112"
+    fi
 }
 
 check_asar() {    # check_asar <label> <extracted-app.asar>
@@ -253,6 +327,23 @@ deb)
         && ok "deb postinst migrates seat settings" || bad "deb postinst missing fix_seat_settings"
     grep -q 'provision_seats' "$TMP/deb.postinst" \
         && ok "deb postinst provisions seat CLIs" || bad "deb postinst missing provision_seats"
+    # 1.0.90: one-shot first-run — every station user provisioned, CLIs on PATH,
+    # instances restarted onto this payload.
+    grep -q 'hugpy-station-firstrun' "$TMP/deb.postinst" \
+        && ok "deb postinst runs hugpy-station-firstrun" || bad "deb postinst missing hugpy-station-firstrun"
+    grep -q 'try-restart' "$TMP/deb.postinst" \
+        && ok "deb postinst restarts instances onto this payload" || bad "deb postinst missing try-restart"
+    dpkg-deb --fsys-tarfile "$DEB" \
+        | tar -xO ./opt/hugpy-station/resources/systemd/hugpy-station-web@.service > "$TMP/deb.unit" 2>/dev/null || true
+    grep -q 'hugpy-station-web-run' "$TMP/deb.unit" \
+        && ok "deb unit runs the layout-agnostic wrapper (explicit HUGPY_STATION_STATE)" \
+        || bad "deb unit does not use hugpy-station-web-run"
+    dpkg-deb --fsys-tarfile "$DEB" \
+        | tar -xO ./opt/hugpy-station/resources/backend/server.py > "$TMP/deb.server.py" 2>/dev/null || true
+    python3 -c 'import ast,sys; ast.parse(open(sys.argv[1]).read())' "$TMP/deb.server.py" 2>/dev/null \
+        && ok "deb server.py parses" || bad "deb server.py does not parse"
+    grep -q 'from mct_http import' "$TMP/deb.server.py" \
+        && ok "deb server.py wires mct_http (durable MCT ledger)" || bad "deb server.py lacks the mct_http wiring"
     # Since 1.0.47 the deb must be single-file offline-installable: aiohttp is
     # vendored (resources/backend/vendor) and lxd is only Recommended, so both
     # must be OUT of Depends and IN Recommends.
@@ -357,6 +448,17 @@ if [ "$DO_STAGE" = 1 ]; then
             || fail "staged $b does not match its sidecar"
     done
     ok "staged copies verify against their sidecars"
+    # The shelf is the ONLY home of releases (operator, 2026-09-02). A build lands
+    # in edit/; serving it is a deliberate step:  <shelf>/release.sh promote
+    # (edit/ → latest/, latest/ → previous/, previous/ → old/). dist/ keeps
+    # nothing but a symlink to what the shelf serves.
+    for a in "${ARTIFACTS[@]}"; do
+        b="$(basename "$a")"
+        cmp -s "$a" "$STAGE_DIR/$b" && rm -f "$a" "$DIST/$b.sha256"
+    done
+    rm -rf "$DIST/linux-unpacked" "$DIST/builder-debug.yml"
+    ln -sfn "$(dirname "$STAGE_DIR")/pub/hugpy-station_latest.deb" "$DIST/hugpy-station_latest.deb"
+    info "dist/ holds only hugpy-station_latest.deb -> served release; now: $(dirname "$STAGE_DIR")/release.sh promote $VERSION"
 else
     info "--no-stage: artifacts left in $DIST"
 fi

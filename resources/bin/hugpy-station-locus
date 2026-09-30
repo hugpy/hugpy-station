@@ -1,0 +1,250 @@
+#!/usr/bin/env bash
+# hugpy-station-locus — make an account on this host a LOCUS with inter-agent
+# comms wired by default: its own headless station instance (the comms leg)
+# plus registration in the toolserver's loci registry.
+#
+# The station's point is inter-agent comms (operator, 2026-09-03). The channel
+# is the toolserver board: comms/ping posts on a locus's board; that locus's
+# station pulls comms/inbox every loci-sync, turns pings into keeper mail and
+# types ONE nudge line into the keeper's idle pane. So "a locus with comms" =
+# "an account with a running hugpy-station-web@<user> that knows its locus name
+# and holds a toolserver token". This script establishes exactly that, and the
+# deb's postinst calls it for the installing user, so a fresh install is wired.
+#
+#   hugpy-station-locus enable <user> [--locus NAME] [--port N] [--goal TEXT]
+#                                     [--no-register] [--dry-run] [--quiet]
+#   hugpy-station-locus status <user>
+#
+# What `enable` wires (each step idempotent, nothing existing is overwritten):
+#   1. /etc/hugpy-station/<user>.env (root 0600): PORT + sidecar ports chosen
+#      free and distinct from every other instance on this host (the template
+#      unit's PORT=8898 default is why a second account used to crash-loop),
+#      STATION_LOCUS, state dir ${XDG_CONFIG_HOME:-<home>/.config}/hugpy-station, a fresh console token.
+#   2. toolserver reach: from /etc/hugpy-station/toolserver.env (host-level,
+#      STATION_CONSOLE_TOOLSERVER + STATION_CONSOLE_TOOLSERVER_TOKEN) — written
+#      once per host by the operator (or --toolserver/--token here). Without
+#      it the instance runs but comms are OFF and this script says so.
+#   3. loci/register on the toolserver: kind=station, endpoint <user>@<lan-ip>,
+#      so every station's dropdown and _station_locus() see it within 20 s.
+#   4. systemctl enable --now hugpy-station-web@<user>.
+#
+# `enable` is a no-op when /etc/hugpy-station/<user>.retired exists.
+#
+# Locus name: --locus, else "<hostname>-<user>" normalised to [a-z0-9-] (the
+# fleet's existing spelling: ae-vm-mgr). Pass --locus when a shorter name is
+# already established (hugpy).
+set -euo pipefail
+
+ETC=/etc/hugpy-station
+TS_ENV="$ETC/toolserver.env"
+UNIT_PREFIX=hugpy-station-web@
+QUIET=0; DRY=0; REGISTER=1
+LOCUS=""; PORT=""; GOAL=""; TS_URL=""; TS_TOKEN=""
+
+log() { [ "$QUIET" = 1 ] || printf '[%s] %s\n' "$(date +%H:%M:%S)" "$*"; }
+warn() { printf 'hugpy-station-locus: %s\n' "$*" >&2; }
+die() { warn "error: $*"; exit 1; }
+
+usage() { sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+[ $# -ge 1 ] || usage 2
+CMD="$1"; shift
+[ "$CMD" = enable ] || [ "$CMD" = status ] || usage 2
+[ $# -ge 1 ] || usage 2
+USER_NAME="$1"; shift
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --locus) LOCUS="$2"; shift 2;;
+        --port) PORT="$2"; shift 2;;
+        --goal) GOAL="$2"; shift 2;;
+        --toolserver) TS_URL="$2"; shift 2;;
+        --token) TS_TOKEN="$2"; shift 2;;
+        --no-register) REGISTER=0; shift;;
+        --dry-run) DRY=1; shift;;
+        --quiet) QUIET=1; shift;;
+        -h|--help) usage 0;;
+        *) die "unknown option $1";;
+    esac
+done
+
+[[ "$USER_NAME" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die "bad user name '$USER_NAME'"
+id "$USER_NAME" >/dev/null 2>&1 || die "no such account: $USER_NAME"
+HOME_DIR="$(getent passwd "$USER_NAME" | cut -d: -f6)"
+[ -n "$HOME_DIR" ] || die "no home for $USER_NAME"
+ENV_FILE="$ETC/$USER_NAME.env"
+UNIT="$UNIT_PREFIX$USER_NAME"
+
+# Host-level opt-out: an operator retires a locus instance by creating
+# $ETC/<user>.retired (e.g. on a host whose comms leg is the station.hugpy.ai
+# instance). Reinstalls then leave the unit disabled instead of re-enabling it.
+if [ "$CMD" = enable ] && [ -e "$ETC/$USER_NAME.retired" ]; then
+    log "$UNIT retired on this host ($ETC/$USER_NAME.retired) — not enabling"
+    exit 0
+fi
+
+norm_locus() { printf '%s' "$1" | tr 'A-Z_' 'a-z-' | sed -E 's/[^a-z0-9-]+/-/g; s/^-+//; s/-+$//' | cut -c1-63; }
+
+lan_ip() {
+    # the address peers reach us on: the source ip of the default route, else
+    # the first 192.168/10. address, else ''.
+    local ip
+    ip="$(ip -4 route get 1.1.1.1 2>/dev/null | sed -nE 's/.* src ([0-9.]+).*/\1/p' | head -1)"
+    [ -n "$ip" ] || ip="$(hostname -I 2>/dev/null | tr ' ' '\n' | grep -E '^(192\.168\.|10\.)' | head -1)"
+    printf '%s' "$ip"
+}
+
+env_get() { # env_get FILE KEY
+    [ -r "$1" ] || return 0
+    sed -nE "s/^$2=(.*)$/\1/p" "$1" | tail -1
+}
+
+port_in_use() { # listening, or claimed by another instance env file
+    local p="$1" f
+    ss -ltn 2>/dev/null | awk '{print $4}' | grep -qE "[:.]$p\$" && return 0
+    for f in "$ETC"/*.env; do
+        [ -r "$f" ] && [ "$f" != "$ENV_FILE" ] || continue
+        grep -qE "^(PORT|CONSOLE_API_PORT|BUGREPORT_API_PORT)=$p\$" "$f" 2>/dev/null && return 0
+    done
+    # instances configured by drop-in instead of an env file (hugpy-station-domain --port)
+    systemctl show "$UNIT_PREFIX*" -p Environment --value 2>/dev/null | tr ' ' '\n' | grep -qE "^(PORT|CONSOLE_API_PORT|BUGREPORT_API_PORT)=$p\$" && return 0
+    return 1
+}
+
+pick_port() { # pick_port START -> first free port >= START
+    local p="$1"
+    while port_in_use "$p"; do p=$((p+1)); [ "$p" -lt 65000 ] || die "no free port"; done
+    printf '%s' "$p"
+}
+
+# ── status ────────────────────────────────────────────────────────────────────
+if [ "$CMD" = status ]; then
+    active="$(systemctl is-active "$UNIT" 2>/dev/null || true)"
+    enabled="$(systemctl is-enabled "$UNIT" 2>/dev/null || true)"
+    port="$(env_get "$ENV_FILE" PORT)"; locus="$(env_get "$ENV_FILE" STATION_LOCUS)"
+    # env file absent/unreadable (root 0600; or a drop-in instance): ask systemd for the effective values
+    unit_env="$(systemctl show "$UNIT" -p Environment --value 2>/dev/null | tr ' ' '\n')"
+    if [ -z "$port" ]; then   # what the live process actually listens on beats any declared default
+        pid="$(systemctl show "$UNIT" -p MainPID --value 2>/dev/null)"
+        [ -n "$pid" ] && [ "$pid" != 0 ] && port="$(ss -ltnp 2>/dev/null | grep "pid=$pid," | awk '{print $4}' | sed -E 's/.*:([0-9]+)$/\1/' | sort -n | tail -1 || true)"
+    fi
+    [ -n "$port" ]  || port="$(printf '%s\n' "$unit_env" | sed -nE 's/^PORT=(.*)$/\1/p' | tail -1)"
+    [ -n "$locus" ] || locus="$(printf '%s\n' "$unit_env" | sed -nE 's/^STATION_LOCUS=(.*)$/\1/p' | tail -1)"
+    ts="$(env_get "$ENV_FILE" STATION_CONSOLE_TOOLSERVER)"; [ -n "$ts" ] || ts="$(env_get "$TS_ENV" STATION_CONSOLE_TOOLSERVER)"
+    tok=no; { [ -n "$(env_get "$ENV_FILE" STATION_CONSOLE_TOOLSERVER_TOKEN)" ] || [ -n "$(env_get "$TS_ENV" STATION_CONSOLE_TOOLSERVER_TOKEN)" ]; } && tok=yes
+    printf '{"user":"%s","unit":"%s","active":"%s","enabled":"%s","port":"%s","locus":"%s","toolserver":"%s","token":"%s","env":"%s"}\n' \
+        "$USER_NAME" "$UNIT" "${active:-unknown}" "${enabled:-unknown}" "$port" "$locus" "$ts" "$tok" "$([ -f "$ENV_FILE" ] && echo present || echo missing)"
+    exit 0
+fi
+
+# ── enable ────────────────────────────────────────────────────────────────────
+[ "$DRY" = 1 ] || [ "$(id -u)" = 0 ] || die "enable must run as root (sudo)"
+
+# An instance that already exists WITHOUT an env file was established another way
+# (hugpy-station-domain: a site.conf drop-in with its own port/token/state). Writing
+# an env file now would silently move it to a new port and a new console token —
+# the operator's proxy and every seat env would break. Adopt it as-is: register the
+# locus, report, change nothing. (--port/--locus explicitly given = the operator
+# wants the env file after all.)
+if [ ! -e "$ENV_FILE" ] && [ -z "$PORT" ] && [ -z "$LOCUS" ] \
+   && { systemctl is-enabled --quiet "$UNIT" 2>/dev/null || systemctl is-active --quiet "$UNIT" 2>/dev/null; }; then
+    ADOPT=1
+else
+    ADOPT=0
+fi
+[ -f "/etc/systemd/system/$UNIT_PREFIX.service" ] || [ -f "/lib/systemd/system/$UNIT_PREFIX.service" ] \
+    || [ "$DRY" = 1 ] || die "template unit $UNIT_PREFIX.service is not installed"
+
+# toolserver reach: explicit flags > per-user env > host env
+[ -n "$TS_URL" ]   || TS_URL="$(env_get "$ENV_FILE" STATION_CONSOLE_TOOLSERVER)"
+[ -n "$TS_URL" ]   || TS_URL="$(env_get "$TS_ENV" STATION_CONSOLE_TOOLSERVER)"
+[ -n "$TS_TOKEN" ] || TS_TOKEN="$(env_get "$ENV_FILE" STATION_CONSOLE_TOOLSERVER_TOKEN)"
+[ -n "$TS_TOKEN" ] || TS_TOKEN="$(env_get "$TS_ENV" STATION_CONSOLE_TOOLSERVER_TOKEN)"
+COMMS=1; { [ -n "$TS_URL" ] && [ -n "$TS_TOKEN" ]; } || COMMS=0
+
+# locus name
+[ -n "$LOCUS" ] || LOCUS="$(env_get "$ENV_FILE" STATION_LOCUS)"
+[ -n "$LOCUS" ] || LOCUS="$(norm_locus "$(hostname -s)-$USER_NAME")"
+LOCUS="$(norm_locus "$LOCUS")"
+[ -n "$LOCUS" ] || die "empty locus name"
+
+# ports: keep what an existing env file already claims
+P_MAIN="$(env_get "$ENV_FILE" PORT)"; P_CON="$(env_get "$ENV_FILE" CONSOLE_API_PORT)"; P_BUG="$(env_get "$ENV_FILE" BUGREPORT_API_PORT)"
+if [ -n "$PORT" ]; then [[ "$PORT" =~ ^[0-9]+$ ]] || die "--port must be a number"; P_MAIN="$PORT"; fi
+[ -n "$P_MAIN" ] || P_MAIN="$(pick_port 8898)"
+[ -n "$P_CON" ]  || P_CON="$(pick_port 8866)"
+[ -n "$P_BUG" ]  || P_BUG="$(pick_port $((P_CON+1)))"
+[ "$P_CON" != "$P_BUG" ] && [ "$P_MAIN" != "$P_CON" ] && [ "$P_MAIN" != "$P_BUG" ] || die "port clash $P_MAIN/$P_CON/$P_BUG"
+
+STATE="$HOME_DIR/.config/hugpy-station"
+TOKEN="$(env_get "$ENV_FILE" STATION_CONSOLE_TOKEN)"
+[ -n "$TOKEN" ] || TOKEN="$(python3 -c 'import secrets;print(secrets.token_hex(24))')"
+IP="$(lan_ip)"
+
+# assemble: existing keys win, missing keys are added — never clobber.
+declare -A WANT=(
+    [HOST]=127.0.0.1 [PORT]="$P_MAIN" [STATION_LOCUS]="$LOCUS"
+    [HUGPY_STATION_STATE]="$STATE" [STATION_CONSOLE_AUDIT]="$STATE/audit.log"
+    [BRIDGE_STATE]="$HOME_DIR/bridge-state"
+    [CONSOLE_API_PORT]="$P_CON" [BUGREPORT_API_PORT]="$P_BUG"
+    [STATION_CONSOLE_REQUIRE_AUTH]=1 [STATION_CONSOLE_PROXY_TLS]=1
+    [STATION_CONSOLE_TOKEN]="$TOKEN"
+)
+if [ "$COMMS" = 1 ]; then
+    WANT[STATION_CONSOLE_TOOLSERVER]="$TS_URL"
+    WANT[STATION_CONSOLE_TOOLSERVER_TOKEN]="$TS_TOKEN"
+    WANT[HUGPY_OPERATOR_TOKEN]="$TS_TOKEN"
+fi
+NEW="$(mktemp)"; trap 'rm -f "$NEW"' EXIT
+{
+    if [ -r "$ENV_FILE" ]; then cat "$ENV_FILE"; elif [ -e "$ENV_FILE" ]; then
+        printf '# (existing %s not readable as uid %s — dry-run shows only what would be ADDED)\n' "$ENV_FILE" "$(id -u)"; else
+        printf '# hugpy-station-web@%s — this account as a fleet locus (%s). Written by\n# hugpy-station-locus on %s; edit freely, the script never overwrites a key.\n' \
+            "$USER_NAME" "$LOCUS" "$(date -Is)"
+    fi
+    for k in HOST PORT STATION_LOCUS HUGPY_STATION_STATE STATION_CONSOLE_AUDIT BRIDGE_STATE CONSOLE_API_PORT BUGREPORT_API_PORT \
+             STATION_CONSOLE_REQUIRE_AUTH STATION_CONSOLE_PROXY_TLS STATION_CONSOLE_TOKEN \
+             STATION_CONSOLE_TOOLSERVER STATION_CONSOLE_TOOLSERVER_TOKEN HUGPY_OPERATOR_TOKEN; do
+        [ -n "${WANT[$k]+x}" ] || continue
+        grep -qE "^$k=" "$ENV_FILE" 2>/dev/null && continue
+        printf '%s=%s\n' "$k" "${WANT[$k]}"
+    done
+} > "$NEW"
+
+if [ "$DRY" = 1 ]; then
+    log "dry-run: would write $ENV_FILE:"; sed -E 's/^(STATION_CONSOLE_TOKEN|STATION_CONSOLE_TOOLSERVER_TOKEN|HUGPY_OPERATOR_TOKEN)=.*/\1=…/' "$NEW"
+    log "dry-run: locus=$LOCUS endpoint=$USER_NAME@${IP:-?} comms=$([ "$COMMS" = 1 ] && echo on || echo OFF) register=$REGISTER unit=$UNIT"
+    exit 0
+fi
+
+mkdir -p "$ETC"; chmod 0755 "$ETC"
+if [ "$ADOPT" = 1 ]; then
+    P_MAIN="$("$0" status "$USER_NAME" | sed -nE 's/.*"port":"([0-9]*)".*/\1/p')"
+    log "1/3 $UNIT already established without $ENV_FILE (drop-in instance on port ${P_MAIN:-?}) — adopted, nothing written"
+else
+    install -o root -g root -m 0600 "$NEW" "$ENV_FILE"
+    log "1/3 $ENV_FILE: locus=$LOCUS port=$P_MAIN sidecars=$P_CON/$P_BUG state=$STATE comms=$([ "$COMMS" = 1 ] && echo on || echo OFF)"
+fi
+[ "$COMMS" = 1 ] || warn "no toolserver url/token: write $TS_ENV (STATION_CONSOLE_TOOLSERVER=…, STATION_CONSOLE_TOOLSERVER_TOKEN=…) and re-run — until then this locus has no inter-agent comms"
+
+# 2/3 register the locus (best effort: the station also self-resolves by user@ip)
+if [ "$COMMS" = 1 ] && [ "$REGISTER" = 1 ]; then
+    [ -n "$GOAL" ] || GOAL="$USER_NAME on $(hostname -s) — headless station on 127.0.0.1:$P_MAIN (hugpy-station-locus)"
+    body="$(python3 -c 'import json,sys;print(json.dumps({"locus":sys.argv[1],"kind":"station","goal":sys.argv[2],"endpoint":sys.argv[3]}))' \
+            "$LOCUS" "$GOAL" "$USER_NAME@${IP:-127.0.0.1}")"
+    if out="$(curl -sS --max-time 15 -X POST "${TS_URL%/}/loci/register" -H "Authorization: Bearer $TS_TOKEN" \
+              -H 'Content-Type: application/json' -d "$body" 2>&1)" && ! printf '%s' "$out" | grep -q '"error"'; then
+        log "2/3 registered locus $LOCUS as station $USER_NAME@${IP:-?}"
+    else
+        warn "loci/register failed (continuing; the station self-resolves by user@ip): ${out:0:160}"
+    fi
+else
+    log "2/3 register: skipped"
+fi
+
+# 3/3 the instance
+systemctl daemon-reload
+systemctl enable --now "$UNIT" >/dev/null 2>&1 || systemctl restart "$UNIT"
+for _ in 1 2 3 4 5 6 7 8 9 10; do systemctl is-active --quiet "$UNIT" && break; sleep 1; done
+systemctl is-active --quiet "$UNIT" || die "$UNIT failed to start — journalctl -u $UNIT"
+log "3/3 $UNIT active on 127.0.0.1:$P_MAIN (locus $LOCUS)"
+[ "$QUIET" = 1 ] || "$0" status "$USER_NAME"

@@ -101,4 +101,11 @@ work you assess, assign an implementer agent (subagent) with a scoped brief, \
 verify its results, and report — you implement directly only for trivial fixes \
 or emergencies. Investigate before acting, prefer reversible steps, and report \
 what you observe."
+# 1.0.83: FRESH .claude per launch via `abstract-claude launch` (new
+# ~/.claude-sessions/<stamp>-<pid>-keeper dir: template settings, login identity
+# + freshest credentials carried from ~/.claude, workspace trust, toolserver MCP).
+# Direct `claude` (persistent ~/.claude) only when abstract-claude is unavailable.
+if command -v abstract-claude >/dev/null 2>&1; then
+  AC_SESSION_LABEL=keeper exec abstract-claude launch -- --dangerously-skip-permissions "${args[@]}" "$PRIMER$charge"
+fi
 exec "$c" --dangerously-skip-permissions "${args[@]}" "$PRIMER$charge"

@@ -9,9 +9,79 @@
   "showTurnDuration": false,
   "useAutoModeDuringPlan": true,
   "permissions": {
-    "defaultMode": "auto"
+    "defaultMode": "auto",
+    "deny": [
+      "Bash(ugrep /*)",
+      "Bash(ugrep * /)",
+      "Bash(ugrep * / *)",
+      "Bash(bfs /*)",
+      "Bash(bfs * /)",
+      "Bash(bfs * / *)",
+      "Bash(rg /*)",
+      "Bash(rg * /)",
+      "Bash(rg * / *)",
+      "Bash(grep /*)",
+      "Bash(grep * /)",
+      "Bash(grep * / *)",
+      "Bash(find /*)",
+      "Bash(find * /)",
+      "Bash(find * / *)",
+      "Bash(fd /*)",
+      "Bash(fd * /)",
+      "Bash(fd * / *)",
+      "Bash(grep -r / *)",
+      "Bash(grep -R / *)"
+    ]
   },
   "worktree": {
     "baseRef": "head"
+  },
+  "env": {
+    "EXCHANGE_INGEST_URL": "http://127.0.0.1:7004"
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.local/bin/exchange_capture_hook.py\""
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.local/bin/ledger_hook.py\"",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.local/bin/ledger_hook.py\"",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.local/bin/ledger_hook.py\"",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
   }
 }

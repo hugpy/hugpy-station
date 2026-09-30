@@ -1,0 +1,478 @@
+#!/usr/bin/env bash
+# hugpy-station-firstrun — ONE-SHOT first-run provisioning for a station user (1.0.90).
+#
+# "Install the .deb" is the whole story: everything a station needs before its
+# first launch is established here, from the package, with no manual env edits.
+# Called by
+#   * the package after-install (as root, for EVERY station user on the host:
+#     the installing user + every /etc/hugpy-station/<user>.env instance), and
+#   * hugpy-station-web-run at every unit start (as the station user, --self),
+#   * hugpy-station-user-install (the user-unit derivative of the same package).
+# Idempotent: never overwrites a value that exists; safe on every upgrade/start.
+#
+#   hugpy-station-firstrun <user>  [--app-root DIR] [--state DIR] [--env-file FILE] [--quiet]
+#   hugpy-station-firstrun --self  [--app-root DIR] [--state DIR] [--env-file FILE] [--quiet]
+#
+# Canonical layout (ONE, for both the system unit and the user unit):
+#   payload   <app-root>                 /opt/hugpy-station (the .deb) — or, user layout,
+#                                        <state>/app/current -> <state>/app/<version> unpacked
+#                                        from the SAME .deb by hugpy-station-user-install
+#   state     HUGPY_STATION_STATE        ${XDG_CONFIG_HOME:-<home>/.config}/hugpy-station  (the ONE
+#                                        state dir; when HUGPY_STATION_STATE points elsewhere,
+#                                        ~/.config/hugpy-station is symlinked to it)
+#   env       system unit: /etc/hugpy-station/<user>.env (root 0600, written by
+#             hugpy-station-locus + this script);  user unit: <state>/env/station.env
+#   unit      hugpy-station-web@<user> (system) / hugpy-station-web (user manager)
+#
+# What it establishes (each step idempotent, best-effort, never fatal):
+#   1. state skeleton: launch/ seat-launch/ mct/renderer mct2/repl local-keeper/ env/
+#      abstract-claude/  — owned by the station user
+#   2. by default the state dir IS ~/.config/hugpy-station; when HUGPY_STATION_STATE points
+#      elsewhere, ~/.config/hugpy-station is reconciled onto it (migrate, then symlink)
+#   3. defaults seeded when absent: frontier-models.json (a WORKING frontier model),
+#      local-keeper/AGENTS.md (+ QWEN.md -> it, docs -> shipped docs),
+#      abstract-claude/config.json (default_model = the seat's model, fresh_session_mode=dir
+#      so a station wipe is real)
+#   4. ~/.local/bin/mct-pull + mct-push -> the package (seat PATH), both layouts
+#   5. instance env: HUGPY_URL (default http://127.0.0.1:7002) + HUGPY_API_KEY resolved from
+#      the installer env, the host seam /etc/hugpy-station/hugpy-api.env, the platform's
+#      own env files, ~/.config/hugpy-agent/agent.env — or MINTED via POST <HUGPY_URL>/keys
+#      with the operator token the station already holds. STATION_LOCUS defaulted.
+set -u
+
+QUIET=0; SELF=0; USER_NAME=""; APP_ROOT=""; STATE=""; ENV_FILE=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --self) SELF=1; shift ;;
+        --app-root) APP_ROOT="$2"; shift 2 ;;
+        --state) STATE="$2"; shift 2 ;;
+        --env-file) ENV_FILE="$2"; shift 2 ;;
+        --quiet) QUIET=1; shift ;;
+        -h|--help) sed -n '2,45p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -*) echo "hugpy-station-firstrun: unknown option $1" >&2; exit 2 ;;
+        *) USER_NAME="$1"; shift ;;
+    esac
+done
+log()  { [ "$QUIET" = 1 ] || printf 'hugpy-station-firstrun: %s\n' "$*"; }
+warn() { printf 'hugpy-station-firstrun: %s\n' "$*" >&2; }
+
+# ── who / where ───────────────────────────────────────────────────────────────
+if [ "$SELF" = 1 ]; then
+    USER_NAME="$(id -un)"
+elif [ -z "$USER_NAME" ]; then
+    echo "usage: hugpy-station-firstrun <user> | --self  (see --help)" >&2; exit 2
+fi
+[ "$USER_NAME" != root ] || { warn "root is not a station user; nothing to do"; exit 0; }
+id "$USER_NAME" >/dev/null 2>&1 || { warn "no such account: $USER_NAME"; exit 0; }
+HOME_DIR="$(getent passwd "$USER_NAME" | cut -d: -f6)"
+[ -n "$HOME_DIR" ] && [ -d "$HOME_DIR" ] || { warn "no home dir for $USER_NAME"; exit 0; }
+GROUP_NAME="$(id -gn "$USER_NAME")"
+AS_ROOT=0; [ "$(id -u)" = 0 ] && AS_ROOT=1
+if [ "$SELF" = 0 ] && [ "$AS_ROOT" = 0 ] && [ "$USER_NAME" != "$(id -un)" ]; then
+    warn "provisioning another user needs root; run as $USER_NAME with --self"; exit 3
+fi
+
+if [ -z "$APP_ROOT" ]; then
+    _self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+    APP_ROOT="$(cd "$(dirname "$_self")/../.." 2>/dev/null && pwd)"
+    [ -f "$APP_ROOT/resources/backend/server.py" ] || APP_ROOT=/opt/hugpy-station
+fi
+BACKEND="$APP_ROOT/resources/backend"
+BINDIR="$APP_ROOT/resources/bin"
+
+# the instance env file (system layout, root) — the source of HUGPY_STATION_STATE when set
+SYS_ENV="/etc/hugpy-station/$USER_NAME.env"
+env_get() { [ -r "$1" ] || return 0; sed -nE "s/^$2=(.*)$/\1/p" "$1" 2>/dev/null | tail -1 | sed -E "s/^\"(.*)\"$/\1/; s/^'(.*)'$/\1/"; }
+
+if [ -z "$STATE" ]; then
+    STATE="${HUGPY_STATION_STATE:-}"
+    [ -n "$STATE" ] || STATE="$(env_get "$SYS_ENV" HUGPY_STATION_STATE)"
+    # canonical per-user state = ~/.config/hugpy-station (XDG), matching
+    # mct_gateway.py _home(); the retired ~/hugpy-station is NEVER a default.
+    [ -n "$STATE" ] || STATE="$HOME_DIR/.config/hugpy-station"
+fi
+case "$STATE" in /*) ;; *) STATE="$HOME_DIR/$STATE" ;; esac
+# ~/.config/hugpy-station is the canonical config path server.py's seat scripts
+# still spell; when STATE lives elsewhere (e.g. vm_mgr's /srv/vm_mgr/hugpy-station)
+# we symlink this onto it below, otherwise it already IS STATE (a no-op).
+CFG_LINK="$HOME_DIR/.config/hugpy-station"
+
+# run a command as the station user (no-op wrapper when already that user)
+as_user() {
+    if [ "$AS_ROOT" = 1 ] && [ "$USER_NAME" != root ]; then
+        sudo -n -u "$USER_NAME" -H "$@" 2>/dev/null || runuser -u "$USER_NAME" -- "$@"
+    else
+        "$@"
+    fi
+}
+own() { [ "$AS_ROOT" = 1 ] && chown -h "$USER_NAME:$GROUP_NAME" "$@" 2>/dev/null || true; }
+mkd() { # mkd MODE DIR...
+    local m="$1"; shift
+    for d in "$@"; do
+        [ -d "$d" ] || mkdir -p "$d" 2>/dev/null || continue
+        chmod "$m" "$d" 2>/dev/null || true
+        own "$d"
+    done
+}
+
+# ── 1. state skeleton ─────────────────────────────────────────────────────────
+# The account's own dot-dirs FIRST, owned by the account: a root-run
+# `install -d` for a deeper path leaves ~/.local and ~/.local/share root-owned
+# on a fresh account, which is exactly how `claude` failed to install
+# (EACCES mkdir ~/.local/share/claude) on the 1.0.90 fresh-install test.
+mkd 0755 "$HOME_DIR/.local" "$HOME_DIR/.local/share" "$HOME_DIR/.local/bin" \
+         "$HOME_DIR/.config" "$HOME_DIR/.cache" "$HOME_DIR/.local/share/station-seats"
+mkd 0755 "$STATE" "$STATE/launch" "$STATE/seat-launch" "$STATE/mct" "$STATE/mct2" \
+         "$STATE/mct2/repl" "$STATE/local-keeper" "$STATE/abstract-claude"
+mkd 0700 "$STATE/mct/renderer" "$STATE/env"
+mkd 0755 "$STATE/bugscan"
+log "state $STATE (skeleton ok)"
+
+# The retired ~/hugpy-station (a former state-dir default) is NEVER created,
+# migrated, or deleted here. If an old one lingers from a pre-1.0.113 install,
+# leave it untouched and note it once.
+if [ -d "$HOME_DIR/hugpy-station" ] \
+   && [ "$(readlink -f "$HOME_DIR/hugpy-station" 2>/dev/null)" != "$(readlink -f "$STATE" 2>/dev/null)" ]; then
+    log "note: retired $HOME_DIR/hugpy-station exists and is ignored (state is $STATE)"
+fi
+
+# The Log tab / bug-scan read this station's own journal (journalctl _UID=<uid>
+# + _SYSTEMD_UNIT=…): a system-unit station user must be in systemd-journal
+# (else journalctl refuses). User-unit stations read `journalctl --user`, which
+# needs persistent journald (/var/log/journal) — reported, not fixable from here.
+if [ "$AS_ROOT" = 1 ] && getent group systemd-journal >/dev/null 2>&1 \
+   && ! id -nG "$USER_NAME" 2>/dev/null | tr ' ' '\n' | grep -qx systemd-journal; then
+    usermod -aG systemd-journal "$USER_NAME" 2>/dev/null && log "added $USER_NAME to systemd-journal (Log tab / bug-scan can read the journal)"
+fi
+[ -d /var/log/journal ] || warn "journald is not persistent (/var/log/journal absent): a USER-unit station's Log tab sees only the current boot — mkdir -p /var/log/journal && systemctl restart systemd-journald (root)"
+
+# ── 2. ~/.config/hugpy-station == the state dir ───────────────────────────────
+# server.py's seat scripts still spell $HOME/.config/hugpy-station for the
+# directive and the mct2 workspace. By default that path IS the state dir, so
+# this whole block is a no-op; only when HUGPY_STATION_STATE points STATE
+# elsewhere do we reconcile ~/.config/hugpy-station onto it (migrate, then
+# symlink) so those spellings resolve to the real state without a rewrite.
+if [ "$(readlink -f "$CFG_LINK" 2>/dev/null)" != "$(readlink -f "$STATE")" ]; then
+    mkd 0755 "$HOME_DIR/.config"
+    if [ -L "$CFG_LINK" ]; then
+        if [ ! -e "$CFG_LINK" ]; then rm -f "$CFG_LINK"; ln -sfn "$STATE" "$CFG_LINK"; own "$CFG_LINK"; log "re-pointed dangling $CFG_LINK -> $STATE"
+        else warn "$CFG_LINK is a symlink to $(readlink -f "$CFG_LINK"), not to $STATE — left alone"; fi
+    elif [ -d "$CFG_LINK" ]; then
+        moved=0
+        for f in "$CFG_LINK"/* "$CFG_LINK"/.[!.]*; do
+            [ -e "$f" ] || [ -L "$f" ] || continue
+            b="$(basename "$f")"
+            if [ ! -e "$STATE/$b" ] && [ ! -L "$STATE/$b" ]; then mv "$f" "$STATE/$b" 2>/dev/null && moved=$((moved+1)); fi
+        done
+        if rmdir "$CFG_LINK" 2>/dev/null; then
+            ln -sfn "$STATE" "$CFG_LINK"; own "$CFG_LINK"
+            log "migrated $moved item(s) from $CFG_LINK into $STATE; $CFG_LINK -> $STATE"
+        else
+            bak="$CFG_LINK.migrated-$(date +%Y%m%d-%H%M%S)"
+            mv "$CFG_LINK" "$bak" && ln -sfn "$STATE" "$CFG_LINK" && own "$CFG_LINK" \
+                && log "migrated $moved item(s) from $CFG_LINK into $STATE; duplicates kept in $bak; $CFG_LINK -> $STATE"
+        fi
+    elif [ ! -e "$CFG_LINK" ]; then
+        ln -sfn "$STATE" "$CFG_LINK"; own "$CFG_LINK"; log "$CFG_LINK -> $STATE"
+    fi
+fi
+
+# ── 3. defaults (seed only when absent) ───────────────────────────────────────
+seed() { # seed SRC DST MODE
+    [ -e "$2" ] || [ -L "$2" ] && return 0
+    [ -r "$1" ] || return 0
+    install -m "$3" "$1" "$2" 2>/dev/null || cp "$1" "$2" 2>/dev/null || return 0
+    own "$2"; log "seeded $(basename "$2")"
+}
+seed "$BACKEND/frontier-models.default.json" "$STATE/frontier-models.json" 0644
+seed "$BACKEND/local-keeper/AGENTS.md" "$STATE/local-keeper/AGENTS.md" 0644
+if [ ! -e "$STATE/local-keeper/QWEN.md" ] && [ ! -L "$STATE/local-keeper/QWEN.md" ]; then
+    ln -s AGENTS.md "$STATE/local-keeper/QWEN.md" 2>/dev/null && own "$STATE/local-keeper/QWEN.md"
+fi
+if [ ! -e "$STATE/local-keeper/docs" ] || [ -L "$STATE/local-keeper/docs" ]; then
+    ln -sfn "$BACKEND/static/docs" "$STATE/local-keeper/docs" 2>/dev/null && own "$STATE/local-keeper/docs"
+fi
+
+# abstract-claude per-station config (AC_ROOT=<state>/abstract-claude, exported by the
+# unit): default_model follows the station's claude-code model so `seat-report` never
+# claims a model the seat is not on; fresh_session_mode=dir gives every launch a
+# ~/.claude-sessions/<stamp>-<pid>-<label> dir — the thing the station wipe deletes.
+AC_CFG="$STATE/abstract-claude/config.json"
+if command -v python3 >/dev/null 2>&1; then
+    python3 - "$AC_CFG" "$BACKEND/abstract-claude.default.json" "$STATE/frontier-models.json" <<'PYEOF' 2>/dev/null \
+        && log "abstract-claude config ok ($AC_CFG)" || warn "abstract-claude config not written"
+import json, os, sys
+cfg_p, def_p, fm_p = sys.argv[1:4]
+def load(p):
+    try:
+        with open(p, encoding="utf-8") as fh: return json.load(fh)
+    except Exception: return {}
+defaults, cfg, fm = load(def_p), load(cfg_p), load(fm_p)
+want = dict(defaults)
+m = fm.get("claude-code") or fm.get("mct")
+if isinstance(m, str) and m: want["default_model"] = m
+changed = False
+for k, v in want.items():
+    if k not in cfg: cfg[k] = v; changed = True
+if changed or not os.path.exists(cfg_p):
+    tmp = cfg_p + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh: json.dump(cfg, fh, indent=2); fh.write("\n")
+    os.replace(tmp, cfg_p)
+PYEOF
+    own "$AC_CFG"
+fi
+
+# ── 4. seat CLIs on the user's PATH ───────────────────────────────────────────
+LBIN="$HOME_DIR/.local/bin"; mkd 0755 "$HOME_DIR/.local" "$LBIN"
+# 1.0.91: abstract-claude-serve-run (ExecStart of the abstract-claude-serve@
+# user unit) and sweep-orphan-seat-scopes (its timer) are linked here too, so
+# both shipped user units resolve %h/.local/bin/<cli> without a hand-edit.
+for cli in mct-pull mct-push abstract-claude-serve-run sweep-orphan-seat-scopes station-provision-venv; do
+    [ -x "$BINDIR/$cli" ] || continue
+    if [ -e "$LBIN/$cli" ] && [ ! -L "$LBIN/$cli" ]; then
+        mv -f "$LBIN/$cli" "$LBIN/$cli.pre-package" 2>/dev/null && log "kept old $LBIN/$cli as $cli.pre-package"
+    fi
+    ln -sfn "$BINDIR/$cli" "$LBIN/$cli" 2>/dev/null && own "$LBIN/$cli"
+done
+log "PATH: $LBIN/{mct-pull,mct-push,abstract-claude-serve-run,sweep-orphan-seat-scopes,station-provision-venv} -> $BINDIR"
+
+# 1.0.110: the session hooks the shipped a-settings-template.json wires (Stop ->
+# exchange_capture_hook.py, SessionStart/PreCompact/SessionEnd -> ledger_hook.py)
+# go on the user's PATH too, so serve/seat sessions run them from a shipped
+# source instead of a hand-authored /srv/vm_mgr/bin copy (station-drift-check G).
+for hook in exchange_capture_hook.py ledger_hook.py; do
+    [ -f "$BACKEND/hooks/$hook" ] || continue
+    ln -sfn "$BACKEND/hooks/$hook" "$LBIN/$hook" 2>/dev/null && own "$LBIN/$hook"
+done
+log "hooks: $LBIN/{exchange_capture_hook,ledger_hook}.py -> $BACKEND/hooks"
+
+# 1.0.107: re-provision the seat venv from the pinned module manifest on EVERY
+# install (not just fresh-box seat-provision), so a version upgrade persists to
+# the long-lived seat venv instead of leaving it stale. station-provision-venv
+# finds resources/REQUIREMENTS.txt relative to itself; idempotent no-op
+# when already matching; silent skip when the venv/pip or manifest is absent.
+if [ -x "$BINDIR/station-provision-venv" ]; then
+    _seatvenv="$HOME_DIR/.local/share/station-seats/venv"
+    if [ -x "$_seatvenv/bin/pip" ]; then
+        "$BINDIR/station-provision-venv" "$_seatvenv" >/dev/null 2>&1 \
+            && log "seat venv re-provisioned to the pinned manifest" \
+            || log "seat venv manifest provision skipped (non-fatal)"
+    fi
+fi
+
+# 1.0.128: the station release owns the abstract-claude serve. In user/self mode
+# (the account's own systemd user manager runs the serve), station-serve-update
+# migrates a hand-written launcher to the shipped runner + unit (files only) and,
+# when the serve's modules/runner differ from this release, schedules ONE
+# idle-gated provision + restart via systemd-run (never interrupts a turn; a
+# <state>/env/serve-<instance>.defer flag keeps it to the file migration).
+if [ "$SELF" = 1 ] && [ "$AS_ROOT" = 0 ] && [ -x "$BINDIR/station-serve-update" ] \
+   && command -v systemctl >/dev/null 2>&1; then
+    HUGPY_STATION_STATE="$STATE" "$BINDIR/station-serve-update" --instance station >/dev/null 2>&1 \
+        && log "serve: $(tail -1 "$STATE/logs/serve-update-station.log" 2>/dev/null | sed 's/^[^ ]* //')" \
+        || log "serve update check skipped (non-fatal)"
+fi
+
+# ── 5. instance env: HUGPY_URL + HUGPY_API_KEY (+ STATION_LOCUS) ──────────────
+# Target file: system layout (root) -> /etc/hugpy-station/<user>.env;
+# user layout / --self -> <state>/env/station.env. Existing keys always win.
+if [ -z "$ENV_FILE" ]; then
+    if [ "$AS_ROOT" = 1 ]; then ENV_FILE="$SYS_ENV"; else ENV_FILE="$STATE/env/station.env"; fi
+fi
+HOST_SEAM=/etc/hugpy-station/hugpy-api.env
+TS_ENV=/etc/hugpy-station/toolserver.env
+[ -r "$TS_ENV" ] || TS_ENV="$STATE/env/toolserver.env"
+[ -r "$TS_ENV" ] || TS_ENV="$STATE/toolserver.env"
+
+have_key="${HUGPY_API_KEY:-}"; [ -n "$have_key" ] || have_key="$(env_get "$ENV_FILE" HUGPY_API_KEY)"
+have_url="${HUGPY_URL:-}";     [ -n "$have_url" ] || have_url="$(env_get "$ENV_FILE" HUGPY_URL)"
+have_locus="${STATION_LOCUS:-}"; [ -n "$have_locus" ] || have_locus="$(env_get "$ENV_FILE" STATION_LOCUS)"
+
+# URL: explicit > seam > platform files > the default (central on this host)
+url="$have_url"
+[ -n "$url" ] || url="$(env_get "$HOST_SEAM" HUGPY_URL)"
+[ -n "$url" ] || url="$(env_get "$TS_ENV" HUGPY_URL)"
+for f in /srv/hugpy/etc/hugpy-bot.env /srv/hugpy/etc/hugpy-api.env; do
+    [ -n "$url" ] && break
+    url="$(env_get "$f" HUGPY_BASE_URL)"; [ -n "$url" ] || url="$(env_get "$f" HUGPY_URL)"
+done
+[ -n "$url" ] || url="http://127.0.0.1:7002"
+url="${url%/}"
+
+# key: explicit > seam > platform files > hugpy-agent > mint
+key="$have_key"
+[ -n "$key" ] || key="$(env_get "$HOST_SEAM" HUGPY_API_KEY)"
+[ -n "$key" ] || key="$(env_get "$TS_ENV" HUGPY_API_KEY)"
+for f in /srv/hugpy/etc/hugpy-bot.env /srv/hugpy/etc/hugpy-api.env /srv/hugpy/etc/hugpy.env \
+         "$HOME_DIR/.config/hugpy-agent/agent.env"; do
+    [ -n "$key" ] && break
+    key="$(env_get "$f" HUGPY_API_KEY)"
+done
+key_src="found"
+if [ -z "$key" ] && command -v curl >/dev/null 2>&1; then
+    optok="${HUGPY_OPERATOR_TOKEN:-}"
+    [ -n "$optok" ] || optok="$(env_get "$ENV_FILE" HUGPY_OPERATOR_TOKEN)"
+    [ -n "$optok" ] || optok="$(env_get "$TS_ENV" STATION_CONSOLE_TOOLSERVER_TOKEN)"
+    [ -n "$optok" ] || optok="$(env_get "$TS_ENV" HUGPY_OPERATOR_TOKEN)"
+    [ -n "$optok" ] || optok="$(env_get "$HOST_SEAM" HUGPY_OPERATOR_TOKEN)"
+    if [ -n "$optok" ] && curl -fs -m 6 -o /dev/null "$url/models" 2>/dev/null; then
+        body="$(printf '{"name":"hugpy-station %s@%s","label":"station"}' "$USER_NAME" "$(hostname -s)")"
+        key="$(curl -fs -m 15 -X POST "$url/keys" -H "X-Operator-Token: $optok" \
+                   -H 'Content-Type: application/json' -d "$body" 2>/dev/null \
+               | python3 -c 'import json,sys
+try:
+    d=json.load(sys.stdin); print(d.get("key") or d.get("api_key") or (d.get("result") or {}).get("key") or "")
+except Exception: print("")' 2>/dev/null)"
+        [ -n "$key" ] && key_src="minted at $url/keys"
+    fi
+fi
+
+# locus: <hostname>-<user> normalised (the fleet's spelling, e.g. ae-vm-mgr)
+locus="$have_locus"
+[ -n "$locus" ] || locus="$(printf '%s-%s' "$(hostname -s)" "$USER_NAME" | tr 'A-Z_' 'a-z-' | sed -E 's/[^a-z0-9-]+/-/g; s/^-+//; s/-+$//' | cut -c1-63)"
+
+add=""
+[ -z "$have_url" ]   && add="${add}HUGPY_URL=$url\nHUGPY_BASE=$url\n"
+[ -z "$have_key" ] && [ -n "$key" ] && add="${add}HUGPY_API_KEY=$key\n"
+[ -z "$have_locus" ] && add="${add}STATION_LOCUS=$locus\n"
+if [ "$AS_ROOT" = 1 ] || [ "$SELF" = 1 ]; then
+    [ -n "$(env_get "$ENV_FILE" HUGPY_STATION_STATE)" ] || [ -n "${HUGPY_STATION_STATE:-}" ] \
+        || add="${add}HUGPY_STATION_STATE=$STATE\n"
+fi
+if [ -n "$add" ]; then
+    if [ "$AS_ROOT" = 0 ] && [ "$ENV_FILE" = "$SYS_ENV" ]; then
+        warn "cannot write $ENV_FILE as $USER_NAME — re-run as root (sudo hugpy-station-firstrun $USER_NAME)"
+    else
+        mkd 0700 "$(dirname "$ENV_FILE")" 2>/dev/null
+        [ "$(dirname "$ENV_FILE")" = /etc/hugpy-station ] && chmod 0755 /etc/hugpy-station 2>/dev/null
+        tmp="$(mktemp)"
+        { if [ -r "$ENV_FILE" ]; then cat "$ENV_FILE"; else
+              printf '# hugpy-station instance env for %s — written by hugpy-station-firstrun %s; keys are never overwritten\n' "$USER_NAME" "$(date -Is)"; fi
+          printf '%b' "$add"; } > "$tmp"
+        if [ "$AS_ROOT" = 1 ] && [ "$ENV_FILE" = "$SYS_ENV" ]; then
+            install -o root -g root -m 0600 "$tmp" "$ENV_FILE"
+        else
+            install -m 0600 "$tmp" "$ENV_FILE"; own "$ENV_FILE"
+        fi
+        rm -f "$tmp"
+        log "env $ENV_FILE: added $(printf '%b' "$add" | cut -d= -f1 | tr '\n' ' ')"
+    fi
+fi
+if [ -z "$key" ]; then
+    warn "no HUGPY_API_KEY for $USER_NAME (local models will not load). Fix once, no edits:"
+    warn "    HUGPY_API_KEY=<key> sudo -E hugpy-station-firstrun $USER_NAME"
+    warn "  or put HUGPY_URL=/HUGPY_API_KEY= in $HOST_SEAM (host seam, root 0600) and re-run"
+else
+    log "hugpy central: $url (api key $key_src)"
+fi
+
+# ── 6. the local seat (B): hugpy-agent's own env, from the same values ────────
+# hugpy-agent (opencode/qwen-code's brain and the /api/b/chat broker) reads
+# ~/.config/hugpy-agent/agent.env (HUGPY_BASE / HUGPY_API_KEY / HUGPY_MODEL) —
+# independent of whatever env a tmux pane inherited. HUGPY_BASE is the LOCAL
+# central front (gunicorn :7002), never the public nginx front (which rejects
+# opencode's ~84 KB bodies). HUGPY_MODEL is seeded from the platform's
+# DEFAULT_CHAT_MODEL so B never falls to the alphabetically-first model.
+AGENT_ENV="$HOME_DIR/.config/hugpy-agent/agent.env"
+# Candidates, in order: the installer's HUGPY_MODEL, the platform's own
+# DEFAULT_CHAT_MODEL, then the fleet's agent brain — and ONLY one the central
+# actually lists is seeded (exact id, or the same id without a `Qwen~` prefix:
+# hugpy-agent's PREFERRED_DEFAULT spells it "Qwen~Qwen3-Coder-Next-GGUF" while
+# the fleet lists "Qwen3-Coder-Next-GGUF"). Unreachable central = seed nothing.
+bcands="${HUGPY_MODEL:-}"
+for f in /srv/hugpy/etc/hugpy-bot.env /srv/hugpy/etc/hugpy-api.env "$HOST_SEAM"; do
+    v="$(env_get "$f" DEFAULT_CHAT_MODEL)"; [ -n "$v" ] || v="$(env_get "$f" HUGPY_MODEL)"
+    [ -n "$v" ] && bcands="$bcands $v"
+done
+bcands="$bcands Qwen3-Coder-Next-GGUF Qwen~Qwen3-Coder-Next-GGUF"
+bmodel=""
+if command -v curl >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1; then
+    bmodel="$(curl -fs -m 10 ${key:+-H "X-API-Key: $key"} "$url/models" 2>/dev/null | python3 -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    sys.exit(0)
+items = d.get("models") or d.get("data") or [] if isinstance(d, dict) else d
+ids = set()
+for i in items or []:
+    v = (i.get("key") or i.get("id") or i.get("name")) if isinstance(i, dict) else i
+    if isinstance(v, str) and v: ids.add(v)
+norm = lambda s: s.split("~", 1)[1] if "~" in s else s
+by_norm = {norm(v): v for v in ids}
+for c in sys.argv[1:]:
+    if c in ids: print(c); break
+    if norm(c) in by_norm: print(by_norm[norm(c)]); break
+' $bcands 2>/dev/null)"
+fi
+aadd=""
+[ -n "$(env_get "$AGENT_ENV" HUGPY_BASE)" ]    || aadd="${aadd}HUGPY_BASE=$url\n"
+[ -n "$(env_get "$AGENT_ENV" HUGPY_API_KEY)" ] || { [ -n "$key" ] && aadd="${aadd}HUGPY_API_KEY=$key\n"; }
+[ -n "$(env_get "$AGENT_ENV" HUGPY_MODEL)" ]   || { [ -n "$bmodel" ] && aadd="${aadd}HUGPY_MODEL=$bmodel\n"; }
+if [ -n "$aadd" ]; then
+    mkd 0700 "$HOME_DIR/.config/hugpy-agent"
+    tmp="$(mktemp)"
+    { [ -r "$AGENT_ENV" ] && cat "$AGENT_ENV" || printf '# hugpy-agent env — written by hugpy-station-firstrun; keys are never overwritten\n'
+      printf '%b' "$aadd"; } > "$tmp"
+    install -m 0600 "$tmp" "$AGENT_ENV" && own "$AGENT_ENV"; rm -f "$tmp"
+    log "local seat env $AGENT_ENV: added $(printf '%b' "$aadd" | cut -d= -f1 | tr '\n' ' ')"
+fi
+if [ -n "$bmodel" ] && [ ! -e "$STATE/b-model.json" ]; then
+    printf '{"model": "%s"}\n' "$bmodel" > "$STATE/b-model.json" && own "$STATE/b-model.json" && log "seeded b-model.json ($bmodel)"
+fi
+
+# ── 7. the toolserver credential where USER-level tools look ──────────────────
+# server.py exports the token to the seats it spawns, but `abstract-claude mcp`
+# (opencode/qwen-code's MCP bridge) and mct-pull run from any shell and read
+# ~/.config/hugpy-station/toolserver.env == <state>/toolserver.env (the symlink
+# above). The host seam is root-0600, so copy the url + token there once (user
+# 0600), then prove the bridge can reach the toolserver with it.
+TS_USER="$STATE/toolserver.env"
+ts_url="${STATION_CONSOLE_TOOLSERVER:-}"; [ -n "$ts_url" ] || ts_url="$(env_get "$ENV_FILE" STATION_CONSOLE_TOOLSERVER)"
+[ -n "$ts_url" ] || ts_url="$(env_get "$TS_ENV" STATION_CONSOLE_TOOLSERVER)"
+ts_tok="${HUGPY_OPERATOR_TOKEN:-}"; [ -n "$ts_tok" ] || ts_tok="$(env_get "$ENV_FILE" HUGPY_OPERATOR_TOKEN)"
+[ -n "$ts_tok" ] || ts_tok="$(env_get "$ENV_FILE" STATION_CONSOLE_TOOLSERVER_TOKEN)"
+[ -n "$ts_tok" ] || ts_tok="$(env_get "$TS_ENV" STATION_CONSOLE_TOOLSERVER_TOKEN)"
+[ -n "$ts_tok" ] || ts_tok="$(env_get "$TS_ENV" HUGPY_OPERATOR_TOKEN)"
+tadd=""
+[ -n "$ts_url" ] && [ -z "$(env_get "$TS_USER" STATION_CONSOLE_TOOLSERVER)" ] && tadd="${tadd}STATION_CONSOLE_TOOLSERVER=$ts_url\n"
+[ -n "$ts_tok" ] && [ -z "$(env_get "$TS_USER" HUGPY_OPERATOR_TOKEN)" ] && tadd="${tadd}HUGPY_OPERATOR_TOKEN=$ts_tok\n"
+[ -z "$(env_get "$TS_USER" STATION_LOCUS)" ] && tadd="${tadd}STATION_LOCUS=$locus\n"
+[ -z "$(env_get "$TS_USER" HUGPY_URL)" ] && tadd="${tadd}HUGPY_URL=$url\n"
+if [ -n "$tadd" ]; then
+    tmp="$(mktemp)"
+    { [ -r "$TS_USER" ] && cat "$TS_USER" || printf '# hugpy-station toolserver credential — written by hugpy-station-firstrun; keys are never overwritten\n'
+      printf '%b' "$tadd"; } > "$tmp"
+    install -m 0600 "$tmp" "$TS_USER" && own "$TS_USER"; rm -f "$tmp"
+    log "toolserver.env $TS_USER: added $(printf '%b' "$tadd" | cut -d= -f1 | tr '\n' ' ')"
+fi
+[ -n "$ts_url" ] || ts_url="$(env_get "$TS_USER" STATION_CONSOLE_TOOLSERVER)"; [ -n "$ts_url" ] || ts_url="https://toolserver.hugpy.ai"
+[ -n "$ts_tok" ] || ts_tok="$(env_get "$TS_USER" HUGPY_OPERATOR_TOKEN)"
+if [ -z "$ts_tok" ]; then
+    warn "no toolserver token for $USER_NAME — fleet comms and the MCP bridge are OFF until $TS_ENV carries STATION_CONSOLE_TOOLSERVER_TOKEN (then re-run)"
+elif command -v curl >/dev/null 2>&1; then
+    code="$(curl -s -m 8 -o /dev/null -w '%{http_code}' -H "X-Operator-Token: $ts_tok" "${ts_url%/}/endpoints" 2>/dev/null || echo 000)"
+    if [ "$code" = 200 ]; then log "MCP bridge: $ts_url accepts the token (endpoints ok)"
+    else warn "MCP bridge check: $ts_url/endpoints answered $code with the stored token (401 = wrong token, 000 = unreachable) — seats will show 'toolserver failed to get tools'"; fi
+    # Tier-2 SERVICE floor (module-requirement-manifest): the toolserver is a
+    # SINGLETON the station CALLS, not a bundled library — so instead of pinning a
+    # wheel we assert its running version meets the '# @service toolserver
+    # min_version=…' line in resources/REQUIREMENTS.txt. Warn only: a shared
+    # backend lagging must never hard-fail (and brick) every seat.
+    _req="$BINDIR/../REQUIREMENTS.txt"
+    if [ "$code" = 200 ] && [ -r "$_req" ]; then
+        _floor="$(sed -n 's/^# @service[[:space:]]\+toolserver[[:space:]].*min_version=\([0-9.][0-9.]*\).*/\1/p' "$_req" | head -1)"
+        if [ -n "$_floor" ]; then
+            _tsv="$(curl -s -m 8 -H "X-Operator-Token: $ts_tok" "${ts_url%/}/version" 2>/dev/null \
+                    | sed -n 's/.*"version"[: ]*"\([0-9.][0-9.]*\)".*/\1/p' | head -1)"
+            if [ -z "$_tsv" ]; then
+                log "toolserver version handshake: $ts_url/version gave no version (floor $_floor) — skipped"
+            elif [ "$(printf '%s\n%s\n' "$_floor" "$_tsv" | sort -V | head -1)" = "$_floor" ]; then
+                log "toolserver $_tsv >= required $_floor OK"
+            else
+                warn "toolserver $_tsv is BELOW this station's required $_floor — update the :7004 toolserver (abstract_toolserver); fleet DB/MCP features may misbehave (not fatal)"
+            fi
+        fi
+    fi
+fi
+exit 0

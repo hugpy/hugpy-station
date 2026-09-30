@@ -1,0 +1,19 @@
+#!/bin/bash
+# hugpy-station-board-run — ExecStart of hugpy-station-board@<user> (1.0.90):
+# the board mirror for a STATION user, watching the SAME file the station UI
+# reads and the reverse sync writes ($HUGPY_HOME/state/todo.json), publishing
+# it to the central `board` table as this station's locus (STATION_LOCUS from
+# the instance env). Fail-open like board_mirror.py itself: no DB env
+# (SOLCATCHER_POSTGRESQL_* in the env or ~/.env / BOARD_MIRROR_ENV_FILE) means
+# it idles. Same file for both layouts (payload derived from its own path).
+_self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+APP_ROOT="$(cd "$(dirname "$_self")/../.." 2>/dev/null && pwd)"
+[ -f "$APP_ROOT/resources/station-stack/opt/llm-station/board-mirror/board_mirror.py" ] || APP_ROOT=/opt/hugpy-station
+export HUGPY_STATION_STATE="${HUGPY_STATION_STATE:-${XDG_CONFIG_HOME:-$HOME/.config}/hugpy-station}"
+export HUGPY_HOME="${HUGPY_HOME:-$HOME/.hugpy}"
+export TODO_FILE="${TODO_FILE:-$HUGPY_HOME/state/todo.json}"
+export KEEPER_STATION="${KEEPER_STATION:-${STATION_LOCUS:-}}"
+export BOARD_MIRROR_ENV_FILE="${BOARD_MIRROR_ENV_FILE:-$HUGPY_STATION_STATE/env/board-mirror.env}"
+[ -r "$BOARD_MIRROR_ENV_FILE" ] || export BOARD_MIRROR_ENV_FILE="$HOME/.env"
+mkdir -p "$HUGPY_HOME/state" 2>/dev/null || true
+exec "${HUGPY_STATION_PYTHON:-python3}" "$APP_ROOT/resources/station-stack/opt/llm-station/board-mirror/board_mirror.py"

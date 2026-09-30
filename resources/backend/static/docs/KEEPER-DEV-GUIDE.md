@@ -83,7 +83,11 @@ the VM — a file both sides can read/write is the whole contract.
 
 - **`~/todo.json`** (schema `todo.v1`) — the task board. `GET /api/vm/<vm>/todo`
   is transparent; `add`/`update` go through a **whitelist** (see §5).
-- **`~/wireframe.json`** (schema `wireframe.v1`) — the design drawer's canvas.
+- **◳ canvas** (`wireframe.v1` design, `flow.v1` flow) — NOT a file any more
+  (2026-09-03): one row per (locus, kind) in the toolserver `canvas` table.
+  Read `canvas/get {locus, kind}`, write `canvas/put {locus, kind, state[,
+  by, note, notify]}` (MCP tools `canvas_get` / `canvas_put`); the console's
+  ◳ tab shows the same row live. `~/wireframe.json` / `~/flow.json` are dead.
 - **`~/bugreport.json`** + **`~/bugreport-request.json`** — the bug reporter's
   output and its scan-now trigger.
 

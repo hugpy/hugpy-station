@@ -71,10 +71,12 @@ Per MCT workspace: `operator-guidance.user.md` (yours) → `operator-guidance.md
   (mct / claude-code), local, the seat probe, and sudo all run over ssh as that user.
   Stored in `~/.config/hugpy-station/ssh-hosts.json`; key default is
   `~/.config/hugpy-station/fleet_ssh_key` (seed it with `ssh-copy-id -i …fleet_ssh_key.pub user@host`).
-- **◳ canvas always on, live both ways** — available at the host seat too
-  (`~/wireframe.json`, `~/flow.json` of the station user). Local edits auto-push
-  (1.2 s debounce); the locus file is polled every 3 s and loaded when it changed
-  and you are not mid-edit. → VM / ← VM remain as manual overrides.
+- **◳ canvas always on, live both ways** — every locus (ssh hosts AND the host
+  seat, which is a locus itself) reads/writes ONE central copy in the toolserver
+  `canvas` table (`canvas/get|put`, 1.0.80). Local edits auto-push (1.2 s
+  debounce); a seat's `canvas_put` lands in the open drawer within ~1 s over the
+  DB change bus (3 s poll as fallback). → VM hands the document over AND nudges
+  the keeper with a `[canvas]` board request; ← VM reloads on demand.
 - **shell = shell** — the ⌂ keeper shell tab is a plain host login shell. Claude on
   the host is the frontier surface's `claude-code` backend.
 - **B is the frontier default** (mct). A persisted `claude-code` choice from an

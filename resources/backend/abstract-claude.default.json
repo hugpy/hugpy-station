@@ -1,0 +1,14 @@
+{
+  "_": "hugpy-station shipped abstract-claude config (1.0.90): merged key-by-key into <state>/abstract-claude/config.json (AC_ROOT) on first run; existing keys win. default_model is replaced by the station's claude-code model from frontier-models.json. fresh_session_mode=dir makes every launch a ~/.claude-sessions/<stamp>-<pid>-<label> dir — the thing a station seat wipe deletes (wipe mode made wipes no-ops).",
+  "default_model": "claude-opus-4-8",
+  "quota_fallback_model": "claude-sonnet-5",
+  "preflight_quota_check": true,
+  "fresh_session_per_launch": true,
+  "fresh_session_mode": "dir",
+  "keep_sessions": 30,
+  "_rollover": "p509: session-rollover policy merged into AC_ROOT/config.json on first run (existing keys win). rollover_mode auto|manual|off; rollover_context_tokens = the context-size threshold that makes a session due; rollover_grace_s = seconds a pending roll waits before it fires; rollover_ledger_fresh_turns = turns of ledger kept fresh on the successor.",
+  "rollover_mode": "auto",
+  "rollover_context_tokens": 250000,
+  "rollover_grace_s": 60,
+  "rollover_ledger_fresh_turns": 5
+}

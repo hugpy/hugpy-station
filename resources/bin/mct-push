@@ -1,0 +1,32 @@
+#!/bin/sh
+# mct-push — the seat's OUTBOUND front door: publish a reply or artifact into
+# this station's durable MCT ledger as an immutable object bound to the current
+# turn, and print its mct:// pointer. Then end the turn with exactly one chat
+# line:  MCT response <pointer>
+#
+#   mct-push [--seat codex|claude-code] [--turn <id|mct://…>] [--kind response|artifact]
+#            [--name reply.md] [--mime text/markdown] [--file PATH]     (body from --file, else stdin)
+#   mct-push <mct://context> <reply-file>          legacy form (== mct-pull <ctx> --reply-file <file>)
+#
+# Layout-agnostic (1.0.90): the gateway is resolved NEXT TO THIS SCRIPT, so the
+# same file works from /opt/hugpy-station/resources/bin (the .deb) and from a
+# user layout's <state>/app/current/resources/bin. State dir: HUGPY_STATION_STATE,
+# else the canonical ~/.config/hugpy-station (same rules as mct-pull).
+self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+here="$(cd "$(dirname "$self")" 2>/dev/null && pwd)"
+gw="$here/../backend/mct_gateway.py"
+[ -f "$gw" ] || gw="${HUGPY_STATION_STATE:-${XDG_CONFIG_HOME:-$HOME/.config}/hugpy-station}/app/current/resources/backend/mct_gateway.py"
+[ -f "$gw" ] || gw=/opt/hugpy-station/resources/backend/mct_gateway.py
+if [ -z "${HUGPY_STATION_STATE:-}" ]; then
+    HUGPY_STATION_STATE="${XDG_CONFIG_HOME:-$HOME/.config}/hugpy-station"
+    export HUGPY_STATION_STATE
+fi
+case "${1:-}" in
+    mct://*)  # legacy: mct-push <context> <reply-file> [more mct-pull args]
+        h="$1"; shift
+        case "${1:-}" in
+            ""|--*) exec "${HUGPY_STATION_PYTHON:-python3}" "$gw" "$h" "$@" ;;
+            *)      f="$1"; shift; exec "${HUGPY_STATION_PYTHON:-python3}" "$gw" "$h" --reply-file "$f" "$@" ;;
+        esac ;;
+    *)        exec "${HUGPY_STATION_PYTHON:-python3}" "$gw" push "$@" ;;
+esac

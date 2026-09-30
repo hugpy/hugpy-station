@@ -140,7 +140,29 @@ if ss -ltn 2>/dev/null | grep -q ":$PORT "; then
 fi
 
 export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"
-export FLEETVIEW_TERM_CMD="${FLEETVIEW_TERM_CMD:-hugpy-agent mct}"
+# 1.0.85: no default for FLEETVIEW_TERM_CMD any more. The old default
+# ("hugpy-agent mct" = the DEPRECATED broker, mct-deprecated in NOMENCLATURE)
+# silently replaced the frontier default backend (claude-code) on every
+# host-grounded launch: the UI said claude-code, the tmux pane ran the old
+# REPL, board nudges never found a ❯ prompt and the seat had no MCP bridge.
+# The knob stays an OPT-IN override ("claude" = the templated Claude Code
+# seat, or any command); unset = TERM_SURFACES defaults.
+[ -n "${FLEETVIEW_TERM_CMD:-}" ] && export FLEETVIEW_TERM_CMD
+
+# 1.0.85: abstract-claude's fresh-session default is "wipe" — DELETE the seat
+# user's ~/.claude and rebuild it on every claude-code seat launch (operator
+# ruling 2026-09-04, meant for fleet accounts that ARE the seat). On a desktop
+# the same account is the operator's own Claude Code user: its auto-memory and
+# transcripts live in that ~/.claude and were erased at every seat launch.
+# abstract-claude reads its config from $AC_ROOT/config.json (default
+# /srv/abstract_claude). Where that fleet root is absent and the user keeps
+# a private root with a config.json (fresh_session_mode "dir" = a brand-new
+# ~/.claude-sessions/<stamp> per launch, ~/.claude untouched), point the seats
+# at it. An explicit AC_ROOT always wins; fleet hosts are unaffected.
+if [ -z "${AC_ROOT:-}" ] && [ ! -e /srv/abstract_claude/config.json ] \
+   && [ -r "${XDG_CONFIG_HOME:-$HOME/.config}/abstract_claude/config.json" ]; then
+    export AC_ROOT="${XDG_CONFIG_HOME:-$HOME/.config}/abstract_claude"
+fi
 export KEEPER_DEFAULT_BACKEND="${KEEPER_DEFAULT_BACKEND:-hugpy-agent::claude-code}"
 
 ARGS=(--disable-gpu --disable-gpu-compositing --disable-gpu-sandbox --no-sandbox)

@@ -1,7 +1,7 @@
 {
   "name": "@hugpy/station",
-  "version": "1.0.61",
-  "description": "hugpy Station \u2014 the desktop cockpit (Electron shell over the self-contained console backend: stations, VMs, terminals, agent seats). Formerly fleet-console; source package, ships as the hugpy-station .deb.",
+  "version": "1.0.129",
+  "description": "hugpy Station — the desktop cockpit (Electron shell over the self-contained console backend: stations, VMs, terminals, agent seats). Formerly fleet-console; source package, ships as the hugpy-station .deb.",
   "author": "putkoff (hugpy.ai)",
   "license": "SEE LICENSE IN LICENSE",
   "homepage": "https://hugpy.ai",
@@ -14,7 +14,9 @@
     "electron-builder.yml",
     "debian",
     "LICENSE",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md",
+    "preload.js"
   ],
   "scripts": {
     "start": "electron .",

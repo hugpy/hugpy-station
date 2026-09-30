@@ -1,0 +1,51 @@
+# Station features per locus — canonical HOW-TO (2026-09-15)
+
+Imperative. Words: `<app>/static/docs/NOMENCLATURE.md`. Mechanism/why: `/srv/vm_mgr/docs/STATION.md`. Tool signatures: `<app>/static/docs/STATION-TOOLS.md`. `<app>`/`<state>`/`<port>` = your station's backend dir / state dir / port (your block). Station API auth from a shell: header `X-Console-Token: $STATION_CONSOLE_TOKEN` (your station env file).
+
+## Common — feature → exact method
+
+| Feature | Do this |
+|---|---|
+| Seats | A = frontier (`claude-code` \| `mct`), B/local (`opencode` \| `qwen-code`), shell. Each seat = one tmux session on socket `console`: `tmux -L console ls` as the seat user. Liveness: MCP `seat_state locus=<seat-locus>`; `GET /api/seat?vm=<locus>`. |
+| Seat identity you are given | Your `--append-system-prompt` (claude-code) / composed `<ws>/operator-guidance.md` (mct) = directive + `# Operator guidance` + one-shot `# Session init prompt` + `# Filesystem switch` + `# Delegation switch`. Verify: `GET /api/frontier/directive` → `composed`. |
+| MCT pointer exchange (1.0.89 stations) | A prompt arrives as `MCT context mct://<scope>/<turn>/<id>`. Run `mct-pull <handle>` → JSON `{operator_prompt, response_file}`. Write the full answer to `response_file`, then `mct-pull <handle> --reply-file <response_file>`. Final chat message = ONLY the returned `mct://` reply pointer. Durable ledger: `<state>/mct2/repl/exchange/turn-NNNN-{prompt,response}.md`. There is NO `mct-push`. `mct-pull` = `python3 <app>/mct_gateway.py`. |
+| Reach B (the broker) | `POST /api/b/chat {"text":"..."}` on your station (direct broker session). B's model: `GET|POST /api/b/model`. The local seat = the station's local pane; its charge = `<state>/local-keeper/AGENTS.md` (`QWEN.md` → it). |
+| Board doctrine | Action items only: `todo_add {text,type,priority,note,by,locus}`; types `todo` (own queue) · `request` (ask AT a keeper) · `operator` (ONE privileged action for C, exact `cmd` in note) · `proposal` (decision for C, pros/cons/rec) · `direction` (🧭 resolved ambiguity + `DERIVE:` hint) · `bookmark` (checkpoint). Read `todo_list {status,type,locus}`; close `todo_done {id}`. `locus` = WHOSE board. Contract: `<app>/static/docs/TODO-BOARD-SOP.md`. |
+| Conversation (not the board) | MCP `comms_ping to=<locus> kind=message text=... from_=<you>` (drains to the target's ✉ tab, closes the board item) or `POST http://127.0.0.1:<port>/api/fleet/message {"to":"<locus>","text":"...","from":"<you>"}` on the STATION — never central `:7002`. Read yours: `comms_inbox to=<locus>`; `GET /api/vm/keeper/messages`. |
+| Toolserver MCP | Bridge: `abstract-claude mcp` (stdio → `127.0.0.1:7004`; wired by the station's settings template). Key tools: `exchange_list {locus,limit,since}`, `exchange_ingest_transcript`, `seat_state {locus,seat}`, `loci_list {kind,status}`, `loci_register`, `loci_pointers`, `todo_*`, `comms_*`, `db_query` (read-only). Same-origin proxy: `/ts/<prefix>/<name>`. `fs_*`/`sys_run_cmd` execute on ae, not your locus. |
+| Exchanges DB (durable record) | Every claude-code turn auto-ingests via the Stop hook in `<state>/a-settings-template.json` (`EXCHANGE_LOCUS`, `EXCHANGE_INGEST_URL=http://127.0.0.1:7004`). Recover history: `exchange_list locus=<EXCHANGE_LOCUS> since=0`. |
+| Frontier fs switch | `GET /api/frontier/fs/status`; `POST /api/frontier/fs/toggle`. State `<state>/frontier-fs.json`. MEDIATED = claude-code denies `Read Edit Write MultiEdit NotebookEdit Grep Glob LS` → route files via B/shell; DIRECT = open. Your system prompt states which. |
+| Delegation switch | `GET /api/frontier/delegate`; `POST {"backend":"mct"|"claude-code","on":bool}`. State `<state>/frontier-delegate.json`. ON = you are the ROUTER: spawn subagents, keep your context small. |
+| Directive / guidance (sanctioned edits) | Directive: `GET|POST /api/frontier/directive {"text"}` (🛡 steward tab) → `<state>/frontier-directive.md`. Operator guidance: `GET|POST /api/b/guidance {"text"}` → source `<ws>/operator-guidance.user.md`, composed `<ws>/operator-guidance.md`. Two `<ws>`: `<state>/mct/repl` (what the API writes; claude-code launch reads it) and `<state>/mct2/repl` (what the `abstract-claude mct` seat reads; composed from ITS OWN `.user.md` at each mct launch) — keep both `.user.md` in step. NEVER hand-edit a PEER's `~/.config/hugpy-station/frontier-directive.md` — it is generated. |
+| Handoff for your successor | `POST /api/frontier/handoff {"text":"..."}` (or write `<state>/frontier-handoff.md`): a few hundred tokens of need-to-know. It is ONE-SHOT — consumed and deleted at the next A launch — so also keep a durable copy in your locus docs (below). |
+| Write a direction | `todo_add type=direction locus=<yours> priority=medium by=<you> source=A@<locus> note="ambiguous → resolved. DERIVE: <doc/directive to absorb it>"`. |
+
+## Per-locus blocks
+
+### keeper (host arm)
+- **user** `vm_mgr` (uid 1003) · **home** `/srv/vm_mgr` · **state** `/srv/vm_mgr/hugpy-station` (`HUGPY_STATION_STATE`) · `<app>` `/srv/vm_mgr/hugpy-station/app/current/resources/backend` (1.0.90) · `<ws>` `<state>/mct/repl` (API) + `<state>/mct2/repl` (mct seat).
+- **unit/port** user unit `hugpy-station-web` → `127.0.0.1:8898` (console-api `:8866`, bugreport `:8867`). Restart: `export XDG_RUNTIME_DIR=/run/user/1003; systemctl --user restart hugpy-station-web`. Token: `<state>/env/station.env`.
+- **keeper surface (t-serve, 2026-09-16)** `abstract-claude serve` is the DEFAULT frontier surface: USER unit `abstract-claude-serve@station.service` → `127.0.0.1:9124`, `AC_ROOT=<state>/abstract-claude` (shared with the seats: dir mode, `claude-fable-5-1`, opus-4-8 fallback), framed at `/ac/` via `ac_proxy`/`STATION_CONSOLE_AC`. Sibling `abstract-claude-serve@dev` → `:9123` (`dev.hugpy.ai/claude`). Relaunch = `systemctl --user restart abstract-claude-serve@station`, or `POST /api/frontier/relaunch?vm=@keeper` (`?surface=serve|tmux`; `?backend=serve` is an accepted alias). Wipe = `POST /api/seat/wipe?vm=@keeper` → drops `~/.claude-sessions/*-keeper-serve` + restarts the unit (no tmux session killed). Meter = `GET /api/frontier/cache?vm=@keeper`, which defaults to `backend=serve` and reads serve's own usage DB. Picker: the frontier dropdown lists **`abstract-claude serve (console)` first and selected**; the pick persists in `localStorage "fv-keeper-surface"`, and `?keeper=serve|tmux` on the console URL forces either side. Detail: `STATION.md` §13.
+- **seats/tmux (LEGACY, still selectable)** `keeper-claude` (A claude-code), `keeper-mct` (A mct), `keeper-codex` — shown in the picker as “terminal seat (tmux) · …”, never the default. Force them with `?keeper=tmux` on the console URL or `STATION_KEEPER_SURFACE=tmux`. Board UI reads `/srv/vm_mgr/.hugpy/state/todo.json` (file-primary; watchdog mirrors to PG).
+- **names** board/exchange locus `keeper`; toolserver seat/loci name `ae-vm-mgr`; sign `by=ae-vm-mgr`.
+- **privilege** `sudo -n -u hugpy <cmd>` (ALL, NOPASSWD); root ONLY via `sudo -n /usr/local/sbin/hugpy-gate`. NO `sudo -u aeb`, NO ssh key to `aeb@` — aeb is board-only from here. No root `systemctl`.
+- **durable handoff** `/srv/vm_mgr/docs/SESSION-INIT-keeper.md`. Docs: `STATION.md`, this file.
+- **gotchas** `~/.config/hugpy-station/frontier-directive.md` is a STALE push copy — live one is in `<state>`. `/opt/hugpy-station` (1.0.85 desktop build, root) is NOT what serves :8898. `docs/NOMENCLATURE.md` in the directive = `<app>/static/docs/NOMENCLATURE.md`.
+
+### hugpy (platform)
+- **user** `hugpy` (uid 116) · **home** `/srv/hugpy` · **state** `/srv/hugpy/.config/hugpy-station` · `<app>` `/opt/hugpy-station/resources/backend` (1.0.85, root-owned) · `<ws>` `<state>/mct2/repl`.
+- **keeper surface (in progress, 2026-09-16)** your own `abstract-claude serve` runs on `127.0.0.1:9125` (user unit `abstract-claude-serve-station.service`, runner `/srv/hugpy/abstract-claude-serve/run-station.sh`) and is healthy, but the station is not wired to it yet: `hugpy-station-web@hugpy` has no `STATION_CONSOLE_AC`, so `ac_proxy` falls back to `:9111` (solcatcher's). Both remaining steps need ROOT and are filed with copy-paste commands — **t292** (`20-station-ac.conf` drop-in + `daemon-reload` + restart) and **t293** (`loginctl enable-linger hugpy`). Until then `/ac` shows the wrong console.
+- **unit/port** system unit `hugpy-station-web@hugpy` → `127.0.0.1:8899`. Env `/etc/hugpy-station/hugpy.env` is unreadable to hugpy (token → ask the operator). Restart needs root → `type=operator`. Central API `7002_hugpy_api` `:7002` is yours (src via PYTHONPATH; `systemctl restart 7002_hugpy_api`).
+- **seats/tmux** socket `/tmp/tmux-116/console`: `keeper-mct` (live A: `abstract-claude mct`), `keeper-codex`; `keeper-claude` when launched.
+- **names** `hugpy` everywhere; sign `hugpy-keeper`.
+- **privilege** none (no sudo). The keeper reaches you with `sudo -u hugpy`; you reach the keeper via the board/mail only.
+- **durable handoff** `/srv/hugpy/src/directions/FRONTIER-INIT-PROMPT.md` (+ `FRONTIER-LAY-OF-THE-LAND-2026-09-14.md`). Populate `<state>/frontier-handoff.md` FROM it.
+- **gotchas** 1.0.85 station: no `mct_gateway.py`, no `mct-pull` on PATH — your mct exchange is the `abstract-claude mct` REPL, not the `mct://` pointer contract. No `<state>/local-keeper/AGENTS.md` → B has no charge and is seldom live; act directly with bounded probes and say so. Never restart 7002 during a grading sweep.
+
+### aeb (worker)
+- **user** `aeb` (uid 1008) · **home** `/home/aeb` (0700) · **state** `/home/aeb/.config/hugpy-station` (expected) · worker port `:9200`, hot store `/mnt/nvmes/2T_samsung_990/hot990/aeb`.
+- **unit/port** no `hugpy-station-web@aeb` unit exists on ae → no station of its own here; registered `loci_list kind=station` as `aeb@192.168.1.100`; hidden from the keeper dropdown (`hidden-loci.json`).
+- **seats/tmux** unknown to the keeper (home unreadable). Check yourself: `tmux -L console ls`; `seat_state locus=aeb`.
+- **names** `aeb`; sign `aeb-keeper`.
+- **privilege** unknown to peers; the keeper CANNOT `sudo -u aeb` or ssh to you — reach/receive via `comms_ping to=aeb` and `todo_list locus=aeb` only.
+- **gotchas** this doc is world-readable at `/srv/vm_mgr/docs/`; no copy under `/home/aeb` was possible.

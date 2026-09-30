@@ -1,0 +1,5 @@
+# backend wave — canonical source (/srv/hugpy/src/station-app), next .deb
+
+- p509 rollover proxy: added GET/POST /api/ac/rollover (handler api_ac_rollover) + JSON-POST helper _ac_post beside _ac_get; proxies serve 127.0.0.1:9124 /api/session/rollover. GET maps policy.rollover_mode->policy, policy.rollover_context_tokens->rolling (threshold), newest evals[].context_tokens->current, evals[].due/due[]->due(bool), pending->{session_id,grace_s,grace_until}|null. POST forwards {action,session_id}. Added 4 keys (rollover_mode/context_tokens/grace_s/ledger_fresh_turns) + _rollover doc to abstract-claude.default.json.
+- p513 search browse files: mct_finder op:"dirs" now drops -type d and emits '%y\t%p'; _finder_parse splits rows into {dirs:[...], files:[...]} keeping dirs populated for fetchDirs/nav and adding files[].
+- p515 limits proxy: NO-OP for this agent — /api/frontier/limits already implemented by another agent on this canonical server.py; left the existing single handler + single route untouched (no duplicate added).

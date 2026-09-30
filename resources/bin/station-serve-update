@@ -1,0 +1,217 @@
+#!/usr/bin/env bash
+# station-serve-update — the station release owns the abstract-claude serve (1.0.128).
+#
+# Operator 2026-09-30: "I'd rather the serve be handled from the PyPI packages that
+# serve it, through the hugpy-station update that houses it." Run by
+# hugpy-station-firstrun on every install / station start (user layout); cheap and
+# idempotent when nothing changed.
+#
+#   station-serve-update [--instance station]      decide + (maybe) schedule
+#   station-serve-update --waiter [--instance I]   the idle-gated worker (systemd-run)
+#
+# 1. MIGRATE (files only, never restarts): a locus still on a hand-written
+#    run-<instance>.sh gets <state>/env/serve-<instance>.env written ONCE from the
+#    values that script exported (port, UI base/dist, venv, exchange, B gateway),
+#    and the shipped unit resources/systemd/abstract-claude-serve@.service is
+#    installed as ~/.config/systemd/user/abstract-claude-serve@.service (a differing
+#    hand-written one is kept beside it as *.hand-<date>).
+# 2. DECIDE: a restart is due when the serve venv's modules differ from the
+#    REQUIREMENTS.txt pins, the running process was not started by the shipped
+#    runner at its current content (<AC_ROOT>/.serve-run-<instance> marker), or a
+#    legacy unit (abstract-claude-serve-<instance>.service) is still the live one.
+# 3. WAITER (systemd-run --user, survives the caller): poll the serve's /api/state
+#    until no turn is running for IDLE_S (never interrupt a turn), at most MAX_WAIT_S;
+#    then provision the serve venv from the pins (station-provision-venv), switch a
+#    legacy unit to abstract-claude-serve@<instance>, restart, verify. Hitting the
+#    max wait restarts anyway and mails the keeper (toolserver comms ping).
+set -uo pipefail
+INST=station; WAITER=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --instance) INST="$2"; shift 2 ;;
+        --waiter) WAITER=1; shift ;;
+        *) echo "station-serve-update: unknown arg $1" >&2; exit 2 ;;
+    esac
+done
+BINDIR="$(cd "$(dirname "$(readlink -f "$0")")" && pwd)"
+RES="$(cd "$BINDIR/.." && pwd)"
+STATE="${HUGPY_STATION_STATE:-${XDG_CONFIG_HOME:-$HOME/.config}/hugpy-station}"
+UNIT_DIR="${STATION_UNIT_DIR:-$HOME/.config/systemd/user}"
+SYSTEMCTL="${STATION_SYSTEMCTL:-systemctl}"
+UNIT="abstract-claude-serve@$INST.service"
+LEGACY="abstract-claude-serve-$INST.service"
+SENV="$STATE/env/serve-$INST.env"
+IDLE_S="${STATION_SERVE_IDLE_S:-20}"
+MAX_WAIT_S="${STATION_SERVE_MAX_WAIT_S:-1800}"
+POLL_S="${STATION_SERVE_POLL_S:-5}"
+LOG="${STATION_SERVE_UPDATE_LOG:-$STATE/logs/serve-update-$INST.log}"
+mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
+log(){ printf '%s station-serve-update[%s]: %s\n' "$(date -Is)" "$INST" "$*" | tee -a "$LOG" >&2; }
+sctl(){ "$SYSTEMCTL" --user "$@"; }
+
+# which unit serves this instance today: the shipped template instance, or a legacy one
+live_unit() {
+    if sctl is-enabled --quiet "$LEGACY" 2>/dev/null || sctl is-active --quiet "$LEGACY" 2>/dev/null; then
+        echo "$LEGACY"; return
+    fi
+    if sctl is-enabled --quiet "$UNIT" 2>/dev/null || sctl is-active --quiet "$UNIT" 2>/dev/null; then
+        echo "$UNIT"; return
+    fi
+}
+
+# the legacy launcher script a unit runs (ExecStart path), if it is not the shipped runner
+legacy_script() {
+    local u="$1" p
+    p="$(sctl show -p ExecStart --value "$u" 2>/dev/null | sed -n 's/.*path=\([^ ;]*\).*/\1/p' | head -1)"
+    p="${p//%i/$INST}"
+    case "$(basename "${p:-}")" in abstract-claude-serve-run|"") return ;; esac
+    [ -f "$p" ] && echo "$p"
+}
+
+senv_get() { [ -r "$SENV" ] && sed -n "s/^$1=//p" "$SENV" | tail -1 | sed 's/^"\(.*\)"$/\1/'; }
+
+migrate() {
+    local u="$1" script
+    script="$(legacy_script "$u")"
+    if [ ! -f "$SENV" ] && [ -n "$script" ]; then
+        mkdir -p "$(dirname "$SENV")"
+        python3 "$BINDIR/station-serve-update-parse" "$script" "$INST" > "$SENV.tmp" \
+            && mv "$SENV.tmp" "$SENV" && chmod 600 "$SENV" \
+            && log "migrated $script -> $SENV" || { rm -f "$SENV.tmp"; log "could not parse $script"; }
+    fi
+    local tpl="$RES/systemd/abstract-claude-serve@.service" dst="$UNIT_DIR/abstract-claude-serve@.service"
+    if [ -f "$tpl" ] && ! cmp -s "$tpl" "$dst" 2>/dev/null; then
+        mkdir -p "$UNIT_DIR"
+        [ -f "$dst" ] && cp -p "$dst" "$dst.hand-$(date +%Y%m%d%H%M%S)" && log "kept the previous $dst as .hand-*"
+        cp "$tpl" "$dst" && sctl daemon-reload 2>/dev/null; log "installed the shipped unit $dst"
+    fi
+}
+
+venv_python() {
+    local bin; bin="$(senv_get ABSTRACT_CLAUDE_BIN)"
+    [ -n "$bin" ] || bin="$(command -v abstract-claude 2>/dev/null || true)"
+    [ -n "$bin" ] && echo "$(dirname "$(readlink -f "$bin")")/python"
+}
+
+pins_match() {
+    local py; py="$(venv_python)"; [ -x "${py:-}" ] || return 1
+    "$py" - "$RES/REQUIREMENTS.txt" <<'PY'
+import re, sys
+from importlib import metadata
+bad = []
+for ln in open(sys.argv[1], encoding="utf-8"):
+    m = re.match(r"^\s*([A-Za-z0-9_.-]+)(?:\[[^\]]*\])?\s*==\s*([^\s;#]+)", ln)
+    if not m or ln.lstrip().startswith("#"):
+        continue
+    try:
+        have = metadata.version(m.group(1))
+    except metadata.PackageNotFoundError:
+        have = None
+    if have != m.group(2):
+        bad.append("%s %s!=%s" % (m.group(1), have, m.group(2)))
+print("; ".join(bad))
+sys.exit(1 if bad else 0)
+PY
+}
+
+marker_current() {
+    local root; root="$(senv_get AC_ROOT)"; root="${root:-$STATE/abstract-claude}"
+    local want; want="runner=$(sha256sum "$BINDIR/abstract-claude-serve-run" 2>/dev/null | cut -c1-16)"
+    grep -qxF "$want" "$root/.serve-run-$INST" 2>/dev/null
+}
+
+serve_url() { echo "http://127.0.0.1:$(senv_get AC_PORT | grep -E '^[0-9]+$' || echo 9124)"; }
+
+busy() {   # 0 = a turn is running (or the state is unknown), 1 = idle
+    local b
+    b="$(curl -s -m 5 "$(serve_url)/api/state" | python3 -c 'import json,sys;d=json.load(sys.stdin);b=d.get("busy");b=b.get("busy") if isinstance(b,dict) else b;print("1" if b else "0")' 2>/dev/null || echo 1)"
+    [ "$b" != 0 ]
+}
+
+mail_keeper() {
+    local f
+    for f in "$STATE/env/station.env" "$STATE/env/toolserver.env" "$STATE/toolserver.env"; do
+        [ -r "$f" ] && { set -a; . "$f" 2>/dev/null; set +a; }
+    done
+    local ts tok
+    ts="${STATION_CONSOLE_TOOLSERVER:-${TOOLSERVER_URL:-}}"; tok="${STATION_CONSOLE_TOOLSERVER_TOKEN:-${HUGPY_OPERATOR_TOKEN:-}}"
+    [ -n "$ts" ] && [ -n "$tok" ] || { log "no toolserver creds — keeper not mailed: $1"; return; }
+    python3 - "$ts" "$tok" "$1" "${STATION_LOCUS:-$(id -un)}" <<'PY' >/dev/null 2>&1 || log "keeper mail failed"
+import json, sys, urllib.request
+ts, tok, text, frm = sys.argv[1:5]
+frm = "".join(c if c.isalnum() or c == "-" else "-" for c in frm.lower())[:40] or "station"
+req = urllib.request.Request(ts.rstrip("/") + "/comms/ping", method="POST",
+      data=json.dumps({"to": "keeper", "from_": frm, "kind": "message", "text": text}).encode(),
+      headers={"Content-Type": "application/json", "X-Operator-Token": tok})
+urllib.request.urlopen(req, timeout=15).read()
+PY
+}
+
+waiter() {
+    local waited=0 idle=0 forced=0
+    log "waiting for an idle serve at $(serve_url) (idle ${IDLE_S}s, max ${MAX_WAIT_S}s)"
+    while :; do
+        if busy; then idle=0; else idle=$((idle + POLL_S)); fi
+        [ "$idle" -ge "$IDLE_S" ] && break
+        if [ "$waited" -ge "$MAX_WAIT_S" ]; then forced=1; break; fi
+        sleep "$POLL_S"; waited=$((waited + POLL_S))
+    done
+    local py venv; py="$(venv_python)"; venv="$(dirname "$(dirname "${py:-/x/x}")")"
+    if [ -x "$venv/bin/pip" ]; then
+        "$BINDIR/station-provision-venv" "$venv" && log "serve venv $venv provisioned to the pins"
+    fi
+    local cur; cur="$(live_unit)"
+    if [ "$cur" = "$LEGACY" ]; then
+        sctl disable --now "$LEGACY" >/dev/null 2>&1; log "legacy $LEGACY stopped + disabled"
+    fi
+    sctl enable "$UNIT" >/dev/null 2>&1
+    sctl restart "$UNIT"; log "restarted $UNIT${forced:+ }$([ "$forced" = 1 ] && echo "(FORCED after ${MAX_WAIT_S}s busy)")"
+    sleep "${STATION_SERVE_VERIFY_S:-8}"
+    local ok=0
+    for _ in 1 2 3 4 5 6; do
+        sctl is-active --quiet "$UNIT" && curl -s -m 5 -o /dev/null -w '%{http_code}' "$(serve_url)/api/state" | grep -q 200 && { ok=1; break; }
+        sleep 5
+    done
+    local status; status="$(pins_match 2>/dev/null)"
+    if [ "$ok" = 1 ]; then
+        log "serve healthy after restart${status:+ — pin mismatch left: $status}"
+    else
+        log "serve NOT healthy after restart"; mail_keeper "station-serve-update: $UNIT on $(id -un)@$(hostname) did NOT come back healthy after the station update restart — check: journalctl --user -u $UNIT -n 80"
+    fi
+    [ "$forced" = 1 ] && mail_keeper "station-serve-update: $UNIT on $(id -un)@$(hostname) was restarted after ${MAX_WAIT_S}s without an idle window (a turn was running) to apply the station release's serve modules."
+    return 0
+}
+
+if [ "$WAITER" = 1 ]; then waiter; exit 0; fi
+
+U="$(live_unit)"
+if [ -z "$U" ]; then exit 0; fi                        # this locus runs no serve instance
+migrate "$U"
+# DEFER (keeper 2026-09-30): every keeper agent runs INSIDE this serve — the flag
+# <state>/env/serve-<instance>.defer (or STATION_SERVE_UPDATE_DEFER=1) keeps an
+# install to the file-level migration above: no venv provisioning (it would swap
+# modules under the running process), no restart, no waiter. The final restart
+# is run by hand: rm the flag, then the --waiter command (see the release notes).
+if [ -e "$STATE/env/serve-$INST.defer" ] || [ "${STATION_SERVE_UPDATE_DEFER:-0}" = 1 ]; then
+    log "serve update DEFERRED ($STATE/env/serve-$INST.defer) — files migrated, nothing provisioned or restarted"
+    exit 0
+fi
+why=""
+[ "$U" = "$LEGACY" ] && why="legacy unit $LEGACY is live"
+mm="$(pins_match 2>/dev/null)" || why="${why:+$why; }modules differ from pins: $mm"
+marker_current || why="${why:+$why; }not started by the current shipped runner"
+[ -n "$why" ] || { log "serve up to date"; exit 0; }
+if sctl is-active --quiet "station-serve-update-$INST.service" 2>/dev/null; then
+    log "restart due ($why) — a waiter is already running"; exit 0
+fi
+log "restart due: $why — scheduling the idle-gated waiter"
+if [ "${STATION_SERVE_UPDATE_INLINE:-0}" = 1 ]; then waiter; exit 0; fi
+systemd-run --user --unit="station-serve-update-$INST" --collect --quiet \
+    -E HUGPY_STATION_STATE="$STATE" -E STATION_LOCUS="${STATION_LOCUS:-}" \
+    -E STATION_CONSOLE_TOOLSERVER="${STATION_CONSOLE_TOOLSERVER:-}" \
+    -E STATION_CONSOLE_TOOLSERVER_TOKEN="${STATION_CONSOLE_TOOLSERVER_TOKEN:-}" \
+    -E HUGPY_OPERATOR_TOKEN="${HUGPY_OPERATOR_TOKEN:-}" \
+    -E STATION_SERVE_MAX_WAIT_S="$MAX_WAIT_S" -E STATION_SERVE_IDLE_S="$IDLE_S" \
+    "$BINDIR/station-serve-update" --waiter --instance "$INST" \
+    || log "could not start the waiter via systemd-run"
+exit 0

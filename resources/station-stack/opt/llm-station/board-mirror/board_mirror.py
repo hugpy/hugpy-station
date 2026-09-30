@@ -185,9 +185,26 @@ class PgStore:
             return None
         return store
 
+    # Name of the index created by the CREATE INDEX statement in DDL above.
+    INDEX_NAME = "board_locus_status_idx"
+
     def _ensure(self):
+        """Apply DDL, tolerating a `board` table owned by another role (t308).
+
+        Postgres checks table ownership BEFORE the IF NOT EXISTS short-circuit of
+        CREATE INDEX, so a non-owner with full DML grants still gets
+        InsufficientPrivilege on an index that is already there. Probe pg_indexes
+        first and skip the statement when the index exists; a genuinely missing
+        index still raises, which is the honest failure.
+        """
         with self.conn.cursor() as cur:
             for stmt in self.DDL:
+                if "CREATE INDEX" in stmt:
+                    cur.execute(
+                        "SELECT 1 FROM pg_indexes WHERE indexname = %s",
+                        (self.INDEX_NAME,))
+                    if cur.fetchone():
+                        continue
                 cur.execute(stmt)
         self.conn.commit()
 

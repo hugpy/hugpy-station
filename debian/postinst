@@ -113,3 +113,12 @@ else
     ensure_hugpy_home "$(getent passwd 1000 2>/dev/null | cut -d: -f1)"
 fi
 
+# ── fleet comms by default (2026-09-03): every locus gets its own headless station
+# instance, which is the inter-agent comms leg (toolserver board ⇄ keeper mail +
+# pane nudge). Needs the host-level /etc/hugpy-station/toolserver.env (url+token);
+# without it the helper only stages and says so. Idempotent; never overwrites.
+ln -sf '/opt/hugpy-station/resources/bin/hugpy-station-locus' /usr/bin/hugpy-station-locus
+_locus_user="${SUDO_USER:-$(getent passwd 1000 2>/dev/null | cut -d: -f1)}"
+if [ -n "$_locus_user" ] && [ -x /opt/hugpy-station/resources/bin/hugpy-station-locus ]; then
+    /opt/hugpy-station/resources/bin/hugpy-station-locus enable "$_locus_user" --quiet || true
+fi

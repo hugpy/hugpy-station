@@ -101,12 +101,14 @@ server-side session per grounding, so switching never loses scrollback:
   - **exec** (default) — `lxc exec`, works even with no network path;
   - **ssh** — a real sshd login at the station's IP (see SSH below).
 
-The **A: on/off** chip is the frontier gate: off prevents *starting* a new A
-session (it never kills a running one). The **B: on/off** chip is the local
-keeper gate (default on): off blocks only the direct B channels (💬 B chat);
-it never switches the frontier backend and never restarts anything. The status line always tells you the
-truth about where you are: `frontier:mct@mystation`, `ssh@mystation`,
-`shell@host`.
+> **Deprecated 2026-09-17: the A: on/off and B: on/off gate chips, the
+> ⧉ copy chip and the ▤ /cmds palette are gone from the terminal bar — use
+> the abstract-claude serve console.** The tmux seats are emergency-only and
+> both gates behave as always-on (their old default). Copy still works from
+> every terminal pane: right-click a selection, or Ctrl/Cmd+Shift+C.
+
+The status line always tells you the truth about where you are:
+`frontier:mct@mystation`, `ssh@mystation`, `shell@host`.
 
 Selecting a VM tab regrounds all three surfaces to that station; selecting
 `keeper` grounds them on the host. The backend availability in the dropdowns
@@ -175,17 +177,12 @@ bridge as trusted, or pin manually if your threat model needs it.
 
 ---
 
-## ▤ /cmds — the frontier command palette
+## ▤ /cmds — the frontier command palette (deprecated 2026-09-17)
 
-Every command the frontier REPL understands, as a form. Enumerable arguments
-are dropdowns (`/log a|b|all`, `/frontier on|off`, `/native …`), and the model
-pickers are too:
-
-- **/model** — A's models listed outright (sonnet / opus / haiku), plus
-  **"type a custom value…"** which swaps to a free-text input (Esc returns
-  to the list) for anything off-menu.
-- **/bmodel** — the fleet's live model registry, ready models first,
-  not-loaded ones labeled; same custom escape hatch.
+The palette (a form over the mct REPL's slash commands: `/model`, `/bmodel`,
+`/log`, `/frontier`, `/native`, …) was removed from the terminal bar — use
+the abstract-claude serve console. In an emergency tmux seat, `/help` at the
+REPL prompt still lists the authoritative commands.
 
 ---
 

@@ -1,0 +1,13 @@
+# Companion timer for sweep-orphan-seat-scopes.service (1.0.91). USER unit.
+[Unit]
+Description=Sweep orphaned seat scopes every 10 minutes
+
+[Timer]
+# Once shortly after the user manager comes up, then every 10 min.
+OnStartupSec=2min
+OnUnitActiveSec=10min
+AccuracySec=30s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

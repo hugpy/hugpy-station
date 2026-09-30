@@ -1,0 +1,17 @@
+#!/bin/sh
+# Start the Electron client installed with the pinned abstract-claude wheel.
+# This wrapper makes the desktop entry independent of the per-user venv path.
+set -eu
+case ":${PATH}:" in *":$HOME/.local/bin:"*) ;; *) PATH="$HOME/.local/bin:$PATH" ;; esac
+export PATH
+AC="$(command -v abstract-claude 2>/dev/null || true)"
+[ -n "$AC" ] || {
+    echo "abstract-claude-console: abstract-claude is not installed for $USER yet" >&2
+    exit 127
+}
+BIN="$(dirname "$(readlink -f "$AC")")/abstract-claude-console"
+[ -x "$BIN" ] || {
+    echo "abstract-claude-console: native client is absent from the installed abstract-claude wheel" >&2
+    exit 127
+}
+exec "$BIN" "$@"

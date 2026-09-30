@@ -1,0 +1,141 @@
+#!/bin/bash
+# abstract-claude-serve-run — ExecStart for abstract-claude-serve@<instance>
+# (1.0.91, t-serve). Starts `abstract-claude serve` as THE keeper surface: the
+# station renders it same-origin at /ac/ through server.py's ac_proxy, a DUMB
+# pass-through that rewrites nothing (d411, 2026-09-17: the injected window.fetch
+# shim is deleted). It strips the /ac prefix on the way upstream; AC_UI_BASE=/ac
+# makes serve own that prefix natively too (_strip_base is a no-op when the
+# prefix is absent), matching the dist this script bakes for /ac below.
+#
+# Same conventions as hugpy-station-web-run: the payload is derived from this
+# file's own location, the ONE state dir is pinned explicitly, and AC_ROOT is
+# the station's own abstract-claude root, so serve and the station's tmux seats
+# share ONE config.json (model, fresh_session_mode) and one sessions store.
+#
+#   abstract-claude-serve-run [instance]      (default instance: station)
+#
+# Env (all overridable, e.g. from <state>/env/station.env):
+#   HUGPY_STATION_STATE   state dir              (default ~/.config/hugpy-station)
+#   AC_ROOT               abstract-claude root   (default <state>/abstract-claude)
+#   AC_HOST / AC_PORT     listen address         (default 127.0.0.1 / 9124)
+#   AC_UI_DIST            where the /ac console dist is baked (default
+#                         <AC_ROOT>/webui-station). REBAKED FROM THE INSTALLED
+#                         PACKAGE ON EVERY START — do not hand-edit it.
+#   AC_SESSION_LABEL      per-launch session dir label; what a seat wipe deletes
+# A settings template at <state>/a-settings-template.json (or the shipped
+# resources/backend/a-settings-template.json) is passed through as
+# AC_SETTINGS_JSON, so serve-launched sessions get the same permissions deny
+# list and hooks the station's own seats get.
+set -euo pipefail
+INSTANCE="${1:-station}"
+
+_self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+APP_ROOT="$(cd "$(dirname "$_self")/../.." 2>/dev/null && pwd)"
+[ -f "$APP_ROOT/resources/backend/server.py" ] || APP_ROOT=/opt/hugpy-station
+
+export HUGPY_STATION_STATE="${HUGPY_STATION_STATE:-${XDG_CONFIG_HOME:-$HOME/.config}/hugpy-station}"
+# 1.0.128: the serve unit is owned by the station release — per-instance settings
+# (port, UI base/dist, venv, exchange/B-gateway overrides) live in state, not in a
+# hand-written launcher: <state>/env/serve-<instance>.env (written once by
+# station-serve-update from the retired run-<instance>.sh; edit it, never this file).
+_senv="$HUGPY_STATION_STATE/env/serve-$INSTANCE.env"
+if [ -r "$_senv" ]; then set -a; . "$_senv"; set +a; fi
+# toolserver creds: the unit loads <state>/env/toolserver.env; older loci keep them at <state>/toolserver.env
+if [ -z "${STATION_CONSOLE_TOOLSERVER_TOKEN:-}${HUGPY_OPERATOR_TOKEN:-}" ] && [ -r "$HUGPY_STATION_STATE/toolserver.env" ]; then
+    set -a; . "$HUGPY_STATION_STATE/toolserver.env"; set +a
+fi
+export TOOLSERVER_URL="${TOOLSERVER_URL:-${STATION_CONSOLE_TOOLSERVER:-https://toolserver.hugpy.ai}}"
+[ -n "${TOOLSERVER_TOKEN:-}" ] || export TOOLSERVER_TOKEN="${STATION_CONSOLE_TOOLSERVER_TOKEN:-${HUGPY_OPERATOR_TOKEN:-}}"
+[ -n "${HUGPY_OPERATOR_TOKEN:-}" ] && [ -z "${TOOLSERVER_OPERATOR_TOKEN:-}" ] && export TOOLSERVER_OPERATOR_TOKEN="$HUGPY_OPERATOR_TOKEN"
+export EXCHANGE_LOCUS="${EXCHANGE_LOCUS:-${STATION_LOCUS:-keeper}}"
+[ -n "${EXCHANGE_INGEST_URL:-}" ] && export EXCHANGE_INGEST_URL
+export AC_USAGE_BACKEND="${AC_USAGE_BACKEND:-toolserver}"
+export AC_ROOT="${AC_ROOT:-$HUGPY_STATION_STATE/abstract-claude}"
+export AC_HOST="${AC_HOST:-127.0.0.1}"
+export AC_PORT="${AC_PORT:-9124}"
+export AC_UI_BASE="${AC_UI_BASE:-/ac}"
+export AC_SESSION_LABEL="${AC_SESSION_LABEL:-keeper-serve}"
+case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac
+
+# The settings template: state copy wins, the shipped default is the fallback.
+for _t in "$HUGPY_STATION_STATE/a-settings-template.json" \
+          "$APP_ROOT/resources/backend/a-settings-template.json"; do
+    [ -s "$_t" ] || continue
+    AC_SETTINGS_JSON="$(python3 -c 'import json,sys;print(json.dumps(json.load(open(sys.argv[1])),separators=(",",":")))' "$_t" 2>/dev/null)" || continue
+    export AC_SETTINGS_JSON
+    break
+done
+
+AC="${ABSTRACT_CLAUDE_BIN:-}"
+[ -n "$AC" ] || AC="$(command -v abstract-claude 2>/dev/null || true)"
+[ -n "$AC" ] || { echo "abstract-claude-serve-run: abstract-claude not on PATH (see resources/REQUIREMENTS.txt)" >&2; exit 1; }
+
+# B tidies the serve prompt queue (t346): serve merges prompts sent mid-turn
+# through an OpenAI-compatible chat endpoint when AC_LOCAL_LLM_URL is set.
+# Point it at the locus's hugpy gateway (HUGPY_URL / HUGPY_API_KEY from the
+# unit env) and pick the model: <state>/b-model.json's model if the gateway
+# lists it, else the first ready *Instruct* chat model. Unset = deterministic
+# join, never a 30 s stall on a model that is not there.
+_gw="${AC_B_GATEWAY:-${HUGPY_URL:-}}"          # AC_B_GATEWAY: an instance's own B gateway
+if [ -n "$_gw" ] && [ -z "${AC_LOCAL_LLM_URL:-}" ]; then
+  _bm="$(python3 -c 'import json,sys;print(json.load(open(sys.argv[1])).get("model",""))' "$HUGPY_STATION_STATE/b-model.json" 2>/dev/null || true)"
+  _ready="$(curl -s -m 8 -H "Authorization: Bearer ${HUGPY_API_KEY:-}" "${_gw%/}/v1/models" 2>/dev/null \
+           | python3 -c 'import sys,json;print("\n".join(m.get("id","") for m in json.load(sys.stdin).get("data",[])))' 2>/dev/null || true)"
+  _pick=""
+  if [ -n "$_bm" ] && printf '%s\n' "$_ready" | grep -qxF "$_bm"; then _pick="$_bm"
+  else _pick="$(printf '%s\n' "$_ready" | grep -i 'instruct' | grep -vi 'vl' | head -1 || true)"; fi
+  if [ -n "$_pick" ]; then
+    export AC_LOCAL_LLM_URL="${_gw%/}/v1/chat/completions"
+    export AC_LOCAL_LLM_MODEL="$_pick"
+    [ -n "${HUGPY_API_KEY:-}" ] && export AC_LOCAL_LLM_KEY="$HUGPY_API_KEY"
+    echo "abstract-claude-serve-run: queue tidy via B: $AC_LOCAL_LLM_MODEL @ $AC_LOCAL_LLM_URL" >&2
+  else
+    echo "abstract-claude-serve-run: queue tidy: no ready chat model at ${_gw} — deterministic join" >&2
+  fi
+fi
+
+# Console UI under /ac — ALWAYS DERIVED, NEVER HAND-AUTHORED (2026-09-19).
+# The package webui is built with base=/claude; the station renders serve at /ac
+# through ac_proxy, so the dist needs a "/claude/" -> "/ac/" rewrite.
+#
+# Until 2026-09-19 that rewrite ran ONLY when AC_UI_DIST was unset — and every
+# real launcher SETS it (abstract-claude-serve/run-station.sh does). So it never
+# ran again after the first time and the baked directory quietly became
+# hand-authored state that existed in no build artifact: every UI fix had to be
+# mirrored by hand into three trees and one was always missed. It now bakes on
+# EVERY start, into AC_UI_DIST when given and into <AC_ROOT>/webui-station
+# otherwise, so a hand edit to the derived tree DOES NOT SURVIVE A RESTART.
+# station-bake-webui archives the old tree before replacing it (nothing is ever
+# lost) and honours the AC_UI_NO_BAKE=1 / <dist>/.no-bake emergency hatch — both
+# of which station-drift-check.sh reports and the release build refuses to ship
+# through. See resources/bin/station-bake-webui for the full contract.
+export AC_UI_DIST="${AC_UI_DIST:-$AC_ROOT/webui-station}"
+_bake="$(dirname "$(readlink -f "$0")")/station-bake-webui"
+if [ "${AC_UI_BAKE:-1}" = 0 ]; then
+  echo "abstract-claude-serve-run: AC_UI_BAKE=0 — serving $AC_UI_DIST as-is" >&2
+elif [ -x "$_bake" ]; then
+  ABSTRACT_CLAUDE_BIN="$AC" "$_bake" "$AC_UI_DIST" \
+    || echo "abstract-claude-serve-run: webui bake failed (non-fatal) — serving whatever is in $AC_UI_DIST" >&2
+else
+  echo "abstract-claude-serve-run: station-bake-webui missing at $_bake — console UI NOT re-derived" >&2
+fi
+
+# 1.0.107: keep THIS serve venv on the pinned module manifest before starting.
+# The serve venv is long-lived and pip-installed (not editable), so a restaged
+# wheel never reached it on its own — it drifted to abstract_claude 0.1.44 while
+# the bundle shipped 0.1.49. Re-provision from the bundle on every start
+# (idempotent: a no-op when already matching). The venv is the one that owns $AC.
+_acvenv="$(cd "$(dirname "$(readlink -f "$AC")")/.." 2>/dev/null && pwd)"
+_prov="$(dirname "$(readlink -f "$0")")/station-provision-venv"
+if [ -x "$_prov" ] && [ -n "$_acvenv" ] && [ -x "$_acvenv/bin/pip" ]; then
+  "$_prov" "$_acvenv" || echo "abstract-claude-serve-run: manifest provision skipped (non-fatal)" >&2
+fi
+
+# start marker: station-serve-update restarts the serve only when the pins, the
+# installed modules or THIS runner changed since the running process started.
+mkdir -p "$AC_ROOT" 2>/dev/null || true
+printf 'runner=%s\napp=%s\n' "$(sha256sum "$_self" 2>/dev/null | cut -c1-16)" \
+    "$(cat "$APP_ROOT/resources/VERSION" 2>/dev/null)" > "$AC_ROOT/.serve-run-$INSTANCE" 2>/dev/null || true
+cd "$HUGPY_STATION_STATE" 2>/dev/null || cd "$HOME" || true
+echo "abstract-claude-serve-run: instance=$INSTANCE root=$AC_ROOT listen=$AC_HOST:$AC_PORT"
+exec "$AC" serve --host "$AC_HOST" --port "$AC_PORT"

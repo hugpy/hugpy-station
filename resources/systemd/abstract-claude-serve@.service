@@ -1,0 +1,47 @@
+# abstract-claude serve — USER unit, one instance per console (1.0.91, t-serve).
+#
+# `abstract-claude serve` IS the keeper surface since 2026-09-16: server.py
+# proxies it same-origin at /ac/ (STATION_CONSOLE_AC, default
+# http://127.0.0.1:9124) and STATION_KEEPER_SURFACE=serve makes it the frontier
+# pane's default. The tmux keeper seats are NOT removed and NOT hidden — they
+# stay selectable as explicit "terminal seat (tmux) · …" choices.
+#
+# A USER unit deliberately: seats live in their own systemd scopes, so
+# `systemctl --user restart abstract-claude-serve@station` — which is what the
+# console's serve-mode relaunch and seat wipe run — never touches a tmux
+# session. %i is the instance name; `station` is the one the console expects.
+#
+# NOT enabled by the package. The station user enables it:
+#   ln -sf <app>/resources/systemd/abstract-claude-serve@.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now abstract-claude-serve@station
+# Per-instance overrides (port, AC_ROOT, AC_UI_DIST) go in
+# <state>/env/station.env or a drop-in, not in this file.
+[Unit]
+Description=abstract-claude serve (%i console)
+After=network-online.target
+PartOf=default.target
+
+[Service]
+Type=simple
+Environment=HUGPY_STATION_STATE=%h/hugpy-station
+EnvironmentFile=-%h/hugpy-station/env/station.env
+EnvironmentFile=-%h/hugpy-station/env/toolserver.env
+ExecStart=%h/.local/bin/abstract-claude-serve-run %i
+Restart=on-failure
+RestartSec=3
+# serve is a stdlib ThreadingHTTPServer; give it a moment to release the port.
+TimeoutStopSec=15
+KillMode=mixed
+SyslogIdentifier=ac-serve-%i
+# 2026-09-16 resource guard: the console must never out-compete the seats it
+# supervises. IOWeight= is omitted on purpose — the cgroup v2 `io` controller is
+# not delegated to a user manager on most hosts, so it would be accepted and
+# silently ignored; the ionice class below is the guard that actually bites.
+CPUWeight=80
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+
+[Install]
+WantedBy=default.target

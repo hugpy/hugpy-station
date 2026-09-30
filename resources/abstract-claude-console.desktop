@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Abstract Claude Console
+Comment=Native client for the keeper shared console
+Exec=/opt/hugpy-station/resources/bin/abstract-claude-console
+Terminal=false
+Categories=Development;Utility;
+StartupWMClass=Abstract Claude Console

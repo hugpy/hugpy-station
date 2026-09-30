@@ -166,7 +166,7 @@ if [ "$DO_SEED" = 1 ]; then
   log "  B/local: hugpy-agent (+ ~/.mct session workspaces)"
   lxc exec "$NAME" -- sudo -u ubuntu -H bash -lc \
     'command -v hugpy-agent >/dev/null 2>&1 || [ -x "$HOME/.local/bin/hugpy-agent" ] \
-     || python3 -m pip install --user --quiet --break-system-packages hugpy-agent; \
+     || python3 -m pip install --user --quiet --break-system-packages 'hugpy-agent[mct,serve]>=0.1.78'; \
      mkdir -p "$HOME/.mct"' \
     || log "WARNING: hugpy-agent install failed — the B / local seats are empty"
   log "  local: OpenCode (the local seat's TUI; hugpy-agent console execs it)"

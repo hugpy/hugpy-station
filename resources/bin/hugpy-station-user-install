@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# hugpy-station-user-install — the USER-UNIT derivative of the SAME package (1.0.90).
+#
+# A station run by an account's own systemd user manager (the keeper's
+# "sovereign" layout) is not a second product: it is the .deb's payload
+# unpacked, unmodified, into <base>/app/<version>/ with <base>/app/current
+# pointing at it, the shipped user unit, and the SAME first-run provisioning.
+# No root is needed at any step.
+#
+#   hugpy-station-user-install <hugpy-station_<ver>_amd64.deb> [options]
+#   hugpy-station-user-install --from-opt [options]        # mirror the host's /opt install
+#   hugpy-station-user-install --rollback <version>         # repoint current, restart
+#   options: --base DIR      state dir + app/ parent   (default: $HUGPY_STATION_STATE or ~/.config/hugpy-station)
+#            --full          copy the whole payload (Electron too); default: resources/ only
+#            --no-restart    install + provision, do not (re)start the user unit
+#            --no-enable     do not enable the user unit
+#
+# Layout it produces (see hugpy-station-firstrun --help for the canonical rules):
+#   <base>/app/<version>/resources/{backend,bin,systemd,VERSION,...}
+#   <base>/app/current -> <version>
+#   <base>/env/station.env, <base>/env/toolserver.env         (user-owned 0600)
+#   ~/.config/systemd/user/hugpy-station-web.service          (from resources/systemd/
+#        hugpy-station-web.user.service; an existing hand-written unit is KEPT and a
+#        drop-in 10-hugpy-station.conf pins HUGPY_STATION_STATE / AC_ROOT / ExecStartPre)
+# Rollback: hugpy-station-user-install --rollback <previous version>.
+set -euo pipefail
+die() { echo "hugpy-station-user-install: $*" >&2; exit 1; }
+log() { printf 'hugpy-station-user-install: %s\n' "$*"; }
+
+SRC_DEB=""; FROM_OPT=0; ROLLBACK=""; BASE="${HUGPY_STATION_STATE:-${XDG_CONFIG_HOME:-$HOME/.config}/hugpy-station}"
+FULL=0; RESTART=1; ENABLE=1
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --from-opt) FROM_OPT=1; shift ;;
+        --rollback) ROLLBACK="$2"; shift 2 ;;
+        --base) BASE="$2"; shift 2 ;;
+        --full) FULL=1; shift ;;
+        --no-restart) RESTART=0; shift ;;
+        --no-enable) ENABLE=0; shift ;;
+        -h|--help) sed -n '2,28p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -*) die "unknown option $1" ;;
+        *) SRC_DEB="$1"; shift ;;
+    esac
+done
+[ "$(id -u)" != 0 ] || die "run as the station user, not root"
+APP="$BASE/app"; UNIT_DIR="$HOME/.config/systemd/user"; UNIT="$UNIT_DIR/hugpy-station-web.service"
+MARK="managed by hugpy-station-user-install"
+
+restart_unit() {
+    systemctl --user daemon-reload || true
+    [ "$ENABLE" = 1 ] && systemctl --user enable hugpy-station-web.service >/dev/null 2>&1 || true
+    if [ "$RESTART" = 1 ]; then
+        systemctl --user restart hugpy-station-web.service
+        sleep 2; systemctl --user is-active --quiet hugpy-station-web.service \
+            && log "hugpy-station-web (user) active" \
+            || die "hugpy-station-web (user) failed — journalctl --user -u hugpy-station-web"
+    else
+        log "--no-restart: run  systemctl --user restart hugpy-station-web  when ready"
+    fi
+}
+
+if [ -n "$ROLLBACK" ]; then
+    [ -d "$APP/$ROLLBACK/resources/backend" ] || die "no $APP/$ROLLBACK"
+    ln -sfn "$ROLLBACK" "$APP/current"; log "current -> $ROLLBACK"
+    restart_unit; exit 0
+fi
+
+# ── 1. payload ────────────────────────────────────────────────────────────────
+TMP=""; trap '[ -n "$TMP" ] && rm -rf "$TMP"' EXIT
+if [ "$FROM_OPT" = 1 ]; then
+    SRC=/opt/hugpy-station
+    [ -f "$SRC/resources/VERSION" ] || die "no /opt/hugpy-station install to mirror"
+else
+    [ -n "$SRC_DEB" ] && [ -f "$SRC_DEB" ] || die "usage: hugpy-station-user-install <deb> | --from-opt | --rollback <ver>"
+    command -v dpkg-deb >/dev/null || die "dpkg-deb is required to unpack the .deb"
+    if [ -f "$SRC_DEB.sha256" ]; then
+        ( cd "$(dirname "$SRC_DEB")" && sha256sum -c --quiet "$(basename "$SRC_DEB").sha256" ) \
+            || die "$SRC_DEB does not match its .sha256 sidecar"
+    fi
+    TMP="$(mktemp -d)"
+    dpkg-deb -x "$SRC_DEB" "$TMP"
+    SRC="$TMP/opt/hugpy-station"
+    [ -f "$SRC/resources/VERSION" ] || die "not a hugpy-station package: $SRC_DEB"
+fi
+VER="$(tr -d '[:space:]' < "$SRC/resources/VERSION")"
+DEST="$APP/$VER"
+mkdir -p "$DEST" "$BASE/env"
+if [ "$FULL" = 1 ]; then
+    rsync -a --delete "$SRC/" "$DEST/"
+else
+    rsync -a --delete "$SRC/resources/" "$DEST/resources/"
+fi
+chmod 0700 "$BASE/env" 2>/dev/null || true
+ln -sfn "$VER" "$APP/current"
+log "payload $VER -> $DEST; current -> $VER"
+
+# ── 2. the user unit ──────────────────────────────────────────────────────────
+mkdir -p "$UNIT_DIR" "$UNIT.d"
+TPL="$DEST/resources/systemd/hugpy-station-web.user.service"
+if [ ! -e "$UNIT" ] || grep -q "$MARK" "$UNIT" 2>/dev/null; then
+    sed -e "s|@BASE@|$BASE|g" "$TPL" > "$UNIT.tmp" && mv -f "$UNIT.tmp" "$UNIT"
+    log "unit $UNIT (from the shipped template)"
+else
+    log "unit $UNIT is hand-written — kept; pinning state/AC_ROOT via drop-in"
+fi
+cat > "$UNIT.d/10-hugpy-station.conf" <<EOF
+# $MARK ($VER): the ONE state dir + the station's abstract-claude root, and the
+# idempotent first-run before every start. Regenerated on every install.
+[Service]
+Environment=HUGPY_STATION_STATE=$BASE
+Environment=AC_ROOT=$BASE/abstract-claude
+Environment=HUGPY_STATION_APP_ROOT=$APP/current
+EnvironmentFile=-$BASE/env/toolserver.env
+EnvironmentFile=-$BASE/env/station.env
+ExecStartPre=-/bin/bash -lc '$APP/current/resources/bin/hugpy-station-firstrun --self --quiet --app-root $APP/current --state $BASE'
+EOF
+
+# ── 3. first-run provisioning (same script the .deb runs) ─────────────────────
+HUGPY_STATION_STATE="$BASE" "$DEST/resources/bin/hugpy-station-firstrun" --self \
+    --app-root "$APP/current" --state "$BASE" --env-file "$BASE/env/station.env" || true
+
+# ── 4. run it ─────────────────────────────────────────────────────────────────
+restart_unit
+log "done — hugpy Station $VER (user layout at $BASE)"

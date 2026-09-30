@@ -1,0 +1,23 @@
+[Unit]
+# hugpy-station-board@<user> (1.0.90) — the board mirror for a STATION user:
+# reflects $HUGPY_HOME/state/todo.json (the ONE board file the station UI reads
+# and the reverse sync writes) into the central `board` table as STATION_LOCUS.
+# Same env contract as hugpy-station-web@<user>; fail-open without DB env
+# (SOLCATCHER_POSTGRESQL_* — put them in <state>/env/board-mirror.env or ~/.env).
+# Enabled by the after-install for every station user that has no other
+# board-mirror unit (a host's own board-mirror@<user> stays authoritative).
+Description=hugpy Station board mirror — %i
+After=network-online.target hugpy-station-web@%i.service
+Wants=network-online.target
+
+[Service]
+User=%i
+EnvironmentFile=-/etc/hugpy-station/toolserver.env
+EnvironmentFile=-/etc/hugpy-station/%i.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/bin/bash -l /opt/hugpy-station/resources/bin/hugpy-station-board-run
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

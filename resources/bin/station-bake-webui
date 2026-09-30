@@ -1,0 +1,150 @@
+#!/usr/bin/env bash
+# station-bake-webui — regenerate the /ac-based console dist FROM THE INSTALLED
+# PACKAGE, on every serve start. (2026-09-19, anti-drift.)
+#
+# WHY THIS EXISTS
+# ---------------
+# abstract_claude ships its console built for base=/claude. The station renders
+# serve at /ac through server.py's ac_proxy, so the dist needs "/claude/" ->
+# "/ac/". That rewrite used to run only when AC_UI_DIST was UNSET
+# (abstract-claude-serve-run, old line 84) — and the keeper's launcher
+# (abstract-claude-serve/run-station.sh) always SETS AC_UI_DIST. Net effect: the
+# rewrite never ran again after the first time, the baked directory stopped being
+# derived, and it silently became HAND-AUTHORED state that existed in no build
+# artifact. Every UI fix then had to be mirrored by hand into three trees and one
+# of them was always forgotten.
+#
+# The rule the operator has been asking for since before this station existed:
+#   *** A DERIVED ARTIFACT MUST NOT SURVIVE A HAND EDIT. ***
+# So this bakes UNCONDITIONALLY, every start, idempotently. The ONLY place the
+# console UI is edited is the package source (abstract_claude/webui in the
+# c144 worktree); it flows c144 -> wheel -> .deb -> installed package -> here.
+#
+# NOTHING IS EVER DELETED. If the destination differs from what the bake
+# produces, the whole destination is first archived to
+#   <archive-dir>/<name>.pre-bake-<YYYYmmdd-HHMMSS>/
+# (archive-dir = AC_UI_BAKE_ARCHIVE_DIR, else <parent>/patches if it exists,
+# else <parent>), and only then replaced. A clobbered hotfix is always
+# recoverable from that archive.
+#
+# EMERGENCY ESCAPE HATCH (hotfix a running console without a release)
+# -------------------------------------------------------------------
+#   AC_UI_NO_BAKE=1                  in the unit/launcher env, or
+#   touch <dst>/.no-bake             a sentinel inside the dist directory
+# Either one skips the bake entirely and leaves the live tree untouched.
+# BOTH ARE REPORTED AS DRIFT by station-drift-check.sh, which the release build
+# runs first and which REFUSES to build while the hatch is open. That is
+# deliberate: an emergency hotfix is allowed, shipping while one is outstanding
+# is not.
+#
+# USAGE
+#   station-bake-webui <dst-dir> [pkg-webui-dir]
+#     dst-dir        where the /ac dist must live (what AC_UI_DIST points at)
+#     pkg-webui-dir  abstract_claude/webui inside the installed package;
+#                    auto-detected from ABSTRACT_CLAUDE_BIN / $PATH when omitted
+#
+#   station-bake-webui --check <dst-dir> [pkg-webui-dir]
+#     read-only: exit 0 if dst already == what the bake would produce,
+#     exit 3 on mismatch, exit 4 if the escape hatch is open. Prints the
+#     differing file names. This is what the drift gate calls.
+#
+#   AC_UI_BASE=/ac   the base to rewrite TO (default /ac)
+set -euo pipefail
+
+MODE=bake
+[ "${1:-}" = "--check" ] && { MODE=check; shift; }
+
+DST="${1:-}"
+PKG_UI="${2:-}"
+[ -n "$DST" ] || { echo "station-bake-webui: usage: station-bake-webui [--check] <dst-dir> [pkg-webui-dir]" >&2; exit 2; }
+
+BASE="${AC_UI_BASE:-/ac}"
+BASE="/${BASE#/}"; BASE="${BASE%/}"        # normalise to a single leading slash, no trailing
+
+# ── locate the installed package's webui ────────────────────────────────────
+if [ -z "$PKG_UI" ]; then
+    _ac="${ABSTRACT_CLAUDE_BIN:-}"
+    [ -n "$_ac" ] || _ac="$(command -v abstract-claude 2>/dev/null || true)"
+    if [ -n "$_ac" ]; then
+        # the venv that owns the entry point is the one that has the package
+        _venv_py="$(dirname "$(readlink -f "$_ac")")/python3"
+        [ -x "$_venv_py" ] || _venv_py="$(dirname "$(readlink -f "$_ac")")/python"
+        [ -x "$_venv_py" ] && PKG_UI="$("$_venv_py" -c 'import abstract_claude,os;print(os.path.join(os.path.dirname(abstract_claude.__file__),"webui"))' 2>/dev/null || true)"
+    fi
+fi
+if [ -z "$PKG_UI" ] || [ ! -f "$PKG_UI/index.html" ]; then
+    echo "station-bake-webui: no installed abstract_claude webui found (tried '${PKG_UI:-<none>}') — leaving $DST alone" >&2
+    exit 0
+fi
+
+# ── escape hatch ────────────────────────────────────────────────────────────
+if [ "${AC_UI_NO_BAKE:-}" = "1" ] || [ -e "$DST/.no-bake" ]; then
+    _why="AC_UI_NO_BAKE=1"; [ -e "$DST/.no-bake" ] && _why="$DST/.no-bake sentinel"
+    echo "station-bake-webui: BAKE DISABLED ($_why) — $DST is hand-held; this BLOCKS the next release (station-drift-check.sh)" >&2
+    [ "$MODE" = check ] && exit 4
+    exit 0
+fi
+
+# ── render what the bake WOULD produce, into a temp tree ────────────────────
+TMP="$(mktemp -d "${TMPDIR:-/tmp}/station-bake-webui.XXXXXX")"
+trap 'rm -rf "$TMP"' EXIT
+mkdir -p "$TMP/assets"
+
+# Bundle rewrite: the React bundle emits its own asset/API URLs from a literal
+# base. index.html rewrite: the <script>/<link> hrefs. Everything else is copied
+# byte-for-byte (keeper-live.js et al. build their URLs at runtime).
+for _f in "$PKG_UI"/assets/*; do
+    [ -e "$_f" ] || continue
+    _b="$(basename "$_f")"
+    case "$_b" in
+        index-*.js) sed -e "s#\"/claude/\"#\"$BASE/\"#g; s#\"/claude/api\"#\"$BASE/api\"#g" "$_f" > "$TMP/assets/$_b" ;;
+        *)          cp -f "$_f" "$TMP/assets/$_b" ;;
+    esac
+done
+sed -e "s#\"/claude/assets/#\"$BASE/assets/#g" "$PKG_UI/index.html" > "$TMP/index.html"
+
+# ── compare ─────────────────────────────────────────────────────────────────
+# Only files the bake OWNS are compared/replaced. *.bak-* keepsakes and the
+# .no-bake sentinel in the destination are ignored and preserved.
+_manifest() {   # _manifest <dir> -> "md5  relpath" lines, sorted, bake-owned files only
+    ( cd "$1" 2>/dev/null || return 0
+      find . -type f \
+           ! -name '.no-bake' \
+           ! -name '*.bak-*' ! -name '*.bak' ! -name '*.orig' ! -name '*.rej' \
+           -printf '%P\n' | LC_ALL=C sort \
+      | while IFS= read -r p; do printf '%s  %s\n' "$(md5sum < "$p" | cut -d' ' -f1)" "$p"; done )
+}
+
+WANT="$TMP/.manifest.want"; HAVE="$TMP/.manifest.have"
+{ _manifest "$TMP" | grep -v '^\S*  \.manifest\.' > "$WANT"; } || true
+_manifest "$DST" > "$HAVE" 2>/dev/null || : > "$HAVE"
+
+if cmp -s "$WANT" "$HAVE"; then
+    [ "$MODE" = check ] && exit 0
+    exit 0      # already derived and current — the common case, a silent no-op
+fi
+
+DIFFS="$( { diff "$HAVE" "$WANT" 2>/dev/null || true; } | awk '/^[<>]/{print $3}' | LC_ALL=C sort -u | tr '\n' ' ')"
+
+if [ "$MODE" = check ]; then
+    echo "station-bake-webui: $DST DIFFERS from the package bake: $DIFFS" >&2
+    exit 3
+fi
+
+# ── archive-then-replace (never destructive) ────────────────────────────────
+_parent="$(cd "$(dirname "$DST")" && pwd)"
+ARCH_DIR="${AC_UI_BAKE_ARCHIVE_DIR:-}"
+[ -n "$ARCH_DIR" ] || { [ -d "$_parent/patches" ] && ARCH_DIR="$_parent/patches" || ARCH_DIR="$_parent"; }
+if [ -d "$DST" ]; then
+    _arch="$ARCH_DIR/$(basename "$DST").pre-bake-$(date +%Y%m%d-%H%M%S)"
+    mkdir -p "$_arch" && cp -a "$DST/." "$_arch/" 2>/dev/null || true
+    echo "station-bake-webui: archived pre-bake $DST -> $_arch" >&2
+fi
+
+mkdir -p "$DST/assets"
+# replace only bake-owned files; leave *.bak-* keepsakes in place
+find "$DST/assets" -maxdepth 1 -type f ! -name '*.bak-*' ! -name '*.bak' -delete 2>/dev/null || true
+cp -f "$TMP"/assets/* "$DST/assets/" 2>/dev/null || true
+cp -f "$TMP/index.html" "$DST/index.html"
+
+echo "station-bake-webui: rebaked $DST for base=$BASE from $PKG_UI (changed: $DIFFS)"

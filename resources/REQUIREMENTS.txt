@@ -1,0 +1,32 @@
+# hugpy-station module requirements — PINNED, installed from PyPI.
+#
+# This is the single source of truth for the abstract_* / hugpy module versions a
+# station requires. It is provisioned into EVERY station venv (the seat venv and
+# the abstract-claude-serve venv) by `station-provision-venv`, and force-applied
+# (pip install -U) on install / serve-start / seat-provision so an already-installed
+# OLDER version is upgraded to the exact pin rather than left to flail.
+#
+# 1.0.112: BUNDLED WHEELS ARE DEPRECATED. Every Tier-1 pin below is published on
+# PyPI at exactly this version and is installed from PyPI — no --find-links, no
+# bundled .whl beside this file. build-release.sh fails the build unless every pin
+# resolves on PyPI. Transitive deps were always resolved from PyPI (the provision
+# path never used --no-index), so removing the bundled wheels loses no capability.
+# (The retired wheels are in ARCHIVE/HUGPY_OLD/station-bundled-wheels-2026-09-24/.)
+#
+# Bump a pin: publish the new version to PyPI, change the pin here, then cut a
+# station version — the next install re-provisions every venv to the new pins.
+#
+# Tier 1 — per-seat LIBRARIES (installed into every venv):
+abstract-claude==0.1.64
+abstract-serve-core==0.1.4
+abstract-gpt==0.1.11
+hugpy-agent[mct,serve]==0.1.80
+abstract-search==0.0.0.42
+#
+# Tier 2 — runtime SERVICE floor (NOT installed; a singleton the station CALLS).
+# The toolserver (abstract_toolserver, the :7004 MCP/DB/backend-data arm) is a
+# shared service, never installed per-seat; its MCP client already ships inside
+# abstract-claude above. hugpy-station-firstrun handshakes $TOOLSERVER_URL/version
+# and warns (does not hard-fail) if it is below this floor. Declared here for one
+# source of truth; parsed by firstrun, ignored by pip (leading '# @service').
+# @service toolserver min_version=0.0.27 url_env=TOOLSERVER_URL

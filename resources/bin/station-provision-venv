@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# station-provision-venv — install/upgrade the PINNED hugpy-station module set
+# (resources/REQUIREMENTS.txt) into a target venv from PyPI at the exact pins.
+#
+# This is the fix for module "flail": a bump used to never re-apply to a
+# long-lived venv (the serve venv drifted to abstract_claude 0.1.44 while the pin
+# was 0.1.49; the seat venv sat at 0.1.43). This routine force-applies the exact
+# pins (pip install -U) so an already-installed OLDER version is upgraded. Every
+# pin is on PyPI (1.0.112: bundled wheels deprecated); PyPI also fills transitive
+# deps. Idempotent: a no-op when the venv already matches, an upgrade otherwise.
+#
+# Call it wherever a station venv is created or a station process starts:
+#   station-provision-venv <venv-dir>      # explicit
+#   station-provision-venv                 # $SEAT_VENV or ~/.local/share/station-seats/venv
+#
+# Env: STATION_REQUIREMENTS overrides the manifest path; HUGPY_STATION_APP_ROOT
+# is honored when searching for resources/REQUIREMENTS.txt.
+set -uo pipefail
+log(){ echo "station-provision-venv: $*" >&2; }
+
+VENV="${1:-${SEAT_VENV:-$HOME/.local/share/station-seats/venv}}"
+PIP="$VENV/bin/pip"
+if [ ! -x "$PIP" ]; then log "no pip in $VENV — skip"; exit 0; fi
+
+# Locate resources/REQUIREMENTS.txt. Same search order as seat-provision.sh so a
+# fresh box, an /opt install, and the vm_mgr app tree all resolve.
+_here="$(cd "$(dirname "$(readlink -f "$0")")" 2>/dev/null && pwd)"
+REQ="${STATION_REQUIREMENTS:-}"
+if [ -z "$REQ" ] || [ ! -f "$REQ" ]; then
+  REQ=""
+  for d in "${HUGPY_STATION_APP_ROOT:-}/resources" "$_here/.." \
+           /opt/hugpy-station/resources \
+           "${HUGPY_STATION_STATE:-${XDG_CONFIG_HOME:-$HOME/.config}/hugpy-station}/app/current/resources"; do
+    [ -n "$d" ] && [ -f "$d/REQUIREMENTS.txt" ] && { REQ="$d/REQUIREMENTS.txt"; break; }
+  done
+fi
+if [ -z "$REQ" ] || [ ! -f "$REQ" ]; then
+  log "no REQUIREMENTS.txt found (searched app-root/opt/home) — skip"; exit 0
+fi
+
+_pins="$(grep -vE '^\s*#|^\s*$' "$REQ" | tr '\n' ' ')"
+log "provisioning $VENV <- $REQ"
+log "pins: $_pins"
+
+# -U upgrades to the pinned exact version from PyPI (bundled wheels deprecated in
+# 1.0.112); PyPI resolves transitive deps too. Exact pins => no-op when already
+# satisfied, upgrade otherwise.
+if "$PIP" install -U -r "$REQ" >/dev/null 2>&1; then
+  log "module set OK"
+  exit 0
+fi
+# One retry, verbose, so a real failure is visible in the unit log (never fatal to
+# the caller — a serve/seat should still start on the version it has).
+log "install failed — retrying verbose (non-fatal)"
+"$PIP" install -U -r "$REQ" 2>&1 | tail -25 >&2 || true
+exit 0

@@ -131,6 +131,31 @@ secret — the credential is read from the caller's environment at run time; the
 artifacts themselves stay member-gated). To repair an already-installed copy,
 see `STATION-FIX-README.md` and `/api/agent/console/station-fix.sh`.
 
+### ONE install layout (1.0.90) — "install the .deb" is the whole story
+
+| what | where | who writes it |
+|---|---|---|
+| payload | `/opt/hugpy-station` (the .deb) | the package |
+| state (`HUGPY_STATION_STATE`) | `<home>/hugpy-station` — the ONE state dir; `~/.config/hugpy-station` becomes a symlink to it | `hugpy-station-firstrun` |
+| instance env | `/etc/hugpy-station/<user>.env` (root 0600): `PORT` (first free from 8898, chosen once), `STATION_LOCUS`, `HUGPY_STATION_STATE`, `STATION_CONSOLE_TOKEN`, `HUGPY_URL`, `HUGPY_API_KEY`, `HUGPY_OPERATOR_TOKEN` | `hugpy-station-locus` + `hugpy-station-firstrun` (after-install) |
+| headless unit | `hugpy-station-web@<user>` → `bash -l /opt/hugpy-station/resources/bin/hugpy-station-web-run` (pins state, `AC_ROOT`, re-runs first-run, exec's server.py) | the package (enabled for the installing user) |
+| seat CLIs | `~/.local/bin/mct-pull`, `mct-push` (+ `/usr/local/bin/`) → the package | first-run |
+| defaults seeded once | `frontier-models.json` (working model), `local-keeper/AGENTS.md` (+ `QWEN.md`, `docs/`), `abstract-claude/config.json` (`fresh_session_mode=dir`), `b-model.json`, `~/.config/hugpy-agent/agent.env`, `<state>/toolserver.env` | first-run |
+
+The after-install runs first-run for EVERY station user on the host (the
+installing user + every existing `/etc/hugpy-station/<user>.env`) and
+`try-restart`s the instances, so `/opt` can never lag what a unit runs.
+Installer knobs (env of the `sudo -E apt install ./hugpy-station_*.deb`):
+`HUGPY_API_KEY`, `HUGPY_URL`, `HUGPY_OPERATOR_TOKEN`, `HUGPY_STATION_NO_HEADLESS=1`.
+Re-runnable any time: `sudo hugpy-station-firstrun <user>`.
+
+**User-unit derivative (a "sovereign" station run by the account's own systemd
+user manager):** the SAME .deb, unpacked without root —
+`hugpy-station-user-install <deb>` → `<state>/app/<version>/` + `app/current`,
+`~/.config/systemd/user/hugpy-station-web.service` from
+`resources/systemd/hugpy-station-web.user.service`, env in `<state>/env/`, the
+same first-run. Rollback: `hugpy-station-user-install --rollback <version>`.
+
 Post-install checks: `ls -l /usr/bin/hugpy-station` must resolve to
 `/opt/hugpy-station/hugpy-station-launch` and `chrome-sandbox` must be
 `-rwsr-xr-x root`. `hugpy-station` needs a graphical session — over plain ssh it

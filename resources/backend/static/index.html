@@ -922,6 +922,51 @@
               border-left:3px solid var(--edge); background:var(--bg); }
   .md-hr { border:none; border-top:1px solid var(--edge); margin:14px 0; }
   .md a { color:var(--accent); }
+  /* 1.0.85: 🗄 db drawer — a read-only window onto the central toolserver db via
+     the station's gated /ts/db proxy. Reuses .design-panel + the .docs-bar /
+     .docs-tabs / .docs-body chrome; like docs it is NOT gated on an active VM
+     (the db is central, not per-locus). Rows are React elements, never innerHTML. */
+  .db-tables { display:flex; flex-wrap:wrap; gap:4px; margin-bottom:10px; }
+  .db-table-btn { padding:3px 8px; border:1px solid var(--edge); border-radius:6px; background:var(--bg);
+                  color:var(--fg); cursor:pointer; font:12px ui-monospace,monospace; }
+  .db-table-btn:hover { border-color:var(--accent); }
+  .db-table-btn.on { border-color:var(--accent); color:var(--accent); }
+  .db-cols { display:flex; flex-wrap:wrap; align-items:baseline; gap:4px 10px; margin:0 0 8px;
+             padding:6px 8px; border:1px solid var(--edge); border-radius:6px; background:var(--bg); font-size:12px; }
+  .db-col { font-family:ui-monospace,monospace; white-space:nowrap; }
+  .db-col em { color:var(--dim); font-style:normal; font-size:11px; margin-left:3px; }
+  .db-sql { width:100%; min-height:90px; resize:vertical; background:var(--bg); color:var(--fg);
+            border:1px solid var(--edge); border-radius:6px; padding:6px 8px;
+            font:12px/1.4 ui-monospace,monospace; }
+  .db-sql:focus { outline:none; border-color:var(--accent); }
+  .db-hint { color:var(--dim); font-size:11px; margin:4px 0 6px; }
+  .db-row { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
+  .db-status { color:var(--dim); font-size:11px; }
+  .db-link { color:var(--accent); font-size:12px; text-decoration:none; white-space:nowrap; }
+  .db-link:hover { text-decoration:underline; }
+  /* the result grid scrolls inside itself (both axes) under a sticky header row */
+  .db-grid { overflow:auto; max-height:70vh; border:1px solid var(--edge); border-radius:6px; background:var(--bg); }
+  .db-grid table { border-collapse:collapse; font:11px/1.35 ui-monospace,monospace; white-space:nowrap; }
+  .db-grid th { position:sticky; top:0; background:#1c2129; color:var(--dim); text-align:left;
+                padding:4px 8px; border-bottom:1px solid var(--edge); font-weight:600; }
+  .db-grid td { padding:3px 8px; border-bottom:1px solid var(--edge); max-width:420px;
+                overflow:hidden; text-overflow:ellipsis; vertical-align:top; }
+  .db-grid tr:hover td { background:#161b22; }
+  .db-null { color:var(--dim); opacity:.6; }
+  /* p512 interactive grid: sortable/reorderable/resizable headers + row-expand.
+     th is position:sticky (a positioning context for the abs grip); a set width
+     drops the 420px ellipsis cap so wide columns wrap instead of truncating. */
+  .db-grid th { user-select:none; }
+  .db-grid td.db-sized, .db-grid th.db-sized { max-width:none; white-space:normal; overflow-wrap:anywhere; }
+  .db-grip { position:absolute; top:0; right:0; width:5px; height:100%; cursor:col-resize; }
+  .db-grip:hover { background:var(--accent); }
+  .db-grid tr.db-sel td { background:rgba(127,170,255,.16); }
+  .db-grid tr.db-detail td { background:var(--bg); white-space:normal; padding:6px 8px; }
+  .db-detail-head { display:flex; align-items:center; margin-bottom:4px; }
+  .db-detail-grid { display:grid; grid-template-columns:max-content max-content 1fr; gap:2px 8px; align-items:start; }
+  .db-detail-k { color:var(--dim); }
+  .db-detail-copy { background:none; border:none; color:var(--accent); cursor:pointer; padding:0 2px; font-size:11px; }
+  .db-detail-v { overflow-wrap:anywhere; white-space:pre-wrap; }
   /* 🛡 session-steward drawer — per-VM ARMING surface for the in-VM steward daemon
      (host route /api/vm/<vm>/steward). Reuses .design-panel for width + mobile
      stacking; degrades to a calm 'not enabled' note on a 404, exactly like the 🔍
@@ -972,6 +1017,14 @@
   .steward-k { color:var(--dim); }
   .steward-v { color:var(--fg); text-align:right; overflow-wrap:anywhere; }
   .steward-armed { color:var(--bad); }
+  /* p508 direct-seat card cleanup: card-scoped tightening — kill the doubled
+     spacing (the .steward-readout 6px flex-gap doubling with each block's own
+     top-margin) and cap the readout content width so values sit beside labels
+     instead of pinned to a far-right gutter. Sibling seat cards are untouched. */
+  .ds-card { gap:0; }
+  .ds-card .steward-stat, .ds-card .steward-thr-row, .ds-card .steward-meter { max-width:360px; }
+  .ds-usage { display:grid; grid-template-columns:1fr 1fr; gap:2px 16px; }
+  .ds-card .ds-usage, .ds-card .ds-usage .steward-stat { max-width:none; }
   /* keeper-11: token-usage grid — label | live | total. Numeric columns right-
      aligned tabular so magnitudes line up; the paid classes keep --fg while the
      cheap bulk drops to --dim (the row order + weighting IS the message). */
@@ -1162,6 +1215,60 @@ const termURL = (vm, mode) => {
   return TERM_BASE + "/?arg=" + encodeURIComponent(vm) +
          (sess ? "&arg=" + encodeURIComponent(sess) : "");
 };
+/* REPOINT (2026-09-16, vm_mgr): the FRONTIER keeper seat (mode === "keeper", the
+   canonical Claude session) shows the abstract-claude serve console instead of a
+   ttyd terminal, via the station's same-origin /ac proxy (server.py ac_proxy →
+   STATION_CONSOLE_AC=http://127.0.0.1:9124). Every OTHER pane (keeper:<agent>
+   local seats, shell) keeps termURL/ttyd untouched. Reversible: delete this
+   helper and restore `src=${termURL(p.vm, p.mode)}` below. */
+/* t-serve (2026-09-16, vm_mgr): the keeper surface on THIS locus is
+   abstract-claude serve (USER unit abstract-claude-serve@station -> :9124),
+   proxied same-origin at /ac/. It is the DEFAULT for the host frontier keeper
+   pane. Two guards the flat `mode === "keeper" ? "/ac/"` rule lacked:
+     * serve must actually ANSWER (/api/term/backends reports keeper_surface,
+       from the backend's own probe of STATION_CONSOLE_AC/api/state). When it
+       does not, the pane falls back to the legacy tmux terminal seat instead of
+       framing a dead proxy — the tmux seats are kept, never removed.
+     * only the HOST seat ("@keeper"/""): a VM's keeper is ITS OWN tmux seat and
+       must keep using termURL, not this host's serve console.
+   window.__keeperSurface is refreshed by the poller below; force either side
+   with ?keeper=serve / ?keeper=tmux on the console URL. */
+window.__keeperSurface = { surface: "serve", ok: true, forced: "" };
+try {
+  var __kq = new URLSearchParams(window.location.search).get("keeper");
+  if (__kq === "serve" || __kq === "tmux") window.__keeperSurface.forced = __kq;
+} catch (e) {}
+(function pollKeeperSurface() {
+  const tick = () => fetch("/api/term/backends?vm=@keeper", { credentials: "same-origin" })
+    .then(r => (r.ok ? r.json() : null))
+    .then(d => {
+      if (!d) return;
+      window.__keeperSurface.surface = d.keeper_surface || "tmux";
+      window.__keeperSurface.ok = !!(d.ac_serve && d.ac_serve.ok);
+      window.__keeperSurface.ac = d.ac_serve || null;
+      window.__keeperSurface.labels = (d.frontier && d.frontier.backend_labels) || null;
+    })
+    .catch(() => {});
+  tick();
+  setInterval(tick, 30000);
+})();
+const isHostSeat = (vm) => !vm || vm === "@keeper" || vm === "keeper";
+const keeperSurface = () => {
+  const k = window.__keeperSurface || {};
+  /* t320 (2026-09-16): a serve blip (wipe/restart) no longer flips the pane to
+     the tmux seat — the backend now reports the CONFIGURED surface and the /ac
+     proxy shows a self-retrying "restarting" page while serve is down. */
+  return k.forced || (k.surface === "serve" ? "serve" : "tmux");
+};
+const paneSrc = (vm, mode) => {
+  if (mode !== "keeper") return termURL(vm, mode);
+  if (isHostSeat(vm)) return keeperSurface() === "serve" ? "/ac/" : termURL(vm, mode);
+  /* 1.0.101: a locus with its OWN abstract-claude serve (ac-loci.json; the
+     hugpy locus -> /ac/@hugpy/) frames that console; learned by FleetView's
+     refreshMeta() from /api/term/backends?vm=<locus> (window.__acPaths). */
+  const own = (window.__acPaths || {})[vm];
+  return own && own.path ? own.path : termURL(vm, mode);
+};
 /* api(path, opts) — every console→backend call goes through here.
    Two properties the UI depends on:
    1. A non-2xx NEVER resolves. console-api reports failure as a 4xx/5xx whose
@@ -1174,6 +1281,20 @@ const termURL = (vm, mode) => {
       latched and every drawer button disabled with no way out but a reload.
    opts.timeout overrides the default; opts.signal lets a caller cancel early. */
 const API_TIMEOUT_MS = 30000;
+/* Live change bus (1.0.77): the backend relays the toolserver's Postgres
+   LISTEN/NOTIFY stream as /api/events; every DB change on a locus arrives here
+   as a window "db-change" event {table, op, locus, id, ts}. Drawers reload on a
+   matching event instead of polling (their timers become a slow fallback).
+   EventSource reconnects on its own. */
+const fvLocusOf = (vm) => (!vm || vm === "keeper" || vm === "@keeper" || vm === "host") ? "" : vm;
+const onDbChange = (fn) => { window.addEventListener("db-change", fn); return () => window.removeEventListener("db-change", fn); };
+try {
+  const es = new EventSource("/api/events");
+  es.addEventListener("change", (e) => {
+    try { window.dispatchEvent(new CustomEvent("db-change", { detail: JSON.parse(e.data) })); } catch (_) {}
+  });
+  window.__fvEvents = es;
+} catch (_) {}
 /* Double-submit CSRF: the server sets a readable sc_csrf cookie at login (or
    token-exchange / open-mode auto-session) and require_provision() demands it
    back in X-Console-CSRF on privileged mutations (create/delete/clone). Read it
@@ -1224,12 +1345,16 @@ const api = (path, opts) => {
     .finally(() => clearTimeout(timer));
 };
 const copyText = (t) => {                       // gesture-synchronous clipboard write
+  let api = false;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    try { navigator.clipboard.writeText(t); api = true; } catch (_) {}
+  }
   const ta = document.createElement("textarea");
   ta.value = t; ta.setAttribute("readonly", "");
   ta.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;";
   document.body.appendChild(ta); ta.focus(); ta.select();
   let ok = false; try { ok = document.execCommand("copy"); } catch (_) {}
-  ta.remove(); return ok;
+  ta.remove(); return ok || api;
 };
 
 /* Design drawer — the wireframe editor (shared wireframe.js module) beside the
@@ -1249,6 +1374,7 @@ function useCanvasSync(edRef, vmRef, kind, getLocal, loadRemote, label) {
   const last = React.useRef("");        // last text known to match the locus file
   const editedAt = React.useRef(0);
   const pushTimer = React.useRef(null);
+  const locusRef = React.useRef("");    // the toolserver locus behind vmRef (1.0.80: central canvas)
   const onLocalChange = () => {
     editedAt.current = Date.now();
     if (pushTimer.current) clearTimeout(pushTimer.current);
@@ -1257,33 +1383,45 @@ function useCanvasSync(edRef, vmRef, kind, getLocal, loadRemote, label) {
       const st = getLocal(ed); const txt = JSON.stringify(st);
       if (txt === last.current) return;
       api("/api/vm/" + v + "/" + kind, { method: "POST", body: JSON.stringify({ state: st }) })
-        .then(d => { if (d.ok) { last.current = txt; ed.status("↔ synced to " + v + " " + new Date().toLocaleTimeString()); }
+        .then(d => { if (d.ok) { last.current = txt; if (d.locus) locusRef.current = d.locus;
+                                 ed.status("↔ synced to " + (d.locus || v) + (d.rev ? " (rev " + d.rev + ")" : "") + " " + new Date().toLocaleTimeString()); }
                      else ed.status(d.error || "sync push failed", true); })
         .catch(e => { if (e.status !== 404 && e.status !== 409) ed.status("sync push failed: " + e.message, true); });
     }, 1200);
   };
+  /* pull(): load the locus copy when it changed and the operator is not
+     mid-edit. Runs every 3 s (fallback) AND instantly on a "canvas" change
+     event from the DB bus (1.0.80) — a seat's canvas_put lands within ~1 s. */
+  const pull = () => {
+    const ed = edRef.current, v = vmRef.current; if (!ed || !v) return;
+    if (document.visibilityState === "hidden") return;
+    if (Date.now() - editedAt.current < 2500) return;      // operator mid-edit: never yank the canvas
+    api("/api/vm/" + v + "/" + kind, { timeout: 8000 })
+      .then(d => {
+        if (d.locus && vmRef.current === v) locusRef.current = d.locus;
+        if (!d.ok || !d.state || vmRef.current !== v) return;
+        const txt = JSON.stringify(d.state);
+        if (txt === last.current) return;
+        if (Date.now() - editedAt.current < 2500) return;
+        const localTxt = JSON.stringify(getLocal(ed));
+        if (txt === localTxt) { last.current = txt; return; }
+        last.current = txt;
+        if (loadRemote(ed, d.state) !== false) ed.status("↔ " + label + " updated from " + (d.locus || v) + (d.rev ? " (rev " + d.rev + ")" : "") + " " + new Date().toLocaleTimeString());
+      })
+      .catch(() => {});
+  };
   useEffect(() => {
-    const t = setInterval(() => {
-      const ed = edRef.current, v = vmRef.current; if (!ed || !v) return;
-      if (document.visibilityState === "hidden") return;
-      if (Date.now() - editedAt.current < 2500) return;      // operator mid-edit: never yank the canvas
-      api("/api/vm/" + v + "/" + kind, { timeout: 8000 })
-        .then(d => {
-          if (!d.ok || !d.state || vmRef.current !== v) return;
-          const txt = JSON.stringify(d.state);
-          if (txt === last.current) return;
-          if (Date.now() - editedAt.current < 2500) return;
-          const localTxt = JSON.stringify(getLocal(ed));
-          if (txt === localTxt) { last.current = txt; return; }
-          last.current = txt;
-          if (loadRemote(ed, d.state) !== false) ed.status("↔ " + label + " updated from " + v + " " + new Date().toLocaleTimeString());
-        })
-        .catch(() => {});
-    }, 3000);
-    return () => clearInterval(t);
+    const t = setInterval(pull, 3000);
+    const offDb = onDbChange((e) => {
+      const d = e.detail || {};
+      if (d.table !== "canvas" || (d.id && d.id !== kind)) return;
+      const v = vmRef.current;
+      if (d.locus === locusRef.current || d.locus === v || d.locus === fvLocusOf(v)) pull();
+    });
+    return () => { clearInterval(t); offDb(); };
   }, []);
   const markSynced = (st) => { last.current = JSON.stringify(st); };
-  return { onLocalChange, markSynced };
+  return { onLocalChange, markSynced, pull };
 }
 
 function DesignDrawer({ vm }) {
@@ -1298,12 +1436,12 @@ function DesignDrawer({ vm }) {
     edRef.current = WF.mountEditor(hostRef.current, {
       onChange: (st) => { try { localStorage.setItem("wf_" + vmRef.current, JSON.stringify(st)); } catch (_) {} sync.onLocalChange(); },
       actions: [
-        { label: "→ VM", title: "write this design to ~/wireframe.json inside the VM — then tell the keeper to read it",
+        { label: "→ VM", title: "hand this design to the locus (central canvas, canvas/put) and nudge its keeper to read it",
           fn: (ed) => {
             const v = vmRef.current;
             const push = () => {
-              api("/api/vm/" + v + "/design", { method: "POST", body: JSON.stringify({ state: ed.serialize() }) })
-                .then(d => ed.status(d.ok ? "wrote ~/wireframe.json in " + v + " — tell the keeper to read it"
+              api("/api/vm/" + v + "/design", { method: "POST", body: JSON.stringify({ state: ed.serialize(), notify: true, note: "operator hand-off from the ◳ canvas" }) })
+                .then(d => ed.status(d.ok ? "design handed to " + (d.locus || v) + (d.rev ? " (rev " + d.rev + ")" : "") + (d.notified ? " — keeper nudged (" + d.notified + ")" : d.central ? " — unchanged" : " — tell the keeper to read it")
                                           : (d.error || "push failed"), !d.ok))
                 .catch(e => ed.status("push failed: " + e, true));
             };
@@ -1322,13 +1460,13 @@ function DesignDrawer({ vm }) {
               })
               .catch(e => ed.status("can't read " + v + "'s current wireframe (" + e + ") — refusing to push an empty canvas blind", true));
           } },
-        { label: "← VM", title: "load ~/wireframe.json from the VM — e.g. after the keeper writes or revises it",
+        { label: "← VM", title: "load the locus's design (canvas/get) — e.g. after the keeper writes or revises it",
           fn: (ed) => {
             const v = vmRef.current;
             api("/api/vm/" + v + "/design")
               .then(d => {
-                if (d.ok && d.state) { ed.load(d.state); sync.markSynced(d.state); ed.status("loaded ~/wireframe.json from " + v); }
-                else ed.status(d.error || "no ~/wireframe.json in " + v, true);
+                if (d.ok && d.state) { ed.load(d.state); sync.markSynced(d.state); ed.status("loaded design from " + (d.locus || v) + (d.rev ? " (rev " + d.rev + ")" : "")); }
+                else ed.status(d.error || "no design for " + v + " yet", true);
               })
               .catch(e => ed.status("pull failed: " + e, true));
           } },
@@ -1364,7 +1502,7 @@ function DesignDrawer({ vm }) {
        the loaded sketch autosaves so later opens come from localStorage. */
     api("/api/vm/" + vm + "/design")
       .then(d => { if (d.ok && d.state && vmRef.current === vm) {
-                     ed.load(d.state); sync.markSynced(d.state); ed.status("loaded ~/wireframe.json from " + vm); } })
+                     ed.load(d.state); sync.markSynced(d.state); ed.status("loaded design from " + (d.locus || vm)); } })
       .catch(() => {});                          // no sketch / stopped VM: stay blank, no noise
   }, [vm]);
   return html`<div className="design-panel" ref=${hostRef}></div>`;
@@ -1404,13 +1542,13 @@ function FlowDrawer({ vm }) {
     edRef.current = FLOW.mountEditor(hostRef.current, {
       onChange: (st) => { try { localStorage.setItem("flow_" + vmRef.current, JSON.stringify(st)); } catch (_) {} sync.onLocalChange(); },
       actions: [
-        { label: "→ VM", title: "write this flow to ~/flow.json inside the VM (bumps rev) — then tell the keeper to read it",
+        { label: "→ VM", title: "hand this flow to the locus (central canvas, canvas/put — bumps rev) and nudge its keeper to read it",
           fn: (ed) => {
             const v = vmRef.current;
             const push = () => {
               const state = ed.serializeForSave();   // rev bumps HERE — never on a cancelled/refused push
-              api("/api/vm/" + v + "/flow", { method: "POST", body: JSON.stringify({ state }) })
-                .then(d => ed.status(d.ok ? "wrote ~/flow.json in " + v + " (rev " + state.rev + ") — tell the keeper to read it"
+              api("/api/vm/" + v + "/flow", { method: "POST", body: JSON.stringify({ state, notify: true, note: "operator hand-off from the ◳ canvas" }) })
+                .then(d => ed.status(d.ok ? "flow handed to " + (d.locus || v) + " (rev " + (d.rev || state.rev) + ")" + (d.notified ? " — keeper nudged (" + d.notified + ")" : d.central ? " — unchanged" : " — tell the keeper to read it")
                                           : (d.error || "push failed"), !d.ok))
                 .catch(e => {
                   if (e.status === 404) { notEnabledRef.current(true); ed.status("flow route not enabled on the host — use ⧉ to exchange for now", true); }
@@ -1437,13 +1575,13 @@ function FlowDrawer({ vm }) {
                 else ed.status("can't read " + v + "'s current flow (" + e + ") — refusing to push an empty canvas blind", true);
               });
           } },
-        { label: "← VM", title: "load ~/flow.json from the VM — e.g. after the keeper derives or revises it",
+        { label: "← VM", title: "load the locus's flow (canvas/get) — e.g. after the keeper derives or revises it",
           fn: (ed) => {
             const v = vmRef.current;
             api("/api/vm/" + v + "/flow")
               .then(d => {
-                if (d.ok && d.state) { if (ed.load(d.state)) ed.status("loaded ~/flow.json from " + v + " (rev " + (d.state.rev || "?") + ")"); }
-                else ed.status(d.error || "no ~/flow.json in " + v, true);
+                if (d.ok && d.state) { if (ed.load(d.state)) { sync.markSynced(d.state); ed.status("loaded flow from " + (d.locus || v) + " (rev " + (d.state.rev || d.rev || "?") + ")"); } }
+                else ed.status(d.error || "no flow for " + v + " yet", true);
               })
               .catch(e => {
                 if (e.status === 404) { notEnabledRef.current(true); ed.status("flow route not enabled on the host — use 📋 to paste a block the keeper printed", true); }
@@ -1486,7 +1624,7 @@ function FlowDrawer({ vm }) {
        any other failure (no flow / stopped VM) stays blank, no noise. */
     api("/api/vm/" + vm + "/flow")
       .then(d => { if (d.ok && d.state && vmRef.current === vm) {
-                     if (ed.load(d.state)) { sync.markSynced(d.state); ed.status("loaded ~/flow.json from " + vm); } } })
+                     if (ed.load(d.state)) { sync.markSynced(d.state); ed.status("loaded flow from " + (d.locus || vm) + (d.rev ? " (rev " + d.rev + ")" : "")); } } })
       .catch(e => { if (vmRef.current === vm && e.status === 404) setNotEnabled(true); });
   }, [vm]);
   return html`<div className="design-panel flow-panel">
@@ -1522,7 +1660,20 @@ function FlowDrawer({ vm }) {
    loaded board. A plain word like "to"/"or"/"know" has neither a digit nor a
    hyphen after its prefix letter, so it never becomes a candidate in the first
    place — the board-membership check is defense in depth, not the only gate. */
-const REF_ID_TOKEN_RE = /\b(?:t|o|p|bm|k|q)(?:[a-z0-9]*\d[a-z0-9]*|-[a-z0-9]+(?:-[a-z0-9]+)*)\b/g;
+/* Board ids carry the type's first letter since 2026-09-16 (t todo, r request, b bookmark,
+   o operator, p proposal, d direction, m message) — the alternation lists every letter,
+   with the two-letter bm ahead of b so it wins. An old-style token (t372 written before
+   the item became proposal p372) still resolves: extractRefs falls back to the digits. */
+const REF_ID_TOKEN_RE = /\b(?:bm|t|r|b|o|p|d|m|k|q)(?:[a-z0-9]*\d[a-z0-9]*|-[a-z0-9]+(?:-[a-z0-9]+)*)\b/g;
+const BOARD_ID_NUM_RE = /^[a-z]+(\d+)$/;
+/* number → id index over the loaded board (cached per allIds Set) so "t372" in a note
+   finds "p372" on the board. */
+const _numIndexCache = new WeakMap();
+const boardNumIndex = (allIds) => {
+  let m = _numIndexCache.get(allIds);
+  if (!m) { m = new Map(); for (const id of allIds) { const k = BOARD_ID_NUM_RE.exec(id); if (k) m.set(k[1], id); } _numIndexCache.set(allIds, m); }
+  return m;
+};
 /* Commit shape: bare 7–40 char hex, word-bounded (an underscore/hyphen in a
    surrounding identifier breaks the boundary, so this can't match a fragment of
    some_other_token123). looksLikeSha then requires at least one digit AND one
@@ -1547,10 +1698,17 @@ const extractRefs = (it, allIds) => {
   const ids = [], seenIds = new Set();
   REF_ID_TOKEN_RE.lastIndex = 0;
   let m;
+  const byNum = boardNumIndex(allIds);
   while ((m = REF_ID_TOKEN_RE.exec(src))) {
-    const tok = m[0];
+    let tok = m[0];
+    if (!allIds.has(tok)) {            // old-letter token (t372 → p372): resolve by number
+      const k = BOARD_ID_NUM_RE.exec(tok);
+      const alt = k && byNum.get(k[1]);
+      if (!alt) continue;
+      tok = alt;
+    }
     if (tok === (it && it.id)) continue;
-    if (!allIds.has(tok) || seenIds.has(tok)) continue;
+    if (seenIds.has(tok)) continue;
     seenIds.add(tok); ids.push(tok);
   }
   const shas = [], seenShas = new Set();
@@ -1585,7 +1743,7 @@ const refsChips = (it, allIds, open, onJump, onCopySha, onToggleOpen) => {
       title=${"show " + hidden + " more"} onClick=${e => { e.stopPropagation(); onToggleOpen(it.id); }}>+${hidden}</button>`);
   return chips;
 };
-const TODO_ICON = { todo: "☑", request: "✋", bookmark: "🔖", operator: "⚑", proposal: "⚖", message: "✉" };
+const TODO_ICON = { todo: "☑", request: "✋", bookmark: "🔖", operator: "⚑", proposal: "⚖", message: "✉", direction: "🧭" };
 const TODO_NEXT = { open: "doing", doing: "done", done: "open" };
 /* ⚑ operator (only the operator can action it — a host-side root step the keeper
    cannot do) and ⚖ proposal (a decision request, with pros/cons/rec) are
@@ -1963,9 +2121,12 @@ const standingBuckets = (items = [], vm) => {
   const work = items.filter(i => !isMsgItem(i, vm));   // t100: messages are not standing work
   return {
     open: work.filter(i => i.type !== "bookmark" && i.type !== "operator"
-                        && i.type !== "proposal" && i.status !== "done"),
+                        && i.type !== "proposal" && i.type !== "direction" && i.status !== "done"),
     operator: work.filter(i => i.type === "operator" && i.status !== "done"),
     propPending: work.filter(i => i.type === "proposal" && i.status !== "done"),
+    // KNOWLEDGE lane, not standing work: session-uncovered clarifications. Gets its own
+    // tab/badge but is deliberately ABSENT from standingTicker's ☑ count (see below).
+    directions: work.filter(i => i.type === "direction" && i.status !== "done"),
   };
 };
 /* {count, warn} for the ☑ button, built on the SAME standingBuckets the drawer's
@@ -2055,7 +2216,7 @@ function TodoDrawer({ vm, onCount }) {
   const [revOpen, setRevOpen] = useState({});      // 📎 revision path -> view block expanded; view state only
   const [revData, setRevData] = useState({});      // 📎 revision path -> {loading}|{text}|{error} (op:read result)
   const [text, setText] = useState("");
-  const [type, setType] = useState("request");
+  const [type, setType] = useState("todo");       // board t6 (operator 2026-09-10): todo is the default, not request
   const [prio, setPrio] = useState("low");        // t-priority: the add form's priority pick; low = the absent default
   const [tab, setTab] = useState("queue");        // active section tab; only user clicks move it after mount
   /* ⏱ history (board t32): the journal is PULLED ON DEMAND, not polled. null = never
@@ -2186,13 +2347,19 @@ function TodoDrawer({ vm, onCount }) {
     loadActivity();
     // live view of keeper edits — but not while the answer is settled (terminal
     // error) or nobody is looking (backgrounded tab hammering an lxc backend).
+    const central = !!fvLocusOf(vm);      // a DB-backed board is pushed; the host file board still polls
     const id = setInterval(() => {
       if (stopped.current || document.visibilityState === "hidden") return;
       load();
-    }, 10000);
+    }, central ? 60000 : 10000);
     const onVis = () => { if (document.visibilityState === "visible" && !stopped.current) load(); };
     document.addEventListener("visibilitychange", onVis);
-    return () => { clearInterval(id); document.removeEventListener("visibilitychange", onVis); };
+    const offDb = onDbChange((e) => {
+      const d = e.detail || {};
+      if (stopped.current || !central) return;
+      if (["todos", "board", "prompts"].includes(d.table) && d.locus === fvLocusOf(vm)) load();
+    });
+    return () => { clearInterval(id); document.removeEventListener("visibilitychange", onVis); offDb(); };
   }, [load]);
   // First open of the ⏱ history tab pulls the journal once; thereafter it is cached
   // (history !== null) and only a manual ↻ (refresh) re-pulls it. The VM-change reset
@@ -2744,7 +2911,7 @@ function TodoDrawer({ vm, onCount }) {
      standingBuckets.propPending counts only the undecided ones. `open` drops ⚑/⚖ outright:
      a ⚑ is either not-done (its own section) or done (falls through to `done`), and a ⚖
      is always a card in its section, never a row. */
-  const { open, operator, propPending: propPendingItems } = standingBuckets(items, vm);
+  const { open, operator, propPending: propPendingItems, directions } = standingBuckets(items, vm);
   const propPending = propPendingItems.length;
   /* board t-refchips: allIds is the "does this token resolve" gate extractRefs uses —
      every id currently on the loaded board, case-sensitive. idTabMap is which DRAWER
@@ -2756,12 +2923,13 @@ function TodoDrawer({ vm, onCount }) {
     const m = new Map();
     for (const it of open) m.set(it.id, "queue");
     for (const it of proposals) m.set(it.id, "proposals");
+    for (const it of directions) m.set(it.id, "directions");   // 🧭 ref-chip jumps land on the directions tab
     for (const it of operator) m.set(it.id, "operator");
     for (const it of bookmarks) m.set(it.id, "bookmarks");
     for (const it of done) m.set(it.id, "done");
     for (const it of msgItems) m.set(it.id, "messages");   // t100: ref-chip jumps land on the ✉ tab
     return m;
-  }, [open, proposals, operator, bookmarks, done, msgItems]);
+  }, [open, proposals, directions, operator, bookmarks, done, msgItems]);
   const toggleRefsOpen = (id) => setRefsOpen(m => ({ ...m, [id]: !m[id] }));
   /* jumpToId: switch to the tab the target lives in, then let the scroll+flash effect
      (below, once the tab's content has actually mounted) do the rest. A target that
@@ -3115,6 +3283,13 @@ function TodoDrawer({ vm, onCount }) {
       empty: "queue clear — nothing waiting" },
     { key: "proposals", label: "⚖ proposals",  list: proposals, badge: propPending, warn: propPending > 0,
       empty: "no proposals from the keeper" },
+    /* 🧭 directions — a KNOWLEDGE lane (board direction type): session-uncovered
+       clarifications/determinations. A tab like every board type, badge = the directions
+       bucket length, list drives the alive/quiet look. Deliberately OUT of standingBuckets'
+       ☑ work count (standingTicker sums open+operator+propPending only): knowledge, not work.
+       Renders through the shared `row` (below) — text prominent, note as the secondary line. */
+    { key: "directions", label: "🧭 directions", list: directions, badge: directions.length,
+      empty: "no directions yet — session clarifications land here" },
     { key: "operator",  label: "⚑ operator",   list: prioSort(operator), badge: operator.length,
       empty: "nothing waiting on the operator" },
     { key: "bookmarks", label: "🔖 bookmarks",  list: bookmarks, badge: bookmarks.length,
@@ -3346,8 +3521,8 @@ function TodoDrawer({ vm, onCount }) {
              can't carry them, so they're keeper-authored — the drawer only renders
              them, it never creates them. -->
         <select value=${type} onChange=${e => setType(e.target.value)} title="request = ask the keeper · todo = plain task · bookmark = pin a build/checkpoint · operator = a task only the operator can do (⚖ proposals are keeper-authored)">
-          <option value="request">✋ request</option>
           <option value="todo">☑ todo</option>
+          <option value="request">✋ request</option>
           <option value="bookmark">🔖 bookmark</option>
           <option value="operator">⚑ operator</option>
         </select>
@@ -3903,7 +4078,7 @@ const SEARCH_ROOT_KEY = (vm) => "finder_root_" + vm;   // per-VM autosave, like 
 // Default root for a VM with no stored root: the VM's own home, not the share —
 // searches should start in the box you're looking at (operator ask, 2026-07-17).
 // A per-VM localStorage root or recents entry always overrides this.
-const SEARCH_DEFAULT_ROOT = "/home/op";
+const SEARCH_DEFAULT_ROOT = "/srv/vm_mgr";
 /* Root DIRECTORY PICKER (board t29). The single root input gains a per-VM recents
    list (▾) and a 📁 browse drill-down that walks op:"dirs" (depth-1 listings).
    SEARCH_ROOTS_KEY holds the last SEARCH_ROOTS_CAP distinct roots used for a VM
@@ -4009,12 +4184,19 @@ const searchMark = (content, q) => {
   if (parts.length === 1) return s;
   return parts.map((p, i) => i % 2 ? html`<mark key=${i}>${p}</mark>` : p);
 };
-function SearchDrawer() {
-  const vm = "host";  // finder is host-native (/api/mct/finder); "host" only namespaces per-host recents
+function SearchDrawer({ vm, home }) {
+  vm = vm || "host";  // follow the selected locus; no-pick/host keeps per-host recents
   const [mode, setMode] = useState("grep");        // grep | files | imports
   const [rcMode, setRcMode] = useState(rcCurrent()); // right-column width toggle
   const [text, setText] = useState("");            // needle / ext / import name (meaning is per-mode)
-  const [root, setRoot] = useState(SEARCH_DEFAULT_ROOT);
+  const [root, setRoot] = useState(home || SEARCH_DEFAULT_ROOT);
+  /* Locus grounding: every finder POST carries the wire locus (same value the
+     seats send — "@keeper" = this station's own host), so the station runs the
+     listing IN the active locus, never on the operator's client. lhome is the
+     seat user's $HOME there as the station resolved it (op:"home") — the fence
+     every root must sit under. */
+  const wireVm = vm === "host" ? "@keeper" : vm;
+  const [lhome, setLhome] = useState("");
   const [allMatch, setAllMatch] = useState(true);  // grep: ALL strings must match (finder's default; --any flips it)
   const [raw, setRaw] = useState(false);           // grep/files: skip finder's default excludes (no_add)
   const [nonRec, setNonRec] = useState(false);     // grep/files: don't recurse (no_recursive)
@@ -4066,9 +4248,9 @@ function SearchDrawer() {
        then the fleet convention (/srv/share/projects/<vm> — where station work
        actually lives), then the bare home fallback; and every mode/toggle is
        restored per VM instead of resetting on each open. */
-    let saved = SEARCH_DEFAULT_ROOT;
+    let saved = home || SEARCH_DEFAULT_ROOT;
     try { saved = localStorage.getItem(SEARCH_ROOT_KEY(vm)) || saved; } catch (_) {}
-    setRoot(saved || SEARCH_DEFAULT_ROOT);
+    setRoot(saved || home || SEARCH_DEFAULT_ROOT);
     try {
       const cfg = JSON.parse(localStorage.getItem("search_cfg:" + vm) || "null");
       if (cfg) {
@@ -4081,7 +4263,17 @@ function SearchDrawer() {
     } catch (_) {}
     setRoots(loadRoots(vm));
     setRecentsOpen(false); setBrowseOpen(false); setBrowseHidden(false); setDirCache({});
-  }, [vm]);
+    /* Ask the station where this locus's seats live; a remembered root outside
+       that home is replaced by it (the backend refuses roots outside anyway). */
+    let live = true;
+    setLhome("");
+    api("/api/mct/finder", { method: "POST", body: JSON.stringify({ op: "home", vm: wireVm }) })
+      .then(d => { if (!live || !d || !d.ok || !d.home) return;
+                   setLhome(d.home);
+                   setRoot(r => (r === d.home || String(r || "").startsWith(d.home + "/")) ? r : d.home); })
+      .catch(() => {});
+    return () => { live = false; };
+  }, [vm, home]);
 
   /* view-push: while the View tab is open, poll the VM's pushed-view queue so an
      agent or the local-keeper can drop a {path,lines,label} (POST /view-push, or
@@ -4100,7 +4292,7 @@ function SearchDrawer() {
     const body = { op: "view", roots: [p.path] };
     if (p.lines) body.lines = [p.lines];
     setErr(null); setRes(null); say("");
-    guard(signal => api("/api/mct/finder", { method: "POST", signal, body: JSON.stringify(body) })
+    guard(signal => api("/api/mct/finder", { method: "POST", signal, timeout: 70000, body: JSON.stringify({ ...body, vm: wireVm }) })
       .then(d => { if (!d.ok) { setErr({ msg: searchErr(d.error, vm), status: 0 }); return; }
                    setRes({ op: "view", forName: null, data: d.result || {} }); })
       .catch(e => { if (e.aborted) return; setErr({ msg: searchErr(e.message || String(e), vm), status: e.status }); }));
@@ -4196,7 +4388,7 @@ function SearchDrawer() {
       if (f) body.for = f;                         // blank = the full import map (chips)
     }
     setErr(null); setRes(null); say("");
-    guard(signal => api("/api/mct/finder", { method: "POST", signal, body: JSON.stringify(body) })
+    guard(signal => api("/api/mct/finder", { method: "POST", signal, timeout: 70000, body: JSON.stringify({ ...body, vm: wireVm }) })
       .then(d => {
         if (!d.ok) { setErr({ msg: searchErr(d.error, vm), status: 0 }); return; }
         setRes({ op: body.op, forName: body.for || null, data: d.result || {} });
@@ -4227,13 +4419,17 @@ function SearchDrawer() {
     const key = dirKey(path, hidden);
     if (dirCache[key]) return;                        // already loading / loaded / errored — leave it
     setDirCache(c => ({ ...c, [key]: { loading: true } }));
-    const body = { op: "dirs", roots: [path] };
+    const body = { op: "dirs", roots: [path], vm: wireVm };
     if (hidden) body.no_add = true;
     api("/api/mct/finder", { method: "POST", body: JSON.stringify(body) })
       .then(d => {
         if (!d.ok) { setDirCache(c => ({ ...c, [key]: { error: searchErr(d.error, vm) } })); return; }
         const dirs = Array.isArray(d.result && d.result.dirs) ? d.result.dirs : [];
-        setDirCache(c => ({ ...c, [key]: { dirs } }));
+        // p513: the backend now also returns files for this dir (separate agent
+        // extends op:"dirs"); absent on an older host → files stays undefined and
+        // renderBrowse shows dirs only, exactly as before.
+        const files = Array.isArray(d.result && d.result.files) ? d.result.files : undefined;
+        setDirCache(c => ({ ...c, [key]: { dirs, files } }));
       })
       .catch(e => {
         const msg = e.status === 404 ? "search route not yet enabled on the host" : searchErr(e.message || String(e), vm);
@@ -4245,7 +4441,7 @@ function SearchDrawer() {
 
   const openBrowse = () => {                         // start at the root input if it looks absolute, else "/"
     const r = root.trim();
-    setBrowsePath(looksAbs(r) ? r : "/");
+    setBrowsePath(looksAbs(r) ? r : (lhome || "/"));   // the picker starts inside the locus home
     setBrowseHidden(false); setRecentsOpen(false); setBrowseOpen(true);
   };
   const toggleBrowse = () => { if (browseOpen) setBrowseOpen(false); else openBrowse(); };
@@ -4374,7 +4570,8 @@ function SearchDrawer() {
      (loading/error in drawer style), and a "search here" action. */
   const renderBrowse = () => {
     const entry = dirCache[dirKey(browsePath, browseHidden)] || { loading: true };
-    const crumbs = pathCrumbs(browsePath);
+    // crumbs above the locus home aren't browsable (the backend fences roots there)
+    const crumbs = pathCrumbs(browsePath).filter(c => !lhome || c.path === lhome || c.path.startsWith(lhome + "/"));
     return html`
       <div className="search-browse">
         <div className="search-browse-head">
@@ -4395,6 +4592,11 @@ function SearchDrawer() {
           ${entry.dirs && entry.dirs.map((dpath, k) => html`
             <button key=${k} className="search-browse-row" type="button" title=${dpath}
                     onClick=${() => setBrowsePath(dpath)}>📁 ${baseName(dpath)}</button>`)}
+          ${/* p513: files in this dir (backend op:"dirs" now returns them too) — a
+                click opens the file through the existing op:"view" path (openPush). */""}
+          ${entry.files && entry.files.map((fpath, k) => html`
+            <button key=${"f" + k} className="search-browse-row" type="button" title=${fpath}
+                    onClick=${() => openPush({ path: fpath })}>📄 ${baseName(fpath)}</button>`)}
         </div>
         <div className="search-browse-foot">
           <span className="search-browse-path" title=${browsePath}>${browsePath}</span>
@@ -4423,7 +4625,7 @@ function SearchDrawer() {
                onInput=${(e) => setText(e.target.value)} onKeyDown=${onKey} />
         <div className="search-root-wrap">
           <div className="search-root-row">
-            <input className="search-root" placeholder="/abs/root — remembered per VM" value=${root}
+            <input className="search-root" placeholder=${(lhome ? "root under " + lhome : "/abs/root") + " — remembered per locus"} value=${root}
                    title="root path to search (remembered per VM)"
                    onInput=${(e) => onRoot(e.target.value)} onKeyDown=${onKey} />
             <button className=${"search-root-recent" + (recentsOpen ? " on" : "")} type="button"
@@ -4844,7 +5046,8 @@ function FeedDrawer({ vm }) {
 fetch("/api/about").then(r => r.ok ? r.json() : null).then(a => {
   if (a && a.version && a.version !== "unknown") document.title = `hugpy Station ${a.version}`;
 }).catch(() => { /* backend restarting — title stays plain */ });
-const MD_DOCS = { using: "UI-GUIDE.md", terms: "NOMENCLATURE.md", fleet: "FLEET-OPS-GUIDE.md",
+const MD_DOCS = { using: "UI-GUIDE.md", tools: "STATION-TOOLS.md",  // 1.0.85: toolserver tools guide
+                  terms: "NOMENCLATURE.md", fleet: "FLEET-OPS-GUIDE.md",
                   keeper: "KEEPER-DEV-GUIDE.md", sop: "TODO-BOARD-SOP.md",
                   arb: "QUERY-ARBITRATION-SOP.md",
                   seat: "SEAT-CONTROL.md",
@@ -5018,6 +5221,8 @@ function DocsDrawer() {
       <div className="docs-tabs">
         <button className=${"docs-tab" + (tab === "using" ? " active" : "")}
                 onClick=${() => setTab("using")}>using the console</button>
+        <button className=${"docs-tab" + (tab === "tools" ? " active" : "")}
+                onClick=${() => setTab("tools")}>station tools</button>
         <button className=${"docs-tab" + (tab === "terms" ? " active" : "")}
                 onClick=${() => setTab("terms")}>nomenclature</button>
         <button className=${"docs-tab" + (tab === "fleet" ? " active" : "")}
@@ -5044,6 +5249,232 @@ function DocsDrawer() {
           <button className="btn" style=${{ marginTop: 8 }} onClick=${() => load(tab)}>↻ retry</button>
         </div>`}
         ${cur.text != null && html`<${DocsBody} src=${cur.text} />`}
+      </div>
+    </div>`;
+}
+
+/* ─── 🗄 db drawer (1.0.85) ───────────────────────────────────────────────────
+   A read-only window onto the central toolserver database (Postgres behind
+   toolserver.hugpy.ai) through the station's gated /ts/db proxy: db/tables,
+   db/columns and db/query — the toolserver itself refuses anything but
+   SELECT/WITH, and the drawer guards the same rule client-side so a typo never
+   even leaves the window. Like 📖 docs it is NOT per-locus (the db is one shared
+   thing), so its dock button and render slot carry no active-VM gate. Every
+   cell is a React element built from the row value — no innerHTML — so db text
+   is escaped exactly like doc text is. Table names are interpolated ONLY after
+   matching DB_IDENT_RE, and always double-quoted. */
+const DB_IDENT_RE = /^[a-z_][a-z0-9_]*$/;
+const DB_LAST_QUERY_KEY = "hs.db.lastQuery";
+const DB_MAX_ROWS = 500;                          // grid cap — the proxy answer may be larger
+const DB_CELL_MAX = 200;                          // chars shown per cell; the full text rides on title=
+const dbPost = (name, body) =>
+  fetch("/ts/db/" + name, { method: "POST", headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify(body || {}) })
+    .then(async r => {
+      let d = null;
+      try { d = await r.json(); } catch (_) { /* non-JSON body (proxy down, html error page) */ }
+      // the toolserver AND the proxy both speak {"error": "..."} — surface it verbatim,
+      // whatever the status (an old backend answers 403 {"error":"path not allowed via /ts"})
+      if (d && d.error) throw new Error(String(d.error));
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return d;
+    });
+const dbRows = (d) => (d && Array.isArray(d.result)) ? d.result : [];
+const dbErr = (e) => (e && e.message) || String(e);
+// a cell: null → dimmed ∅; objects (jsonb columns) → JSON; everything else String(), clipped
+const dbCell = (v) => {
+  if (v === null || v === undefined) return html`<span className="db-null">∅</span>`;
+  const s = typeof v === "object" ? JSON.stringify(v) : String(v);
+  return s.length > DB_CELL_MAX ? html`<span title=${s}>${s.slice(0, DB_CELL_MAX)}…</span>` : s;
+};
+const DB_GRID_KEY = "hs.db.grid";                 // p512: per-table {widths,order,sort} view state
+const dbFull = (v) => v === null || v === undefined ? "" : typeof v === "object" ? JSON.stringify(v) : String(v);
+/* p512: the result grid is interactive — click a header to sort (asc→desc→none),
+   click a row to expand a full-value detail panel with per-column ⧉ copy, drag
+   the header right edge to resize, drag a header to reorder. {widths,order,sort}
+   persist in localStorage keyed by table + column-set (so a new query starts
+   clean, but re-opening the same table restores the operator's layout). */
+function DbGrid({ rows, name }) {
+  if (!rows.length) return html`<div className="docs-note">no rows</div>`;
+  const cols = Object.keys(rows[0]);               // canonical column set = the first row's keys
+  const pkey = DB_GRID_KEY + ":" + (name || "?") + ":" + cols.join("|");
+  const loadState = () => { try { return JSON.parse(localStorage.getItem(pkey) || "{}") || {}; } catch (_) { return {}; } };
+  const okOrder = (o) => Array.isArray(o) && o.length === cols.length && cols.every(c => o.indexOf(c) >= 0);
+  const s0 = loadState();
+  const [sort, setSort] = useState(() => s0.sort || { col: null, dir: 0 });   // dir: 1 asc, -1 desc, 0 none
+  const [widths, setWidths] = useState(() => s0.widths || {});
+  const [order, setOrder] = useState(() => okOrder(s0.order) ? s0.order : cols.slice());
+  const [sel, setSel] = useState(null);            // expanded row index (within the sorted view) or null
+  const [dragCol, setDragCol] = useState(null);
+  const resizing = React.useRef(false);
+  // resync to the persisted layout whenever the table / column-set changes (pkey)
+  useEffect(() => {
+    const s = loadState();
+    setSort(s.sort || { col: null, dir: 0 });
+    setWidths(s.widths || {});
+    setOrder(okOrder(s.order) ? s.order : cols.slice());
+    setSel(null);
+  }, [pkey]);
+  useEffect(() => { try { localStorage.setItem(pkey, JSON.stringify({ widths, order, sort })); } catch (_) {} }, [pkey, widths, order, sort]);
+
+  const shown = rows.slice(0, DB_MAX_ROWS);
+  const sorted = useMemo(() => {
+    if (!sort.col || !sort.dir) return shown;
+    const c = sort.col, dir = sort.dir;
+    const arr = shown.map((r, i) => [r, i]);       // decorate with index → stable sort
+    arr.sort((A, B) => {
+      const a = A[0][c], b = B[0][c];
+      const an = a === null || a === undefined, bn = b === null || b === undefined;
+      if (an && bn) return A[1] - B[1];
+      if (an) return 1;                            // nulls last, regardless of direction
+      if (bn) return -1;
+      const na = Number(a), nb = Number(b);
+      let cmp;
+      if (Number.isFinite(na) && Number.isFinite(nb) && a !== "" && b !== "") cmp = na - nb;
+      else { const sa = String(a), sb = String(b); cmp = sa < sb ? -1 : sa > sb ? 1 : 0; }
+      return cmp === 0 ? A[1] - B[1] : dir * cmp;
+    });
+    return arr.map(x => x[0]);
+  }, [shown, sort.col, sort.dir]);
+
+  const cycleSort = (c) => { setSel(null); setSort(s => s.col !== c ? { col: c, dir: 1 } : s.dir === 1 ? { col: c, dir: -1 } : { col: null, dir: 0 }); };
+  const mark = (c) => sort.col === c ? (sort.dir === 1 ? " ▲" : sort.dir === -1 ? " ▼" : "") : "";
+  const startResize = (c) => (e) => {              // pointer idiom (see PromptPanel onDrag)
+    e.preventDefault(); e.stopPropagation();
+    resizing.current = true;
+    const th = e.target.closest("th");
+    const x0 = e.clientX, w0 = widths[c] || (th ? th.offsetWidth : 120);
+    const mv = (ev) => setWidths(w => ({ ...w, [c]: Math.max(40, Math.round(w0 + (ev.clientX - x0))) }));
+    const up = () => { window.removeEventListener("pointermove", mv); window.removeEventListener("pointerup", up); setTimeout(() => { resizing.current = false; }, 0); };
+    window.addEventListener("pointermove", mv); window.addEventListener("pointerup", up);
+  };
+  const onDrop = (target) => (e) => {
+    e.preventDefault();
+    const src = dragCol; setDragCol(null);
+    if (!src || src === target) return;
+    setOrder(o => { const a = o.slice(), i = a.indexOf(src), j = a.indexOf(target); if (i < 0 || j < 0) return o; a.splice(i, 1); a.splice(j, 0, src); return a; });
+  };
+  const rowText = (r) => order.map(c => c + "\t" + dbFull(r[c])).join("\n");
+
+  return html`<div className="db-grid"><table>
+    <colgroup>${order.map(c => html`<col key=${c} style=${widths[c] ? { width: widths[c] + "px" } : undefined} />`)}</colgroup>
+    <thead><tr>${order.map(c => html`<th key=${c} className=${widths[c] ? "db-sized" : ""} draggable=${true}
+        onDragStart=${e => { if (resizing.current) { e.preventDefault(); return; } setDragCol(c); }}
+        onDragOver=${e => e.preventDefault()} onDrop=${onDrop(c)}
+        title="click: sort · drag: reorder · grab the right edge: resize"
+        style=${{ cursor: "pointer" }} onClick=${() => cycleSort(c)}>${c}${mark(c)}<span className="db-grip"
+          onClick=${e => e.stopPropagation()} onPointerDown=${startResize(c)}></span></th>`)}</tr></thead>
+    <tbody>${sorted.flatMap((r, i) => {
+      const isSel = sel === i;
+      const main = html`<tr key=${"r" + i} className=${isSel ? "db-sel" : ""} style=${{ cursor: "pointer" }}
+          onClick=${() => setSel(x => x === i ? null : i)}>
+        ${order.map(c => html`<td key=${c} className=${widths[c] ? "db-sized" : ""}>${dbCell(r[c])}</td>`)}</tr>`;
+      if (!isSel) return [main];
+      const detail = html`<tr key=${"d" + i} className="db-detail"><td colSpan=${order.length}>
+        <div className="db-detail-head"><b>row ${i + 1}</b>
+          <button className="btn" style=${{ fontSize: 11, marginLeft: 8 }} onClick=${e => { e.stopPropagation(); copyText(rowText(r)); }}>⧉ copy row</button></div>
+        <div className="db-detail-grid">${order.map(c => { const fv = dbFull(r[c]); return html`<div key=${c} className="db-detail-row">
+          <span className="db-detail-k">${c}</span>
+          <button className="db-detail-copy" title=${"copy " + c} onClick=${e => { e.stopPropagation(); copyText(fv); }}>⧉</button>
+          <span className="db-detail-v">${fv === "" ? html`<span className="db-null">∅</span>` : fv}</span></div>`; })}</div>
+      </td></tr>`;
+      return [main, detail];
+    })}</tbody>
+  </table></div>`;
+}
+const dbCount = (r) => r.rows.length + " row" + (r.rows.length === 1 ? "" : "s")
+  + (r.rows.length > DB_MAX_ROWS ? " (showing " + DB_MAX_ROWS + ")" : "") + " · " + r.ms + " ms";
+
+function DbDrawer() {
+  const [tab, setTab] = useState("tables");        // "tables" | "query"
+  const [tables, setTables] = useState({ loading: true });   // {loading} | {names:[...]} | {error}
+  const [picked, setPicked] = useState(null);      // table shown in the tables tab
+  // name -> {cols:[{name,type}]|null, peek:{loading}|{rows,ms}|{error}} — keyed by
+  // table (the DocsDrawer idiom) so a slow answer for A never lands under B's header
+  const [info, setInfo] = useState({});
+  const [query, setQuery] = useState(() => { try { return localStorage.getItem(DB_LAST_QUERY_KEY) || ""; } catch (_) { return ""; } });
+  const [res, setRes] = useState(null);            // {loading} | {rows,ms} | {error}
+  const loadTables = useCallback(() => {
+    setTables(t => ({ ...t, loading: true, error: null }));
+    dbPost("tables", {})
+      .then(d => setTables({ names: dbRows(d) }))
+      .catch(e => setTables(t => ({ ...t, loading: false, error: dbErr(e) })));
+  }, []);
+  useEffect(() => { loadTables(); }, [loadTables]);
+  const patch = (name, p) => setInfo(m => ({ ...m, [name]: { ...(m[name] || {}), ...p } }));
+  const pick = (name) => {
+    if (!DB_IDENT_RE.test(name)) return;           // never interpolate anything odd
+    setPicked(name);
+    patch(name, { cols: null, peek: { loading: true } });
+    dbPost("columns", { table_name: name })
+      .then(d => patch(name, { cols: dbRows(d).map(c => typeof c === "string" ? { name: c, type: "" }
+        : { name: c.name || c.column_name || "?", type: c.type || c.data_type || "" }) }))
+      .catch(e => patch(name, { cols: [{ name: "columns: " + dbErr(e), type: "" }] }));
+    const t0 = Date.now();
+    dbPost("query", { query: `SELECT * FROM "${name}" ORDER BY 1 DESC LIMIT 50` })
+      .then(d => patch(name, { peek: { rows: dbRows(d), ms: Date.now() - t0 } }))
+      .catch(e => patch(name, { peek: { error: dbErr(e) } }));
+  };
+  const run = () => {
+    const q = query.trim();
+    if (!/^(select|with)\b/i.test(q)) { setRes({ error: "read-only: the query must start with SELECT or WITH" }); return; }
+    try { localStorage.setItem(DB_LAST_QUERY_KEY, query); } catch (_) {}
+    setRes({ loading: true });
+    const t0 = Date.now();
+    dbPost("query", { query: q })
+      .then(d => setRes({ rows: dbRows(d), ms: Date.now() - t0 }))
+      .catch(e => setRes({ error: dbErr(e) }));
+  };
+  const onKey = (e) => { if ((e.ctrlKey || e.metaKey) && e.key === "Enter") { e.preventDefault(); run(); } };
+
+  const cur = (picked && info[picked]) || {};
+  return html`
+    <div className="design-panel docs-panel">
+      <div className="docs-bar"><b>🗄 db</b><span className="docs-spacer"></span>
+        <a className="db-link" href="http://127.0.0.1:8771" target="_blank" rel="noopener"
+           title="hugpy-dbview live viewer — only where it is installed">↗ dbview</a>
+        <button className="btn" title="refresh the table list" onClick=${loadTables}>↻</button>
+      </div>
+      <div className="docs-tabs">
+        <button className=${"docs-tab" + (tab === "tables" ? " active" : "")}
+                onClick=${() => setTab("tables")}>tables</button>
+        <button className=${"docs-tab" + (tab === "query" ? " active" : "")}
+                onClick=${() => setTab("query")}>query</button>
+      </div>
+      <div className="docs-body">
+        ${tab === "tables" && html`<div>
+          ${tables.loading && !tables.names && html`<div className="docs-note">loading…</div>`}
+          ${tables.error && html`<div className="docs-err docs-err-banner">
+            <div><b>db/tables failed</b></div><div>${tables.error}</div>
+            <button className="btn" style=${{ marginTop: 8 }} onClick=${loadTables}>↻ retry</button>
+          </div>`}
+          ${tables.names && html`<div className="db-tables">
+            ${tables.names.map(n => html`<button key=${n} className=${"db-table-btn" + (picked === n ? " on" : "")}
+                title=${"columns + the newest 50 rows of " + n} onClick=${() => pick(n)}>${n}</button>`)}
+            ${!tables.names.length && html`<span className="db-status">no tables</span>`}
+          </div>`}
+          ${picked && html`<div className="db-cols"><b>${picked}</b>
+            ${cur.cols == null ? html`<span className="db-status">columns…</span>`
+              : cur.cols.map(c => html`<span key=${c.name} className="db-col">${c.name}${c.type && html`<em>${c.type}</em>`}</span>`)}
+          </div>`}
+          ${cur.peek && cur.peek.loading && html`<div className="docs-note">loading…</div>`}
+          ${cur.peek && cur.peek.error && html`<div className="docs-err docs-err-banner">${cur.peek.error}</div>`}
+          ${cur.peek && cur.peek.rows && html`<div>
+            <div className="db-status" style=${{ marginBottom: 4 }}>newest 50 by column 1 · ${dbCount(cur.peek)}</div>
+            <${DbGrid} rows=${cur.peek.rows} name=${picked} /></div>`}
+        </div>`}
+        ${tab === "query" && html`<div>
+          <textarea className="db-sql" value=${query} onChange=${e => setQuery(e.target.value)} onKeyDown=${onKey}
+                    spellCheck=${false} placeholder="SELECT locus, kind, status FROM loci ORDER BY updated DESC LIMIT 20"></textarea>
+          <div className="db-hint">read-only SELECT/WITH · a literal % must be written %% (placeholder layer)</div>
+          <div className="db-row">
+            <button className="btn" title="run (Ctrl/⌘+Enter)" disabled=${!!(res && res.loading)} onClick=${run}>▶ run</button>
+            ${res && res.rows && html`<span className="db-status">${dbCount(res)}</span>`}
+          </div>
+          ${res && res.loading && html`<div className="docs-note">running…</div>`}
+          ${res && res.error && html`<div className="docs-err docs-err-banner">${res.error}</div>`}
+          ${res && res.rows && html`<${DbGrid} rows=${res.rows} name="query" />`}
+        </div>`}
       </div>
     </div>`;
 }
@@ -5288,40 +5719,50 @@ const stewardClampTokens = (n) => {
   return Math.min(STEWARD_TOKENS_MAX, Math.max(STEWARD_TOKENS_MIN, x));
 };
 
-function MctUsageBlock() {
-  /* Host-A (MCT) accounting inside the steward drawer: precise token counts,
-     cost, and cache-shadow timing from `hugpy-agent mct-usage` — the source of
-     truth is A's own stored transcripts, so these numbers are exact, not
-     estimates. The cache state is the SHADOW's expectation (5-min TTL,
-     refreshed per confirmed read), never a claim of provider knowledge. */
+/* Usage tracker per FRONTIER BACKEND (board t5, operator 2026-09-10): exact
+   token counts, cost and prompt-cache timing from THAT seat's own transcript —
+   GET /api/a/usage?backend=mct|claude-code (mct = the abstract-claude
+   pointer-exchange session; claude-code = the keeper-claude seat itself).
+   The budget is a per-backend localStorage number; the cost row turns red
+   when over. showCache renders the cache line from the same doc (the
+   claude-code section keeps its richer /api/frontier/cache readout instead). */
+function UsageBlock({ backend, showCache }) {
   const [d, setD] = useState(null);
   const [err, setErr] = useState(null);
-  const [budget, setBudget] = useState(() => { try { return parseInt(localStorage.getItem("mct_budget"), 10) || 1000000; } catch (_) { return 1000000; } });
-  const saveBudget = (v) => { const n = Math.max(0, parseInt(v, 10) || 0); setBudget(n); try { localStorage.setItem("mct_budget", String(n)); } catch (_) {} };
+  const [nowS, setNowS] = useState(() => Math.floor(Date.now() / 1000));
+  const bkey = "mct_budget" + (backend === "mct" ? "" : ":" + backend);
+  const [budget, setBudget] = useState(() => { try { return parseInt(localStorage.getItem(bkey), 10) || 1000000; } catch (_) { return 1000000; } });
+  const saveBudget = (v) => { const n = Math.max(0, parseInt(v, 10) || 0); setBudget(n); try { localStorage.setItem(bkey, String(n)); } catch (_) {} };
   useEffect(() => {
     let dead = false;
-    const load = () => fetch(vmScope("/api/a/usage"), { credentials: "same-origin" })
+    const load = () => fetch(vmScope("/api/a/usage?backend=" + encodeURIComponent(backend)), { credentials: "same-origin" })
       .then((r) => r.json())
       .then((j) => { if (!dead) { setD(j); setErr(j && j.error || null); } })
       .catch((e) => { if (!dead) setErr(String(e)); });
     load();
-    const t = setInterval(load, 30000);
-    return () => { dead = true; clearInterval(t); };
-  }, []);
+    const t = setInterval(load, 15000);
+    const tick = setInterval(() => setNowS(Math.floor(Date.now() / 1000)), 1000);
+    return () => { dead = true; clearInterval(t); clearInterval(tick); };
+  }, [backend]);
   const sess = d && d.sessions && d.sessions.length
     ? d.sessions[d.sessions.length - 1] : null;
   const r = sess && sess.report;
   const c = sess && sess.cache;
   const realTok = r ? (r.input + r.cache_read + r.cache_write) : 0;
   const over = !!(r && budget > 0 && realTok > budget);
+  const live = d && d.live_session;
+  const k = (n) => (n || 0).toLocaleString();
+  const rem = c && c.expires_at ? Math.max(0, c.expires_at - nowS) : 0;
+  const cstate = c ? (rem > 0 ? "warm" : "lapsed") : null;
+  const ccol = cstate === "warm" ? "var(--ok, #2ea043)" : "var(--bad)";
   return html`<div>
-    <div className="steward-thr-row" style=${{ marginTop: "10px" }}>
-      <span className="steward-k"><b>MCT (host A)</b></span>
-      <span className="steward-v">${sess ? sess.session_id : ""}</span>
+    <div className="steward-thr-row" style=${{ marginTop: 6 }}>
+      <span className="steward-k"><b>usage</b></span>
+      <span className="steward-v" style=${{ fontSize: 11 }}>${d ? (live ? "● " + live : "○ not running") : "…"}${sess && sess.session_id ? " · " + String(sess.session_id).slice(0, 8) + "…" : ""}${r && r.model ? " · " + r.model : ""}</span>
     </div>
-    ${err && html`<div className="steward-note">mct-usage: ${err}</div>`}
-    ${!err && !r && html`<div className="steward-note">no MCT turns yet</div>`}
-    ${r && html`<div>
+    ${err && html`<div className="steward-note">${err}</div>`}
+    ${!err && !r && html`<div className="steward-note">no turns yet</div>`}
+    ${r && html`<div className="ds-usage">
       <div className="steward-stat"><span className="steward-k">session budget</span>
         <span className="steward-v" style=${{ color: over ? "var(--bad)" : undefined, fontWeight: over ? 700 : undefined }}>${realTok.toLocaleString()} / <input type="number" value=${budget} onInput=${e => saveBudget(e.target.value)} style=${{ width: 84, background: "var(--bg)", color: "var(--fg)", border: "1px solid var(--edge)", borderRadius: 3, fontSize: 11, padding: "0 3px" }} /> tok${over ? " · OVER" : ""}</span></div>
       <div className="steward-stat"><span className="steward-k">turns</span>
@@ -5334,11 +5775,8 @@ function MctUsageBlock() {
         <span className="steward-v">${r.relayed_input.toLocaleString()} tok · billed-equiv ${Math.round(r.billed_input_equiv).toLocaleString()} (saved ${r.input_cost_saved_by_cache_pct}%)</span></div>
       <div className="steward-stat"><span className="steward-k">cost</span>
         <span className="steward-v" style=${{ color: over ? "var(--bad)" : undefined, fontWeight: over ? 700 : undefined }}>$${r.cost_usd.toFixed(4)}${over ? " · over budget" : ""}</span></div>
-      ${c && html`<div className="steward-stat"><span className="steward-k">cache shadow</span>
-        <span className="steward-v">${c.state} — last A turn ${Math.round(c.age_sec)}s ago${
-          c.state === "expected-valid"
-            ? html` · ~${Math.max(0, Math.round(c.ttl_sec - c.age_sec))}s to TTL`
-            : ""} (5-min TTL, refresh-on-read)</span></div>`}
+      ${showCache && c && html`<div className="steward-stat"><span className="steward-k">prompt cache</span>
+        <span className="steward-v"><span style=${{ color: ccol, fontWeight: 600 }}>${cstate}</span> · ${rem > 0 ? Math.floor(rem / 60) + ":" + String(rem % 60).padStart(2, "0") + " left" : "lapsed"} · cached prefix ${k(c.cached_tokens)} tok · last request ${Math.round(c.age_sec) < 60 ? Math.round(c.age_sec) + " s" : Math.floor(c.age_sec / 60) + " min"} ago · TTL ${c.ttl_sec >= 3600 ? Math.round(c.ttl_sec / 3600) + " h" : Math.round(c.ttl_sec / 60) + " min"}</span></div>`}
     </div>`}
   </div>`;
 }
@@ -5358,6 +5796,10 @@ function StewardDrawer({ vm, hugpyKeys }) {
   // Only a commit (release/keyup, not per drag tick) POSTs, and every settle —
   // success or failure — drops back to null so what's shown is what the host holds.
   const [thrPreview, setThrPreview] = useState(null);
+  // grounding readout for the bar ("— grounded in <locus> as <user>"): moved up
+  // here from the 🪑 seat sub-header, which repeated "seat — <locus>" under
+  // every tab (operator 2026-09-10).
+  const [seatHdr, setSeatHdr] = useState(null);
   /* top-level steward tabs (operator 2026-08-27): the old 🪑 SeatPanel sub-tabs
      promoted to the drawer's own level — no nested tab bars, no wasted space.
      session = the per-VM steward daemon readout this drawer was born as. */
@@ -5376,6 +5818,7 @@ function StewardDrawer({ vm, hugpyKeys }) {
      and STOP polling; a 5xx/network error may pass, so keep polling. Same shape as
      the 🐞 bugs drawer's load, plus the 404 degrade the 🔍 finder pioneered. */
   const load = useCallback(() => {
+    api("/api/seat" + seatQ(vm), { timeout: 20000 }).then(setSeatHdr).catch(() => {});
     if (vm === "@keeper") { setNotEnabled(true); setErr(null); return; }   // host seat: no in-VM daemon
     api("/api/vm/" + vm + "/steward")
       .then(d => {
@@ -5678,16 +6121,15 @@ function StewardDrawer({ vm, hugpyKeys }) {
       <div className="steward-body">
         <div style=${{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 6 }}>
           ${[["session", "🛡 session"], ["access", "🔓 access"], ["directive", "📜 directive"],
-             ["settings", "⚙ settings"]].map(([t, lbl]) =>
+             ["settings", "⚙ settings"], ["feed", "📡 feed"]].map(([t, lbl]) =>
             html`<button key=${t} className=${"btn" + (tab === t ? " on" : "")} style=${{ fontSize: 11 }}
                          onClick=${() => pickTab(t)}>${lbl}</button>`)}
         </div>
         ${tab === "session" && html`
-        ${/* the ACTIVE session, pinned (operator 2026-08-27): host-A (MCT)
-              live token usage/cost and the frontier claude seat with its 🧹
-              wipe sit statically on top; the absorbed 📡 feed (bugs · live ·
-              💬 B — the retired top-level feed tab) rides at the bottom. */""}
-        <div className="steward-readout"><${MctUsageBlock} /></div>
+        ${/* Frontier is one model seat. MCT is its communication mode; the
+              native terminal is the alternate mode for the selected model.
+              Usage and controls belong to the selected native seat;
+              the absorbed 📡 feed (bugs · live · 💬 B · 📜 log) rides at the bottom. */""}
         <${SeatPanel} vm=${vm} section="session" />
         ${data === null && !err && !notEnabled && html`<div className="steward-note">loading…</div>`}
         ${notEnabled && vm === "@keeper" && html`<div className="steward-note">
@@ -5861,7 +6303,13 @@ function StewardDrawer({ vm, hugpyKeys }) {
           <div className=${"steward-statusline" + (noteErr ? " err" : "")}>${note}</div>`}
         <${HostAssistPanel} />
         ${hugpyKeys && html`<${KeysPanel} vm=${vm} />`}
-        <${FeedGroupDrawer} vm=${vm === "@keeper" ? null : vm} embed=${true} />
+        `}
+        ${/* 2026-09-18 (operator): 📡 feed promoted to its OWN steward tab (was
+              embedded at the bottom of the 🛡 session tab). embed=true keeps the
+              self-contained, reliably-sized section that renders inside the
+              flex/scroll steward-body. */""}
+        ${tab === "feed" && html`
+          <${FeedGroupDrawer} vm=${vm === "@keeper" ? null : vm} embed=${true} />
         `}
         ${/* 🔓 access — everything about what may touch this locus: sudo grant/
               revoke, the frontier fs switch, LAN browser access, and the Claude
@@ -6144,24 +6592,50 @@ function ModelDropdown({ value, onChange, busy }) {
     return () => { dead = true; };
   }, []); // fetch once per mount — see comment above
 
-  // Loading / failed / explicit custom: all three render the exact same plain
-  // text input the old stub always was — the field's wire contract never moves.
+  /* 1.0.65 (operator): "custom…" used to do nothing and snap back to the previous
+     item. Now it opens a text field that KEEPS what the user types; validity is
+     checked when the user leaves the field (blur / Enter) — a bad id shows an
+     error and stays editable, a good one is committed via onChange (and the
+     settings save carries it). "↺ list" returns to the dropdown. */
+  const [draft, setDraft] = useState(null);       // text being typed in custom mode
+  const [verr, setVerr] = useState(null);         // validation message
+  const MODEL_ID = /^[a-z0-9][a-z0-9._:\/-]{2,120}$/i;
+  const commitDraft = () => {
+    const v = (draft === null ? (value || "") : draft).trim();
+    if (!v) { setVerr(null); onChange(""); return true; }
+    if (!MODEL_ID.test(v)) { setVerr("not a model id (letters, digits, . _ : / - ; 3–120 chars)"); return false; }
+    setVerr(null); onChange(v); return true;
+  };
+  // Loading / failed / explicit custom: a plain text input — the field's wire
+  // contract never moves; custom mode adds verify-on-leave + a way back.
   if (models === null || failed || custom) {
-    return html`<input type="text" disabled=${busy} value=${value}
-                        onChange=${(e) => onChange(e.target.value)} />`;
+    const known = Array.isArray(models) ? models.map(m => m.id) : [];
+    const shown = draft === null ? (value || "") : draft;
+    return html`<span style=${{ display: "inline-flex", flexDirection: "column", gap: 2 }}>
+      <span style=${{ display: "inline-flex", gap: 4 }}>
+        <input type="text" disabled=${busy} value=${shown} placeholder="model id (e.g. claude-opus-4-8)"
+               onInput=${(e) => { setDraft(e.target.value); setVerr(null); }}
+               onBlur=${commitDraft}
+               onKeyDown=${(e) => { if (e.key === "Enter") { e.preventDefault(); commitDraft(); } }} />
+        ${custom && html`<button className="btn" type="button" disabled=${busy} title="back to the list"
+               onClick=${() => { if (commitDraft()) { setCustom(false); setDraft(null); } }}>↺ list</button>`}
+      </span>
+      ${verr && html`<span style=${{ color: "var(--bad)", fontSize: 11 }}>${verr}</span>`}
+      ${!verr && shown && known.length > 0 && !known.includes(shown) && html`<span style=${{ color: "var(--dim)", fontSize: 11 }}>custom id — not in the fetched list; verified on save</span>`}
+    </span>`;
   }
 
   const known = models.map(m => m.id);
   const extra = (value && !known.includes(value)) ? [{ id: value, extra: true }] : [];
   const onSelect = (e) => {
-    if (e.target.value === "__custom__") { setCustom(true); return; }
+    if (e.target.value === "__custom__") { setDraft(value || ""); setVerr(null); setCustom(true); return; }
     onChange(e.target.value);
   };
   return html`<select disabled=${busy} value=${value || ""} onChange=${onSelect}>
     <option value="">(unset)</option>
-    ${extra.map(m => html`<option key=${"extra-" + m.id} value=${m.id}>${m.id} (current — not in list)</option>`)}
+    ${extra.map(m => html`<option key=${"extra-" + m.id} value=${m.id}>${m.id} (custom)</option>`)}
     ${models.map(m => html`<option key=${m.id} value=${m.id}>${m.id}</option>`)}
-    <option value="__custom__">custom…</option>
+    <option value="__custom__">✎ custom…</option>
   </select>`;
 }
 /* ⚙ agent deploy directive — board t80. Lives INSIDE the 🛡 steward drawer, a sibling
@@ -6597,6 +7071,207 @@ const seatKV = (k, v, cls) => createElement("div", { className: "steward-stat" }
   createElement("span", { className: "steward-k" }, k),
   createElement("span", { className: "steward-v" + (cls ? " " + cls : "") }, v));
 
+/* steward tabs (operator 2026-09-15): the MCT pointer exchange is merged into
+   the native frontier session and its token tracker (/api/a/usage?backend=mct,
+   `hugpy-agent mct-usage`) is retired, so the session display is ONE TAB per
+   frontier backend — Claude (keeper-claude) and GPT (keeper-codex) — each with
+   its OWN session line + token/context meter (/api/frontier/cache?backend=<be>)
+   and its live-subagents listbox (/api/frontier/agents?backend=<be>). The tab
+   open by default is the provider the console picked as KEEPER (localStorage
+   fv-frontier-native — the terminal's Keeper-provider select; fv-backends'
+   frontier key is the older form; the server's live frontier backend when
+   neither is set); a manual pick is sticky for the PAGE SESSION only
+   (sessionStorage), so a reload follows the keeper again. */
+const SEAT_TABS = [["claude-code", "Claude", "keeper-claude"], ["codex", "GPT", "keeper-codex"]];
+const frontierKeeperBackend = () => {
+  try {
+    const n = localStorage.getItem("fv-frontier-native");
+    if (n === "codex" || n === "claude-code") return n;
+    const c = JSON.parse(localStorage.getItem("fv-backends") || "{}") || {};
+    if (c.frontier === "codex" || c.frontier === "claude-code") return c.frontier;
+  } catch (_) {}
+  return "";
+};
+const seatElapsed = (s) => {
+  s = Math.max(0, Math.floor(s || 0));
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return (h ? h + ":" + String(m).padStart(2, "0") : String(m)) + ":" + String(sec).padStart(2, "0");
+};
+/* one backend's session + meter: the seat (live?), session id, model, last
+   request, the context sent on the last request against the window (1M for
+   the Claude station; the model_context_window Codex reports), and the
+   prompt-cache countdown (Claude: exact TTL from the usage row; GPT: an
+   estimate — OpenAI does not report it). Polls every 10 s; the clock is the
+   parent's 1 s nowS. */
+function SeatMeter({ vm, backend, nowS }) {
+  const [d, setD] = useState(null);
+  useEffect(() => {
+    let dead = false;
+    setD(null);
+    const load = () => api("/api/frontier/cache" + seatQ(vm) + "&backend=" + encodeURIComponent(backend), { timeout: 25000 })
+      .then((j) => { if (!dead) setD(j); })
+      .catch((e) => { if (!dead) setD({ ok: false, error: e.message || String(e), seat_live: e.body && e.body.seat_live }); });
+    load();
+    const t = setInterval(load, 10000);
+    return () => { dead = true; clearInterval(t); };
+  }, [vm, backend]);
+  const k = (n) => (n || 0).toLocaleString();
+  const seatName = (SEAT_TABS.find(t => t[0] === backend) || [])[2] || backend;
+  const who = (x) => (x && x.seat_live === false ? "○ " + seatName + " not running" : "● " + seatName)
+    + (x && x.session_id ? " · " + String(x.session_id).slice(0, 8) + "…" : "") + (x && x.model ? " · " + x.model : "");
+  if (!d) return html`<div style=${{ color: "var(--dim)", fontSize: 11, marginTop: 6 }}>⏳ session — reading the ${seatName} transcript…</div>`;
+  if (!d.ok) return html`<div className="steward-thr-row" style=${{ marginTop: 6 }}>
+      <span className="steward-k"><b>session</b></span>
+      <span className="steward-v" style=${{ fontSize: 11, color: "var(--dim)" }}>${who(d)} — ${d.error || "unavailable"}</span></div>`;
+  const rem = Math.max(0, (d.expires_at || 0) - nowS);
+  const mm = Math.floor(rem / 60), ss = rem % 60;
+  const state = d.busy ? "busy" : (rem > 0 ? "warm" : "lapsed");
+  const col = state === "busy" ? "var(--warn)" : state === "warm" ? "var(--ok, #2ea043)" : "var(--bad)";
+  const isGpt = backend === "codex";
+  const cap = isGpt ? (d.context_window || 0) : STEWARD_TOKEN_CAP;
+  const used = d.context_tokens || 0;
+  const pct = cap ? Math.min(100, Math.round(1000 * used / cap) / 10) : null;
+  const ttlLabel = d.ttl_s >= 3600 ? Math.round(d.ttl_s / 3600) + " h" : Math.round(d.ttl_s / 60) + " min";
+  const est = d.ttl_basis === "estimate";
+  const age = d.age_s < 60 ? d.age_s + " s" : Math.floor(d.age_s / 60) + " min";
+  return html`<div style=${{ marginTop: 6 }}>
+    <div className="steward-thr-row">
+      <span className="steward-k"><b>session</b></span>
+      <span className="steward-v" style=${{ fontSize: 11 }}>${who(d)} · last request ${age} ago</span>
+    </div>
+    <div className="steward-stat" style=${{ marginTop: 4 }}><span className="steward-k">context</span>
+      <span className="steward-v" title=${"what the model was sent on its last request (input" + (isGpt ? ", cached input included" : " + cache read + cache write") + ")"}>${k(used)}${cap ? " / " + k(cap) + " tok (" + pct + "%)" : " tok"}${d.compactions ? " · compacted ×" + d.compactions : ""}</span></div>
+    ${cap ? html`<div className="steward-meter"><span className=${"steward-meter-fill" + (pct >= 80 ? " full" : "")} style=${{ width: pct + "%" }}></span></div>` : null}
+    <div style=${{ display: "flex", alignItems: "center", gap: 10, marginTop: 4 }}>
+      <span style=${{ fontWeight: 600 }}>⏳ prompt cache</span>
+      <span style=${{ color: col, fontWeight: 600 }}>${state}</span>
+      <span style=${{ fontFamily: "ui-monospace, monospace", fontSize: 14, color: col }}
+            title=${"the cached prefix lapses at " + new Date(d.expires_at * 1000).toLocaleTimeString() + " unless another request refreshes it (TTL " + ttlLabel + (est ? ", estimated — OpenAI does not report it" : "") + ")"}>${
+        state === "busy" ? "working — refreshes on every request" : rem > 0 ? (mm + ":" + String(ss).padStart(2, "0") + " left") : "lapsed"}</span>
+      <span style=${{ color: "var(--dim)", fontSize: 11, marginLeft: "auto" }}>TTL ${ttlLabel}${est ? " (est.)" : ""}</span>
+    </div>
+    <div style=${{ color: "var(--dim)", fontSize: 11, marginTop: 4 }}>
+      ${isGpt
+        ? html`cached input <b>${k(d.cached_tokens)}</b> of ${k(used)} tok on the last request · output ${k(d.output_tokens)}${d.reasoning_tokens ? " (reasoning " + k(d.reasoning_tokens) + ")" : ""} · session totals ${k(d.totals && d.totals.input)} in / ${k(d.totals && d.totals.output)} out (${k(d.totals && d.totals.cached_input)} cached) · ${d.requests_last_hour} requests in the last hour`
+        : html`cached prefix <b>${k(d.cached_tokens)}</b> tokens (${k(d.cache_read)} read + ${k(d.cache_creation)} written on the last request) · ${d.requests_last_hour} requests in the last hour${d.rebuild_cost_usd != null ? html` · a cold turn re-writes it for ≈ $${d.rebuild_cost_usd.toFixed(3)}, a warm turn reads it for ≈ $${d.warm_turn_cost_usd.toFixed(3)}` : ""}`}
+    </div>
+    ${state === "lapsed" && !isGpt && html`<div style=${{ color: "var(--warn)", fontSize: 11, marginTop: 2 }}>
+      the next turn pays the re-write; if this history is mostly done work, a session init prompt + fresh seat is cheaper than continuing.</div>`}
+  </div>`;
+}
+/* the seat's LIVE SUBAGENTS as a listbox — one row per Agent-tool spawn:
+   purpose | model | title | status | ⏱. /api/frontier/agents is polled on the
+   meter's 10 s cadence; a running row's elapsed timer ticks CLIENT-SIDE from
+   started_at on the parent's 1 s clock (no faster polling). Running rows are
+   lit; finished rows dim with their final duration. */
+function AgentsBox({ vm, backend, nowS }) {
+  const [d, setD] = useState(null);
+  useEffect(() => {
+    let dead = false;
+    setD(null);
+    const load = () => api("/api/frontier/agents" + seatQ(vm) + "&backend=" + encodeURIComponent(backend), { timeout: 30000 })
+      .then((j) => { if (!dead) setD(j); })
+      .catch((e) => { if (!dead) setD({ ok: false, error: e.message || String(e) }); });
+    load();
+    const t = setInterval(load, 10000);
+    return () => { dead = true; clearInterval(t); };
+  }, [vm, backend]);
+  const agents = (d && d.agents) || [];
+  const running = agents.filter(a => a.status === "running").length;
+  const head = html`<div className="steward-thr-row" style=${{ marginTop: 8 }}>
+      <span className="steward-k"><b>subagents</b></span>
+      <span className="steward-v" style=${{ fontSize: 11, color: "var(--dim)" }}>${!d ? "…" : !d.ok ? (d.error || "unavailable") : running + " running · " + agents.length + " listed" + (d.note ? " · " + d.note : "")}</span>
+    </div>`;
+  if (!d || !d.ok || !agents.length) return head;
+  const col = { display: "grid", gridTemplateColumns: "minmax(90px, 1.2fr) minmax(70px, .8fr) minmax(120px, 2fr) 74px 60px", gap: "0 8px", alignItems: "baseline", fontSize: 11, padding: "2px 4px" };
+  const cell = { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" };
+  return html`<div>
+    ${head}
+    <div role="listbox" aria-label=${"subagents of " + backend} style=${{ border: "1px solid var(--edge)", borderRadius: 4, maxHeight: 168, overflowY: "auto", marginTop: 2 }}>
+      <div style=${{ ...col, color: "var(--dim)", borderBottom: "1px solid var(--edge)", position: "sticky", top: 0, background: "var(--panel, var(--bg))" }}>
+        <span>purpose</span><span>model</span><span>title</span><span>status</span><span style=${{ textAlign: "right" }}>⏱</span></div>
+      ${agents.map((a) => {
+        const run = a.status === "running";
+        const el = run ? Math.max(0, nowS - (a.started_at || nowS)) : (a.elapsed_s || 0);
+        const scol = run ? "var(--warn)" : a.status === "failed" ? "var(--bad)" : "var(--dim)";
+        const tk = a.tokens ? "\ntokens " + ((a.tokens.input || 0) + (a.tokens.cache_read || 0) + (a.tokens.cache_write || 0)).toLocaleString() + " in / " + (a.tokens.output || 0).toLocaleString() + " out" : "";
+        return html`<div key=${a.id || a.tool_use_id} role="option" aria-selected=${run}
+            style=${{ ...col, color: run ? "var(--fg)" : "var(--dim)", background: run ? "rgba(127,170,255,.10)" : undefined, borderLeft: run ? "2px solid var(--accent)" : "2px solid transparent" }}
+            title=${(a.title || "") + "\n" + a.subagent_type + (a.background ? " · background" : " · foreground") + (a.id ? " · " + a.id : "") + "\nmodel " + (a.model || "—") + (a.model_explicit ? "" : " (inherited from the session)") + "\nstarted " + (a.started_at ? new Date(a.started_at * 1000).toLocaleTimeString() : "—") + (a.ended_at ? " · ended " + new Date(a.ended_at * 1000).toLocaleTimeString() : "") + tk}>
+          <span style=${cell}>${a.purpose || "—"}</span>
+          <span style=${cell}>${a.model || "—"}</span>
+          <span style=${cell}>${a.title || "—"}</span>
+          <span style=${{ color: scol, fontWeight: run ? 600 : 400 }}>${run ? "● running" : a.status === "failed" ? "✗ failed" : "✓ done"}</span>
+          <span style=${{ textAlign: "right", fontFamily: "ui-monospace, monospace", color: run ? "var(--warn)" : "var(--dim)" }}>${seatElapsed(el)}</span>
+        </div>`; })}
+    </div>
+  </div>`;
+}
+
+/* p509 ROLLOVER READOUT (UI half): the direct seat's context-rollover policy.
+   GET /api/ac/rollover?vm=… → {policy, pending, current, rolling, due} (a
+   separate agent adds the route). Renders the mode (color-coded), a
+   context-vs-threshold meter (steward-stat/steward-meter), a pending chip with a
+   grace countdown, and ↻ roll now / ✕ cancel roll (POST {action, session_id}).
+   A 404 or an empty answer degrades to nothing (kept compact for the tight card). */
+function RolloverMeter({ vm, nowS }) {
+  const [d, setD] = useState(null);      // null = first load; false = absent/empty (render nothing); else the doc
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(() => {
+    api("/api/ac/rollover" + seatQ(vm), { timeout: 15000 })
+      .then(j => setD(j && (j.policy || j.current != null || j.pending || j.rolling != null) ? j : false))
+      .catch(() => setD(false));
+  }, [vm]);
+  useEffect(() => { setD(null); load(); const t = setInterval(load, 15000); return () => clearInterval(t); }, [load]);
+  if (!d) return null;                    // pending or absent → stay quiet
+  const policy = String(d.policy || "off").toLowerCase();
+  const pcol = policy === "auto" ? "var(--ok, #2ea043)" : policy === "manual" ? "var(--warn)" : "var(--dim)";
+  const used = Number(d.current), cap = Number(d.rolling);
+  const pct = Number.isFinite(used) && Number.isFinite(cap) && cap > 0 ? Math.min(100, Math.round(1000 * used / cap) / 10) : null;
+  const pend = d.pending && typeof d.pending === "object" ? d.pending : (d.pending ? {} : null);
+  const grace = pend && (pend.grace_s != null ? Math.max(0, Math.round(pend.grace_s))
+      : pend.grace_until != null ? Math.max(0, pend.grace_until - nowS) : null);
+  const sid = (pend && pend.session_id) || d.session_id || (d.current && d.current.session_id) || null;
+  const act = (action) => {
+    if (busy) return; setBusy(true);
+    api("/api/ac/rollover" + seatQ(vm), { method: "POST", timeout: 20000, body: JSON.stringify({ action, session_id: sid }) })
+      .then(() => load()).catch(() => {}).finally(() => setBusy(false));
+  };
+  const k = (n) => Number(n || 0).toLocaleString();
+  return html`<div style=${{ marginTop: 6 }}>
+    <div className="steward-thr-row">
+      <span className="steward-k"><b>rollover</b></span>
+      <span className="steward-v" style=${{ fontSize: 11 }}><span style=${{ color: pcol, fontWeight: 600 }}>${policy}</span>${d.due ? " · due" : ""}</span>
+    </div>
+    ${pct !== null && html`<div className="steward-stat" style=${{ marginTop: 4 }}><span className="steward-k">context</span>
+      <span className="steward-v">${k(used)} / ${k(cap)} tok (${pct}%)</span></div>`}
+    ${pct !== null && html`<div className="steward-meter"><span className=${"steward-meter-fill" + (pct >= 80 ? " full" : "")} style=${{ width: pct + "%" }}></span></div>`}
+    <div style=${{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, flexWrap: "wrap" }}>
+      ${pend && html`<span style=${{ fontSize: 11, color: "var(--warn)", border: "1px solid var(--warn)", borderRadius: 10, padding: "0 6px" }}>⏳ roll pending${grace != null ? " · " + Math.floor(grace / 60) + ":" + String(grace % 60).padStart(2, "0") : ""}</span>`}
+      ${pend
+        ? html`<button className="btn" disabled=${busy} onClick=${() => act("cancel")}>✕ cancel roll</button>`
+        : html`<button className="btn" disabled=${busy || policy === "off"} title=${policy === "off" ? "rollover is off" : "roll this session now"} onClick=${() => act("roll")}>↻ roll now</button>`}
+    </div>
+  </div>`;
+}
+
+/* p515 LIMITS GAUGE (UI half): the frontier limit state for the direct seat.
+   Reads the {default_model, fallback_model, state:ok|near|hit, last_hit_ts,
+   fallback_active} doc SeatPanel already fetched from /api/frontier/limits.
+   A model chip colored green(ok)/amber(near)/red(hit), plus "on fallback:
+   <model>" when a limit auto-switch is active. lim===false / null → nothing. */
+function LimitsBadge({ lim }) {
+  if (!lim) return null;
+  const st = String(lim.state || "ok").toLowerCase();
+  const col = st === "hit" ? "var(--bad)" : st === "near" ? "var(--warn)" : "var(--ok, #2ea043)";
+  const model = lim.default_model || "(default)";
+  return html`<div style=${{ display: "flex", alignItems: "center", gap: 8, fontSize: 11, marginTop: 2, flexWrap: "wrap" }}>
+    <span style=${{ display: "inline-flex", alignItems: "center", gap: 5, color: col, border: "1px solid " + col, borderRadius: 10, padding: "0 7px", fontWeight: 600 }}
+          title=${"frontier limit state: " + st + (lim.last_hit_ts ? " · last hit " + fmtTs(lim.last_hit_ts) : "")}>●${model}<span style=${{ color: "var(--dim)", fontWeight: 400 }}>· ${st}</span></span>
+    ${lim.fallback_active && lim.fallback_model && html`<span style=${{ color: "var(--warn)" }}>on fallback: <code>${lim.fallback_model}</code></span>`}
+  </div>`;
+}
+
 function SeatPanel({ vm, section }) {
   const [seat, setSeat] = useState(null);
   const [dirv, setDirv] = useState(null);      // /api/frontier/directive doc
@@ -6614,36 +7289,104 @@ function SeatPanel({ vm, section }) {
   const [hsaved, setHsaved] = useState("");
   const [wipeConfirm, setWipeConfirm] = useState(false);
   const [m2s, setM2s] = useState(null);        // /api/mct2/status — is A working? + pending queries
+  const [gptDraft, setGptDraft] = useState(null);
+  const [gpt, setGpt] = useState(null);        // abstract-gpt settings + live Codex tracker
+  const [deleg, setDeleg] = useState(null);    // /api/frontier/delegate — per-backend delegate-only switch (board t7)
+  const [lim, setLim] = useState(null);        // p515: /api/frontier/limits — {default_model, fallback_model, state, last_hit_ts, fallback_active}; false = route absent
+  /* 1.0.67: prompt-cache countdown — now inside SeatMeter, one per frontier
+     backend tab (steward tabs, operator 2026-09-15); the 1 s clock below is
+     shared by the meters' countdowns and the subagent elapsed timers. */
+  const [nowS, setNowS] = useState(() => Math.floor(Date.now() / 1000));
+  // steward tabs: seatTab = the operator's manual pick (sticky for the page
+  // session); "" = follow the provider the console picked as keeper.
+  const [seatTab, setSeatTab] = useState(() => { try { return sessionStorage.getItem("steward_seat_tab") || ""; } catch (_) { return ""; } });
+  const [keeperBe, setKeeperBe] = useState(frontierKeeperBackend);
+  const pickSeatTab = (be) => { setSeatTab(be); try { if (be) sessionStorage.setItem("steward_seat_tab", be); else sessionStorage.removeItem("steward_seat_tab"); } catch (_) {} };
+  const activeSeat = (seatTab === "codex" || seatTab === "claude-code") ? seatTab : (keeperBe || "claude-code");
+  useEffect(() => { const t = setInterval(() => setNowS(Math.floor(Date.now() / 1000)), 1000); return () => clearInterval(t); }, []);
+  /* 1.0.68: the ROLLING STATE (toolserver assess/state — fleet-judged from the seat's
+     own transcript): derived objective + a ready init prompt; ⟳ relaunch hands it to a
+     fresh seat. The idle-relaunch rule does the same automatically (server-side). */
+  const [rstate, setRstate] = useState(null);
+  const relaunch = () => {
+    if (busy) return;
+    if (!window.confirm("Relaunch the frontier claude-code seat on the derived init prompt? The current seat is killed (its transcript stays on disk); the new one starts on the directive + this init prompt.")) return;
+    setBusy(true); setErr(null); setNote(null);
+    api("/api/frontier/relaunch" + seatQ(vm), { method: "POST", timeout: 60000, body: JSON.stringify({}) })
+      .then(d => { setNote("relaunched on the init prompt (" + (d.init_prompt_chars || 0) + " chars) — new seat " + (d.session || "")); load(); })
+      .catch(e => setErr(e.message || "relaunch failed")).finally(() => setBusy(false));
+  };
   const load = useCallback(() => {
     api("/api/seat" + seatQ(vm), { timeout: 20000 }).then(d => { setSeat(d); setErr(null); })
       .catch(e => setErr(e.message || "seat status failed"));
+    // steward tabs: the provider the console picked as keeper decides the
+    // default tab — the picker's own localStorage first, else the server's
+    // live frontier backend (a first visit), else Claude.
+    { const be = frontierKeeperBackend(); if (be) setKeeperBe(be);
+      else api("/api/term/backends?vm=@keeper", { timeout: 15000 }).then(d => { const lb = d && d.frontier && d.frontier.live_backend; if (lb === "codex" || lb === "claude-code") setKeeperBe(lb); }).catch(() => {}); }
+    api("/api/frontier/state" + seatQ(vm), { timeout: 25000 }).then(setRstate).catch(() => {});
     api("/api/frontier/directive").then(d => { setDirv(d); if (text === null) { setText(d.text || ""); setSaved(d.text || ""); } })
       .catch(e => setErr(e.message || "directive load failed"));
-    api("/api/frontier/handoff").then(d => { setHand(d); if (htext === null) { setHtext(d.text || ""); setHsaved(d.text || ""); } })
+    api("/api/frontier/handoff").then(d => { setHand(d);
+        // 1.0.65: the init prompt is CONSUMED at seat launch — when the file is
+        // gone (handed off) the field empties too; never keep showing stale text.
+        if (htext === null || (!d.exists && hsaved !== "")) { setHtext(d.text || ""); setHsaved(d.text || ""); } })
       .catch(() => {});
     api("/api/frontier/models").then(setModels).catch(() => {});
     api("/api/b/model").then(setBm).catch(() => {});
     api("/api/mct2/status" + seatQ(vm)).then(setM2s).catch(() => {});
+    api("/api/frontier/delegate").then(setDeleg).catch(() => {});
+    api("/api/frontier/limits").then(setLim).catch(() => setLim(false));  // p515: 404 → false → badge renders nothing
+    api("/api/gpt" + seatQ(vm)).then(setGpt).catch(e => setGpt({ error: e.message || "GPT settings unavailable" }));
   }, [vm]);
+  /* board t7 (operator 2026-09-10): delegate-only = the seat ROUTES, subagents
+     work. Persisted server-side; lands in the directive (claude-code: next
+     launch; mct: next turn) and a live seat is told right away. */
+  const setDelegate = (be, on) => {
+    if (busy) return;
+    setBusy(true); setErr(null);
+    api("/api/frontier/delegate", { method: "POST", body: JSON.stringify({ backend: be, on }), timeout: 20000 })
+      .then(d => { setDeleg(d); setNote(be + " delegate-only → " + (on ? "ON" : "OFF") + (d.notified ? " · the live seat (" + d.notified + ") was told" : " · applies at that seat's next launch / turn")); })
+      .catch(e => setErr(e.message || "delegate switch failed")).finally(() => setBusy(false));
+  };
+  const delegBox = (be) => html`<label style=${{ display: "inline-flex", alignItems: "center", gap: 5, fontSize: 11, cursor: "pointer" }}
+      title="ON: this seat only ROUTES — it briefs a subagent for every task instead of working in its own context, so the frontier keeper can be the newest model without draining tokens on execution, and stays free to take new queries while work is in flight. Lands in the directive (claude-code: next launch; mct: next turn); a live seat is told right away.">
+    <input type="checkbox" disabled=${busy || !deleg} checked=${!!(deleg && deleg.delegate && deleg.delegate[be])} onChange=${e => setDelegate(be, e.target.checked)} />
+    delegate-only (subagents do the work)</label>`;
   const setBModel = (value) => {
     setBusy(true); setErr(null); setNote(null);
     api("/api/b/model", { method: "POST", body: JSON.stringify({ model: value }) })
       .then(d => { setBm(d); setNote("B model → " + (value || "package default") + " · console B calls now; mct seat/daemon next launch"); })
       .catch(e => setErr(e.message || "B model save failed")).finally(() => setBusy(false));
   };
-  useEffect(() => { setSeat(null); setText(null); setHtext(null); setWipeConfirm(false); load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
+  useEffect(() => {
+    setSeat(null); setText(null); setHtext(null); setGpt(null); setGptDraft(null); setWipeConfirm(false); load();
+    const central = !!fvLocusOf(vm);
+    const t = setInterval(load, central ? 60000 : 10000);
+    const offDb = onDbChange((e) => {
+      const d = e.detail || {};
+      if (central && ["seat_state", "loci"].includes(d.table) && d.locus === fvLocusOf(vm)) load();
+    });
+    return () => { clearInterval(t); offDb(); };
+  }, [load]);
   const dirty = text !== null && text !== saved;
   const hdirty = htext !== null && htext !== hsaved;
-  const wipeSeat = () => {   // full wipe of A's claude state on this locus; login + template survive
+  const wipeSeat = (backend) => {   // wipe ONLY this frontier backend's claude state on this locus; login + the OTHER seat survive
     setBusy(true); setErr(null); setNote(null); setWipeConfirm(false);
-    api("/api/seat/wipe" + seatQ(vm), { method: "POST", timeout: 60000 })
+    api("/api/seat/wipe" + seatQ(vm) + "&backend=" + encodeURIComponent(backend), { method: "POST", timeout: 60000 })
       .then(d => {
         try {
           window.__fvVm && window.__fvVm.set(vm || "@keeper");
           window.__fvSurface && window.__fvSurface.set("frontier");
-          if (window.__fvBackend) window.__fvBackend.set("frontier", "claude-code", { persist: false });
+          if (window.__fvBackend) window.__fvBackend.set("frontier", backend, { persist: false });
+          // ONE-CLICK: don't leave the operator on the dead "[exited]" seat —
+          // force a fresh session on the wiped surface (ws_hostterm new-session
+          // -A → fresh, still-logged-in, zero-context seat, grounded on this
+          // locus + backend). set(vm)/set("frontier")/setBackend above put the
+          // right VM + surface + backend in place first; reopen relaunches.
+          if (window.__fvSurface && window.__fvSurface.reopen) window.__fvSurface.reopen("frontier");
         } catch (_) {}
-        setNote("frontier claude seat wiped on " + (d.locus || "host") + " — fresh seat opened; OAuth login + templated settings re-apply at launch");
+        setNote("frontier " + backend + " seat wiped on " + (d.locus || "host") + " — only its Claude state was removed; login and the other seat survive. A fresh, still-logged-in seat is relaunching now (zero context).");
         load();
       })
       .catch(e => setErr(e.message || "wipe failed")).finally(() => setBusy(false));
@@ -6680,8 +7423,19 @@ function SeatPanel({ vm, section }) {
     if (busy) return;
     setBusy(true); setErr(null);
     api("/api/frontier/models", { method: "POST", body: JSON.stringify({ [key]: value }) })
-      .then(d => { setModels(d); setNote(key + " model → " + (value || "Claude Code default") + " (next launch of that seat)"); load(); })
+      .then(d => { setModels(d);
+        const how = (d.applied_live && d.applied_live[key]) || "next launch of that seat";
+        setNote(key + " model → " + (value || "Claude Code default") + " · " + how); load(); })
       .catch(e => setErr(e.message || "model save failed")).finally(() => setBusy(false));
+  };
+  const editGpt = (patch) => setGptDraft(d => Object.assign({}, d || (gpt && gpt.settings) || {}, patch));
+  const saveGpt = () => {
+    if (busy || !gptDraft) return;
+    setBusy(true); setErr(null);
+    const value = Object.assign({}, gptDraft, { default_model: (gptDraft.default_model || "").trim() });
+    api("/api/gpt" + seatQ(vm), { method: "POST", body: JSON.stringify(value) })
+      .then(d => { setGpt(d); setGptDraft(null); setNote("GPT settings saved · apply at next launch"); })
+      .catch(e => setErr(e.message || "GPT settings save failed")).finally(() => setBusy(false));
   };
   const openLogin = () => {   // the claude-code seat prints the login steps and runs Claude Code's own OAuth picker
     try {
@@ -6697,16 +7451,37 @@ function SeatPanel({ vm, section }) {
   const eff = (models && models.effective) || {};
   /* the dropdown is a shortcut list, NOT a whitelist: "✎ custom…" prompts for
      any model id (server validates the format), so no model is gated out. */
+  /* 1.0.66 (operator): "✎ custom…" opens an INLINE field (window.prompt is a no-op in
+     Electron — that is why custom "did nothing"). The typed id is kept, verified on
+     Enter / apply (server validates the format too), Esc cancels. The list itself is
+     the LIVE Models API list the toolserver fetches once per load (+ the current
+     value if off-list), so custom is for ids not in it. */
+  const [customFor, setCustomFor] = useState(null);   // key currently being typed for, or null
+  const [customText, setCustomText] = useState("");
+  const [customErr, setCustomErr] = useState(null);
+  const MODEL_ID_RE = /^[a-z0-9][a-z0-9._:\/-]{2,120}$/i;
   const onModelPick = (key, val) => {
-    if (val === "__custom__") {
-      const cur = m[key] || "";
-      const v = window.prompt("Model id for the " + key + " seat (any Claude model id — e.g. claude-opus-4-8):", cur);
-      if (v === null) return;            // cancelled: leave selection as-is
-      return setModel(key, v.trim());
-    }
+    if (val === "__custom__") { setCustomFor(key); setCustomText(m[key] || ""); setCustomErr(null); return; }
     setModel(key, val);
   };
-  const modelSel = (key) => html`<select value=${m[key] || ""} disabled=${busy}
+  const applyCustom = (key) => {
+    const v = customText.trim();
+    if (v && !MODEL_ID_RE.test(v)) { setCustomErr("not a model id (letters, digits, . _ : / - ; 3–120 chars)"); return; }
+    setCustomErr(null); setCustomFor(null); setModel(key, v);
+  };
+  const modelSel = (key) => customFor === key
+    ? html`<span style=${{ display: "inline-flex", flexDirection: "column", gap: 2 }}>
+        <span style=${{ display: "inline-flex", gap: 4 }}>
+          <input type="text" autoFocus value=${customText} disabled=${busy} placeholder="model id, e.g. claude-opus-4-8"
+                 style=${{ background: "var(--bg)", color: "var(--fg)", border: "1px solid var(--edge)", borderRadius: 4, padding: "2px 6px", fontSize: 12, minWidth: 240 }}
+                 onInput=${e => { setCustomText(e.target.value); setCustomErr(null); }}
+                 onKeyDown=${e => { if (e.key === "Enter") { e.preventDefault(); applyCustom(key); } if (e.key === "Escape") { setCustomFor(null); setCustomErr(null); } }} />
+          <button className="btn on" disabled=${busy} onClick=${() => applyCustom(key)}>apply</button>
+          <button className="btn" disabled=${busy} onClick=${() => { setCustomFor(null); setCustomErr(null); }}>cancel</button>
+        </span>
+        ${customErr && html`<span style=${{ color: "var(--bad)", fontSize: 11 }}>${customErr}</span>`}
+      </span>`
+    : html`<select value=${m[key] || ""} disabled=${busy}
       style=${{ background: "var(--bg)", color: "var(--fg)", border: "1px solid var(--edge)", borderRadius: 4, padding: "2px 6px", fontSize: 12 }}
       onChange=${e => onModelPick(key, e.target.value)}>
       ${choices.map(c => html`<option key=${c} value=${c}>${c || "(Claude Code default)"}</option>`)}
@@ -6714,20 +7489,26 @@ function SeatPanel({ vm, section }) {
       <option value="__custom__">✎ custom…</option>
     </select>`;
   /* the model that seat will actually launch with (server-resolved) */
-  const modelActive = (key) => html`<span style=${{ color: "var(--dim)", fontSize: 11 }}>active: <code>${(eff[key] && eff[key].model) || m[key] || "(Claude Code default)"}</code></span>`;
+  const modelActive = (key) => html`<span style=${{ color: "var(--dim)", fontSize: 11 }}>active: <code>${(eff[key] && eff[key].model) || m[key] || "(Claude Code default)"}</code>${key === "claude-code" && lim && lim.fallback_active ? html` <span style=${{ color: "var(--warn)" }} title="a frontier limit auto-switched this seat to its fallback model">· auto (limit)</span>` : ""}</span>`;
   /* B's model — the fleet's text-gen registry + free-text custom. "" = the
      hugpy package default (currently ${(bm && bm.default) || "Qwen~Qwen3-Coder-Next-GGUF"}). */
   const bCands = (bm && bm.candidates) || [];
   const bCur = (bm && bm.model) || "";
+  const [bCustom, setBCustom] = useState(null);       // inline custom editor for B (no window.prompt in Electron)
   const onBPick = (val) => {
-    if (val === "__custom__") {
-      const v = window.prompt("B model id (any fleet model key, e.g. Qwen~Qwen3-Coder-Next-GGUF; blank = package default):", bCur);
-      if (v === null) return;
-      return setBModel(v.trim());
-    }
+    if (val === "__custom__") { setBCustom(bCur || ""); return; }
     setBModel(val);
   };
-  const bModelSel = () => html`<select value=${bCur} disabled=${busy}
+  const bModelSel = () => bCustom !== null
+    ? html`<span style=${{ display: "inline-flex", gap: 4 }}>
+        <input type="text" autoFocus value=${bCustom} disabled=${busy} placeholder="fleet model key (blank = package default)"
+               style=${{ background: "var(--bg)", color: "var(--fg)", border: "1px solid var(--edge)", borderRadius: 4, padding: "2px 6px", fontSize: 12, minWidth: 260 }}
+               onInput=${e => setBCustom(e.target.value)}
+               onKeyDown=${e => { if (e.key === "Enter") { e.preventDefault(); const v = bCustom.trim(); setBCustom(null); setBModel(v); } if (e.key === "Escape") setBCustom(null); }} />
+        <button className="btn on" disabled=${busy} onClick=${() => { const v = bCustom.trim(); setBCustom(null); setBModel(v); }}>apply</button>
+        <button className="btn" disabled=${busy} onClick=${() => setBCustom(null)}>cancel</button>
+      </span>`
+    : html`<select value=${bCur} disabled=${busy}
       style=${{ background: "var(--bg)", color: "var(--fg)", border: "1px solid var(--edge)", borderRadius: 4, padding: "2px 6px", fontSize: 12, maxWidth: 320 }}
       onChange=${e => onBPick(e.target.value)}>
       <option value="">(package default${bm && bm.default ? ": " + bm.default : ""})</option>
@@ -6735,13 +7516,125 @@ function SeatPanel({ vm, section }) {
       ${bCur && !bCands.some(c => c.key === bCur) && html`<option value=${bCur}>${bCur} (custom)</option>`}
       <option value="__custom__">✎ custom…</option>
     </select>`;
+  /* the "🪑 seat — <locus> — grounded in … as …" header row that used to sit
+     here now lives in the steward bar (StewardDrawer) — it was the same line
+     under every tab (operator 2026-09-10). The panel self-refreshes every 10 s. */
+  const secBox = { border: "1px solid var(--edge)", borderRadius: 6, padding: 8, minWidth: 0 };
   return html`<div className="steward-seat" style=${seatBox}>
-    <div style=${{ display: "flex", alignItems: "center", gap: 8 }}>
-      <span style=${{ flex: 1, fontWeight: 600 }}>🪑 seat — ${locusLabel(vm)}
-        <span style=${{ fontWeight: 400, color: "var(--dim)" }}> — grounded in ${seat ? seat.grounded_in : "…"}${seat ? " as " + seat.seat_user : ""}</span></span>
-      <button className="btn" onClick=${load} title="refresh">↻</button>
-    </div>
-    ${err && html`<div style=${{ color: "var(--bad)", fontSize: 11, marginTop: 4 }}>error: ${err}</div>`}
+    ${err && html`<div style=${{ color: "var(--bad)", fontSize: 11, marginBottom: 4 }}>error: ${err}</div>`}
+    ${section === "session" && html`
+      ${seat && seatKV("frontier keeper", seat.frontier_enabled ? "Enabled" : "Disabled (nothing launches A)", seat.frontier_enabled ? "" : "steward-armed")}
+      ${/* board t5 (operator 2026-09-10): one bordered section per FRONTIER
+            BACKEND — model picker, delegate-only switch (t7), usage tracker,
+            prompt cache, and the seat's own controls (per-backend 🧹 wipe for
+            claude-code and mct; flight state for mct). Pickers write frontier-models.json (the
+            --model launch flag), never the ⚙ settings template. */""}
+      ${/* steward tabs (operator 2026-09-15): one tab per frontier backend —
+            Claude / GPT — the keeper provider's tab open by default, a manual
+            pick sticky for the page session; each tab = that seat's own
+            session + meter + live subagents. The MCT token tracker is gone
+            (mct is merged into the native session). */""}
+      <div style=${{ display: "flex", gap: 4, alignItems: "center", marginTop: 8 }}>
+        ${SEAT_TABS.map(([be, lbl, seatName]) => html`<button key=${be} className=${"btn" + (activeSeat === be ? " on" : "")} style=${{ fontSize: 11 }}
+              title=${seatName + (be === keeperBe ? " — the provider the console picked as keeper (this tab opens by default)" : "")}
+              onClick=${() => pickSeatTab(be)}>${lbl}${be === keeperBe ? " · keeper" : ""}</button>`)}
+        ${seatTab && keeperBe && seatTab !== keeperBe ? html`<button className="btn" style=${{ fontSize: 11, color: "var(--dim)" }} title="drop the manual pick — follow the keeper provider again" onClick=${() => pickSeatTab("")}>↩ follow keeper</button>` : null}
+      </div>
+      <div style=${{ display: "grid", gridTemplateColumns: "1fr", gap: 10, marginTop: 6, alignItems: "start" }}>
+        ${activeSeat === "claude-code" && html`<div className="steward-readout ds-card" style=${secBox}>
+          <div style=${{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 4 }}>
+            <span style=${{ fontWeight: 600 }}>🧠 claude-code — A, direct seat</span>
+            ${modelSel("claude-code")}
+            ${delegBox("claude-code")}
+          </div>
+          <div>${modelActive("claude-code")}</div>
+          <${LimitsBadge} lim=${lim} />
+          <${UsageBlock} backend="claude-code" showCache=${false} />
+          <${SeatMeter} vm=${vm} backend="claude-code" nowS=${nowS} />
+          <${RolloverMeter} vm=${vm} nowS=${nowS} />
+          <${AgentsBox} vm=${vm} backend="claude-code" nowS=${nowS} />
+          <div style=${{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
+            ${wipeConfirm !== "claude-code" && html`<button className="btn" disabled=${busy}
+                  style=${{ color: "var(--bad)", borderColor: "var(--bad)" }}
+                  onClick=${() => setWipeConfirm("claude-code")}
+                  title="kill this locus's keeper-claude session and delete ONLY claude-code's per-launch Claude state (~/.claude-sessions/*-frontier). The shared login (~/.claude.json, OAuth token) is preserved; the reborn Claude seat re-provisions from the surviving login">🧹 wipe claude-code</button>`}
+              ${wipeConfirm === "claude-code" && html`<button className="btn on" disabled=${busy} onClick=${() => wipeSeat("claude-code")}>yes, wipe claude-code</button>
+                <button className="btn" onClick=${() => setWipeConfirm(false)}>cancel</button>`}
+            </div>
+            ${wipeConfirm === "claude-code" && html`<div className="steward-thr-est">Wipe <b>claude-code</b>'s Claude state on <b>${locusLabel(vm)}</b>? Only its per-launch session dirs (<code>~/.claude-sessions/*-frontier</code>) are DELETED. The shared OAuth login and the MCT conversation archive are preserved.</div>`}
+        </div>`}
+        ${/* 2026-09-18 (operator): the "MCT conversation" explainer block was
+             removed along with the mct picker option. */""}
+        ${activeSeat === "codex" && html`<div className="steward-readout" style=${secBox}>
+          <div style=${{ fontWeight: 600, marginBottom: 4 }}>🧠 GPT — ChatGPT / Codex seat, settings and session tracker</div>
+          <${SeatMeter} vm=${vm} backend="codex" nowS=${nowS} />
+          <${AgentsBox} vm=${vm} backend="codex" nowS=${nowS} />
+          ${gpt && gpt.error && html`<div role="alert">${gpt.error}</div>`}
+          ${gpt && gpt.settings && (() => { const draft = gptDraft || gpt.settings; return html`
+          <div style=${{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", fontSize: 11 }}>
+            <label>Default model <input value=${draft.default_model || ""} disabled=${busy}
+              placeholder="Codex account default" aria-label="GPT default model"
+              onChange=${e => editGpt({ default_model: e.target.value })}
+              onKeyDown=${e => { if (e.key === "Enter") saveGpt(); }} /></label>
+            <label>Reasoning effort <select value=${draft.model_reasoning_effort || ""} disabled=${busy}
+              aria-label="GPT reasoning effort" onChange=${e => editGpt({ model_reasoning_effort: e.target.value })}>
+              ${(gpt.efforts || [""]).map(v => html`<option value=${v}>${v || "Model default"}</option>`)}
+            </select></label>
+            <label><input type="checkbox" checked=${!!draft.dangerous} disabled=${busy}
+              onChange=${e => editGpt({ dangerous: e.target.checked })} /> --dangerous (no sandbox or approval prompts)</label>
+            <button className="btn" disabled=${busy || !gptDraft} onClick=${saveGpt}>Save settings</button>
+          </div>`; })()}
+          ${gpt && gpt.session && html`<div style=${{ marginTop: 6, display: "grid", gridTemplateColumns: "max-content 1fr", gap: "2px 10px", fontSize: 11 }}>
+            ${seatKV("seat", gpt.session.seat || "keeper-codex")}
+            ${seatKV("state", gpt.session.alive ? "● running" : "○ offline", gpt.session.alive ? "" : "dim")}
+            ${seatKV("PID", gpt.session.pid || "—")}
+            ${seatKV("thread", gpt.session.thread_id || "—")}
+            ${seatKV("model", gpt.session.model || "—")}
+            ${seatKV("reasoning effort", gpt.session.model_reasoning_effort || "—")}
+            ${seatKV("sandbox", gpt.session.sandbox_mode || "—")}
+            ${seatKV("approval policy", gpt.session.approval_policy || "—")}
+            ${seatKV("activity", gpt.session.alive ? (gpt.session.busy === true ? "Working" : gpt.session.busy === false ? "Idle" : "Not observed") : "—")}
+            ${seatKV("total tokens", gpt.session.usage && gpt.session.usage.total_token_usage ? Number(gpt.session.usage.total_token_usage.total_tokens || 0).toLocaleString() : "—")}
+            ${seatKV("live permissions", gpt.session.alive ? (gpt.session.unrestricted === null ? "not observed" : gpt.session.unrestricted ? "unrestricted" : "see approval policy") : "—")}
+            ${seatKV("last activity", gpt.session.last_activity ? fmtTs(gpt.session.last_activity) : "—")}
+          </div>`}
+          <div style=${{ color: "var(--dim)", fontSize: 11, marginTop: 5 }}>Settings apply at the next launch; the current session keeps its existing settings. ${gpt && html`<details><summary>Launch command</summary><code>${gpt.launch || "Unavailable"}</code></details>`}</div>
+        </div>`}
+        <div className="steward-readout" style=${secBox}>
+          <div style=${{ fontWeight: 600, marginBottom: 4 }}>🧠 local keeper — B (mediation, todo triage, ✎ revise)</div>
+          <div style=${{ display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-start" }}>
+            ${bModelSel()}
+            <span style=${{ color: "var(--dim)", fontSize: 11 }}>active: <code>${(bm && bm.effective) || "…"}</code>${bm && !bm.model ? " (package default)" : ""}</span>
+          </div>
+        </div>
+      </div>
+      ${/* 2026-09-18 (operator): the "Session-scoped:" model-picker explainer
+           block was removed as clutter; the pickers themselves are kept above. */""}
+      <div className="steward-readout" style=${{ marginTop: 8, borderTop: "1px solid var(--edge)", paddingTop: 8 }}>
+        ${(() => {
+          if (!rstate) return html`<div style=${{ color: "var(--dim)", fontSize: 11 }}>🎯 rolling state — loading…</div>`;
+          if (!rstate.ok) return html`<div style=${{ color: "var(--dim)", fontSize: 11 }}>🎯 rolling state — ${rstate.error || "unavailable"}</div>`;
+          if (!rstate.exists) return html`<div style=${{ color: "var(--dim)", fontSize: 11 }}>🎯 rolling state — none yet for ${rstate.locus} (the fleet judge rolls every 10 min once the seat has turns)</div>`;
+          const st = rstate.state || {};
+          const age = rstate.age_s < 60 ? rstate.age_s + " s" : rstate.age_s < 3600 ? Math.floor(rstate.age_s / 60) + " min" : Math.floor(rstate.age_s / 3600) + " h";
+          return html`
+            <div style=${{ display: "flex", alignItems: "center", gap: 10 }}>
+              <span style=${{ fontWeight: 600 }}>🎯 rolling state</span>
+              <span style=${{ color: "var(--dim)", fontSize: 11 }}>${rstate.locus} · judged by ${rstate.model} · ${age} ago · ${rstate.n_exchanges} turns folded</span>
+              <span style=${{ marginLeft: "auto", display: "inline-flex", gap: 6 }}>
+                ${rstate.idle_relaunch && html`<span style=${{ color: "var(--dim)", fontSize: 11 }} title="server rule: seat at the prompt, no request for this long, init prompt newer than the seat → relaunch">auto-relaunch after ${rstate.idle_relaunch.minutes} min idle${rstate.idle_relaunch.would ? " · due" : ""}</span>`}
+                <button className=${"btn" + (rstate.init_prompt ? " on" : "")} disabled=${busy || !rstate.init_prompt || rstate.busy}
+                        title=${rstate.busy ? "the seat is working — not now" : "kill the current seat and start a fresh one on this init prompt"}
+                        onClick=${relaunch}>⟳ relaunch on init prompt</button>
+              </span>
+            </div>
+            <div style=${{ marginTop: 4 }}><b>objective:</b> ${st.objective || "—"}</div>
+            ${(st.next_steps || []).length > 0 && html`<div style=${{ color: "var(--dim)", fontSize: 11, marginTop: 2 }}>next: ${(st.next_steps || []).slice(0, 4).join(" · ")}</div>`}
+            ${(st.blockers || []).length > 0 && html`<div style=${{ color: "var(--warn)", fontSize: 11, marginTop: 2 }}>blocked: ${(st.blockers || []).slice(0, 3).join(" · ")}</div>`}
+            ${rstate.init_prompt && html`<details style=${{ marginTop: 4 }}><summary style=${{ cursor: "pointer", fontSize: 11, color: "var(--dim)" }}>init prompt ready (${rstate.init_prompt.length} chars)</summary>
+              <div style=${seatCode}>${rstate.init_prompt}</div></details>`}`;
+        })()}
+      </div>`}
     ${/* the old section === "models" block (retired 🧠 tab) merged into the
           "session" columns above, operator 2026-08-27 */""}
     ${seat && section === "login" && html`
@@ -6768,61 +7661,6 @@ function SeatPanel({ vm, section }) {
               "Headless alternative: `claude setup-token` elsewhere, then ANTHROPIC_API_KEY in the seat's env."]).map((s, i) => html`<li key=${i}>${s}</li>`)}
         </ol>`}
       </div>`}
-    ${/* "session" — the ACTIVE seat strip pinned atop the 🛡 session tab
-          (operator 2026-08-27): one column per running brain — claude-code |
-          MCT | local keeper — each with its session-scoped model picker in
-          its own column; A's 🧹 wipe sits below the claude-code dropdown.
-          Pickers write frontier-models.json / b-model.json (the --model
-          launch flag), never the ⚙ settings template's model key. */""}
-    ${seat && section === "session" && html`
-      <div className="steward-readout" style=${{ marginTop: 8 }}>
-        ${seatKV("frontier keeper", seat.frontier_enabled ? "Enabled" : "Disabled (nothing launches A)", seat.frontier_enabled ? "" : "steward-armed")}
-        <div style=${{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginTop: 8, alignItems: "start" }}>
-          <div style=${{ display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-start" }}>
-            <span className="steward-k" style=${{ fontWeight: 600 }}>claude-code — A, direct seat</span>
-            ${modelSel("claude-code")}
-            ${modelActive("claude-code")}
-            <div style=${{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
-              ${!wipeConfirm && html`<button className="btn" disabled=${busy}
-                  style=${{ color: "var(--bad)", borderColor: "var(--bad)" }}
-                  onClick=${() => setWipeConfirm(true)}
-                  title="kill this locus's keeper-claude session and delete A's claude state: ~/.claude-seat/frontier plus state dirs under ~/.claude. OAuth credentials and onboarding (~/.claude/.credentials.json, .claude.json) survive, so the reborn seat logs itself back in with freshly templated settings">🧹 wipe seat (full)</button>`}
-              ${wipeConfirm && html`<button className="btn on" disabled=${busy} onClick=${wipeSeat}>yes, wipe + relaunch</button>
-                <button className="btn" onClick=${() => setWipeConfirm(false)}>cancel</button>`}
-            </div>
-            ${wipeConfirm && html`<div className="steward-thr-est">Wipe A's claude state on <b>${locusLabel(vm)}</b>? Sessions, projects (incl. A's memory), todos and caches are DELETED. OAuth login and the ⚙ settings template survive and re-apply at relaunch.</div>`}
-          </div>
-          <div style=${{ display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-start" }}>
-            <span className="steward-k" style=${{ fontWeight: 600 }}>mct — pointer exchange (THE mct, promoted 2026-08-27)</span>
-            ${modelSel("mct")}
-            ${modelActive("mct")}
-            ${/* live flight state — mirror of the REPL's <ws>/status.json
-                  (written by mct2_repl.py's Arbiter on every state change,
-                  served by /api/mct2/status, refreshed on this panel's 10s
-                  poll): is A working a turn, and which queries wait on it */""}
-            ${m2s && m2s.present && html`<div style=${{ fontSize: 11, marginTop: 2, display: "flex", flexDirection: "column", gap: 2, alignItems: "flex-start" }}>
-              ${m2s.state === "working"
-                ? html`<span style=${{ color: "var(--warn)" }}>⏳ A working — ${m2s.turn}${m2s.since ? " · " + Math.max(0, Math.round(Date.now() / 1000 - m2s.since)) + "s" : ""}</span>`
-                : m2s.state === "idle" && m2s.alive
-                ? html`<span style=${{ color: "var(--dim)" }}>● idle${m2s.session_id ? " · history kept (" + String(m2s.session_id).slice(0, 8) + "…)" : " · fresh session"}</span>`
-                : html`<span style=${{ color: "var(--dim)" }}>○ REPL offline</span>`}
-              ${(() => {
-                const p = m2s.pending || {};
-                const q = [...(p.coalesced || []).map(t => "⇄ " + t), ...(p.appended || []).map(t => "⊕ " + t)];
-                if (p.reconcile) q.push("✋ reconcile brief held (" + p.reconcile + ")");
-                return q.length ? html`<div style=${{ color: "var(--dim)" }}>pending ${q.length}:${q.map((t, i) => html`<div key=${i} style=${{ paddingLeft: 8, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", maxWidth: "26ch" }}>${t.length > 90 ? t.slice(0, 90) + "…" : t}</div>`)}</div>` : null;
-              })()}
-            </div>`}
-          </div>
-          <div style=${{ display: "flex", flexDirection: "column", gap: 4, alignItems: "flex-start" }}>
-            <span className="steward-k" style=${{ fontWeight: 600 }}>local keeper — B (mediation, todo triage, ✎ revise)</span>
-            ${bModelSel()}
-            <span style=${{ color: "var(--dim)", fontSize: 11 }}>active: <code>${(bm && bm.effective) || "…"}</code>${bm && !bm.model ? " (package default)" : ""}</span>
-          </div>
-        </div>
-        <div className="steward-thr-est"><b>Session-scoped:</b> these pickers set the model each seat LAUNCHES with (its <code>--model</code> flag, which wins for that session) — they never touch the ⚙ settings template's <code>model</code> key, and saving settings never changes these. The dropdown is a shortcut, not a limit — <b>✎ custom…</b> takes any id, applied at that seat's NEXT launch (<code>/model</code> in the MCT REPL overrides for one session). B model: console calls change immediately; the mct seat/daemon pick it up at next launch (mirrored to <code>${(bm && bm.agent_env) || "agent.env"}</code>).</div>
-      </div>
-    `}
     ${section === "directive" && html`
     <div style=${{ display: "flex", alignItems: "center", gap: 8, marginTop: 10 }}>
       <span style=${{ flex: 1, fontWeight: 600 }}>📜 frontier directive
@@ -6854,19 +7692,20 @@ function SeatPanel({ vm, section }) {
           ${Object.keys(seat.launch).map(k => html`<div key=${k}><span className="steward-k">${k}</span><div style=${seatCode}>${seat.launch[k]}</div></div>`)}`}
       </div>`}
     <div style=${{ display: "flex", alignItems: "center", gap: 8, marginTop: 14 }}>
-      <span style=${{ flex: 1, fontWeight: 600 }}>📄 frontier handoff
-        <span style=${{ fontWeight: 400, color: "var(--dim)" }}> — the letter a retiring A seat leaves for its reborn successor · ${hand ? hand.path : "~/.config/hugpy-station/frontier-handoff.md"}${hand && !hand.exists ? " · none on file" : ""}${hand && hand.exists && hand.mtime ? " · saved " + new Date(hand.mtime * 1000).toLocaleString() : ""}${hdirty ? " · unsaved" : ""}</span></span>
-      <button className="btn" disabled=${busy || !hand || !hand.exists} onClick=${deleteHandoff} title="delete the handoff file (none on file)">delete</button>
+      <span style=${{ flex: 1, fontWeight: 600 }}>🚀 session init prompt (frontier handoff)
+        <span style=${{ fontWeight: 400, color: "var(--dim)" }}> — handed to the NEXT frontier seat at launch, with the directive; consumed once · ${hand && hand.exists ? "pending" : "none pending"}${hand && hand.exists && hand.mtime ? " · written " + new Date(hand.mtime * 1000).toLocaleString() : ""}${hdirty ? " · unsaved" : ""}</span></span>
+      <button className="btn" disabled=${busy || !hand || !hand.exists} onClick=${deleteHandoff} title="discard the pending init prompt">discard</button>
       <button className=${"btn" + (hdirty ? " on" : "")} disabled=${busy || !hdirty} onClick=${saveHandoff}>${busy ? "…" : "save"}</button>
     </div>
     <textarea value=${htext === null ? "" : htext} disabled=${htext === null || busy}
       onInput=${e => { setHtext(e.target.value); setNote(null); }} rows=${8}
-      placeholder="No handoff on file. A retiring seat (or the operator) writes here what the next seat must know — the shipped directive points a fresh seat at this file."
+      placeholder="Nothing pending. Write here what the next frontier seat must start with (a task, a state summary, a handoff from a retiring seat). It rides along with the frontier directive at that seat's launch, then this field clears."
       style=${{ width: "100%", marginTop: 6, boxSizing: "border-box", resize: "vertical", fontFamily: "ui-monospace, monospace", fontSize: 11,
                 background: "var(--panel, #0b1622)", color: "var(--fg, #cde)", border: "1px solid var(--edge)", borderRadius: 4, padding: 6 }} />
     <div className="steward-thr-est">
-      Fixed-path mailbox, never injected into a prompt: the shipped directive tells A to read
-      <b> ~/.config/hugpy-station/frontier-handoff.md</b> at rebirth (e.g. after 🧹 wipe). Saves land in the file immediately.
+      Per-session start prompt (1.0.65): at the next launch of a frontier seat (claude-code: appended to
+      the system prompt after the directive; mct: composed into operator-guidance.md) the text is handed
+      off and the file <b>${hand ? hand.path : "~/.config/hugpy-station/frontier-handoff.md"}</b> is removed — it never lingers into a later session.
     </div>
     `}
     ${note && html`<div style=${{ color: "var(--warn)", fontSize: 11, marginTop: 4 }}>✓ ${note}</div>`}
@@ -7233,12 +8072,15 @@ function FrontierFsSwitch() {
       <span style=${{ flex: 1, fontWeight: 600 }}>${allowed ? "📂" : "🔒"} frontier file access (fs switch)
         <span style=${{ fontWeight: 400, color: allowed ? "var(--warn)" : "var(--dim)" }}> — ${stateText}</span>
       </span>
+      ${allowed === null && err && html`<button className="btn" disabled=${busy} onClick=${load}
+        title="the fs-policy probe failed (see the message below) — probe again">↻ retry</button>`}
       <button className=${"btn" + (allowed ? " on" : "")}
         style=${allowed ? { background: "var(--warn)", color: "#04101f", borderColor: "var(--warn)" } : undefined}
         disabled=${busy || allowed === null} onClick=${flip}
-        title=${allowed ? "Disallow the frontier model's filesystem access"
+        title=${allowed === null ? (err ? "greyed: the probe failed — " + err : "greyed: probing…")
+              : allowed ? "Disallow the frontier model's filesystem access"
                         : "Allow the frontier model's filesystem access"}>${
-        busy ? "…" : (allowed ? "disallow" : "allow")}</button>
+        busy ? "…" : (allowed === null ? (err ? "unavailable" : "…") : (allowed ? "disallow" : "allow"))}</button>
     </div>
     <div style=${{ color: err ? "var(--bad)" : "var(--dim)", marginTop: 6, fontSize: 11 }}>${
       err ? ("error: " + err)
@@ -7503,6 +8345,17 @@ function SessionTodoDrawer() {
   const add = () => { const t = text.trim(); if (!t || busy) return; setText(""); op({ op: "add", type, text: t, priority: prio }); setPrio("low"); };
   const cycle = (it) => op({ op: "set", id: it.id, status: it.status === "open" ? "doing" : it.status === "doing" ? "done" : "open" });
   const toggleDone = (it) => op({ op: "set", id: it.id, status: it.status === "done" ? "open" : "done" });
+  /* 📨 per-item keeper ping (board t2, operator 2026-09-10): POST /api/mct/todo/ping
+     types one line naming this item into the live frontier seat. Not a board
+     mutation — the row shows a short ack/error under itself for a few seconds. */
+  const [pingNote, setPingNote] = useState(null);      // {id, msg, bad}
+  const ping = (it) => {
+    setPingNote({ id: it.id, msg: "📨 pinging…" });
+    api("/api/mct/todo/ping", { method: "POST", timeout: 20000, body: JSON.stringify({ id: it.id }) })
+      .then(d => setPingNote({ id: it.id, msg: d.ok ? "📨 pinged " + (d.session || "the keeper") : (d.error || "ping failed"), bad: !d.ok }))
+      .catch(e => setPingNote({ id: it.id, msg: e.message || "ping failed", bad: true }))
+      .finally(() => setTimeout(() => setPingNote(n => (n && n.id === it.id ? null : n)), 6000));
+  };
   const remove = (it) => op({ op: "remove", id: it.id });
   const resolve = (it, v) => op({ op: "resolve", id: it.id, verdict: v });
   /* status FLAG (docs/flows/todo-push-triage): drives B's push triage
@@ -7563,10 +8416,12 @@ function SessionTodoDrawer() {
           <option value="low">–</option><option value="medium">med</option><option value="high">HIGH</option></select>
         ${flagSel(it)}
         <button className="btn" title="✨ reword" disabled=${busy} onClick=${() => runAssist(it, "reword")} style=${{ fontSize: 11, padding: "0 4px" }}>✨</button>
+        <button className="btn" title="📨 ping the keeper about this item (types a line into the frontier seat)" disabled=${busy} onClick=${() => ping(it)} style=${{ fontSize: 11, padding: "0 4px" }}>📨</button>
         <button className=${"btn" + (threadOpen[it.id] ? " on" : "")} title="comments" onClick=${() => setThreadOpen(o => ({ ...o, [it.id]: !o[it.id] }))} style=${{ fontSize: 10, padding: "0 5px" }}>💬${it.comments && it.comments.length ? " " + it.comments.length : ""}</button>
         <button className="btn" title="remove" onClick=${() => remove(it)} style=${{ fontSize: 11, padding: "0 5px" }}>×</button>
       </div>
     </div>
+    ${pingNote && pingNote.id === it.id && html`<div style=${{ margin: "2px 0 0 24px", fontSize: 10, color: pingNote.bad ? "var(--bad)" : "var(--ok)" }}>${pingNote.msg}</div>`}
     ${assist && assist.id === it.id && html`<div style=${{ margin: "4px 0 4px 24px", padding: 6, border: "1px dashed var(--warn)", borderRadius: 4, fontSize: 11 }}>
       ${assist.state === "loading" ? html`<span style=${{ color: "var(--dim)" }}>✨ ${assist.mode}…</span>`
         : assist.state === "error" ? html`<span style=${{ color: "var(--bad)" }}>${assist.result}</span>`
@@ -7647,12 +8502,20 @@ function LiveView() {
     api("/api/mct/live").then(d => { setTurns(d.turns || []); setErr(null); }).catch(e => setErr(e.message || "load failed"));
   }, []);
   useEffect(() => { load(); const t = setInterval(load, 4000); return () => clearInterval(t); }, [load]);
-  const toggle = (file) => {
-    if (open[file]) { setOpen(o => { const n = { ...o }; delete n[file]; return n; }); return; }
-    setOpen(o => ({ ...o, [file]: "loading" }));
-    api("/api/mct2/exchange?file=" + encodeURIComponent(file))
-      .then(d => setOpen(o => (o[file] ? { ...o, [file]: { content: d.content || "" } } : o)))
-      .catch(e => setOpen(o => (o[file] ? { ...o, [file]: { error: e.message || "load failed" } } : o)));
+  /* mct v2: a ledger event carries a POINTER (e.handle = mct://…) — its body is
+     pulled on demand from the ledger (/api/mct/live/object), never inlined in
+     the turn log. Legacy exchange-file events keep the mct2 file path. */
+  const keyOf = (e) => e.handle || e.file;
+  const toggle = (e) => {
+    const k = keyOf(e); if (!k) return;
+    if (open[k]) { setOpen(o => { const n = { ...o }; delete n[k]; return n; }); return; }
+    setOpen(o => ({ ...o, [k]: "loading" }));
+    const req = e.handle
+      ? api("/api/mct/live/object?handle=" + encodeURIComponent(e.handle))
+          .then(d => ({ content: d.textual ? (d.content || "") + (d.truncated ? "\n… (truncated)" : "") : "(binary " + (d.mime || "") + ", " + (d.size || 0) + " bytes — download via " + d.download + ")" }))
+      : api("/api/mct2/exchange?file=" + encodeURIComponent(e.file)).then(d => ({ content: d.content || "" }));
+    req.then(r => setOpen(o => (o[k] ? { ...o, [k]: r } : o)))
+       .catch(err => setOpen(o => (o[k] ? { ...o, [k]: { error: err.message || "load failed" } } : o)));
   };
   const who = (a) => (a || "").split(".")[0];
   const color = (a) => { const w = who(a); return w === "A" ? "var(--warn)" : w === "C" ? "var(--ok)" : "var(--dim)"; };
@@ -7663,20 +8526,259 @@ function LiveView() {
     ${(turns || []).map(t => html`<div key=${(t.backend || "") + t.turn_id} style=${{ marginBottom: 10, borderLeft: "2px solid var(--edge)", paddingLeft: 8 }}>
       <div style=${{ fontWeight: 600 }}>${t.turn_id}<span style=${{ color: "var(--dim)", fontWeight: 400, fontSize: 10 }}>${t.backend ? " · " + t.backend : ""} · ${t.state} · ${(t.created_at || "").slice(11, 19)}</span></div>
       ${(t.events || []).map((e, i) => html`<div key=${i}>
-        <div style=${{ display: "flex", gap: 6, lineHeight: 1.4, alignItems: "baseline", cursor: e.file ? "pointer" : "default" }}
-             title=${e.file ? (open[e.file] ? "collapse" : "click to show the file's contents") : ""}
-             onClick=${e.file ? (() => toggle(e.file)) : undefined}>
+        <div style=${{ display: "flex", gap: 6, lineHeight: 1.4, alignItems: "baseline", cursor: keyOf(e) ? "pointer" : "default" }}
+             title=${keyOf(e) ? (open[keyOf(e)] ? "collapse" : (e.handle ? "click to pull this object from the ledger" : "click to show the file's contents")) : (e.note || "")}
+             onClick=${keyOf(e) ? (() => toggle(e)) : undefined}>
           <span style=${{ color: color(e.actor), minWidth: 96, fontSize: 10, flex: "none" }}>${e.actor || "?"}</span>
-          <span style=${{ flex: "none" }}>${e.type}</span>
-          ${e.path && html`<span style=${{ color: "var(--dim)", fontSize: 10, flex: "none" }}>${open[e.file] ? "▾" : "▸"}</span>
-          <span style=${{ color: "var(--dim)", fontSize: 10, fontFamily: "ui-monospace,SFMono-Regular,monospace", minWidth: 0, flex: "1 1 auto", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", direction: "rtl", unicodeBidi: "plaintext", textAlign: "left" }}>${e.path}</span>`}
+          <span style=${{ flex: "none" }}>${e.type}${e.file && e.handle ? " · " + e.file : ""}${e.origin === "seat" ? " · pushed" : ""}</span>
+          ${(e.path || e.handle) && html`<span style=${{ color: "var(--dim)", fontSize: 10, flex: "none" }}>${open[keyOf(e)] ? "▾" : "▸"}</span>
+          <span style=${{ color: "var(--dim)", fontSize: 10, fontFamily: "ui-monospace,SFMono-Regular,monospace", minWidth: 0, flex: "1 1 auto", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", direction: "rtl", unicodeBidi: "plaintext", textAlign: "left" }}>${e.handle || e.path}${e.size != null ? " · " + e.size + " B" : ""}</span>`}
+          ${e.note && !e.handle && html`<span style=${{ color: "var(--dim)", fontSize: 10, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>${e.note}</span>`}
         </div>
-        ${e.file && open[e.file] && html`<pre style=${{ margin: "2px 0 6px 102px", padding: "6px 8px", border: "1px solid var(--edge)", borderRadius: 5, background: "rgba(255,255,255,.02)", maxHeight: 260, overflow: "auto", whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontSize: 11, lineHeight: 1.45 }}>${
-            open[e.file] === "loading" ? "loading…"
-            : open[e.file].error ? "error: " + open[e.file].error
-            : open[e.file].content || "(empty file)"}</pre>`}
+        ${keyOf(e) && open[keyOf(e)] && html`<pre style=${{ margin: "2px 0 6px 102px", padding: "6px 8px", border: "1px solid var(--edge)", borderRadius: 5, background: "rgba(255,255,255,.02)", maxHeight: 260, overflow: "auto", whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontSize: 11, lineHeight: 1.45 }}>${
+            open[keyOf(e)] === "loading" ? "loading…"
+            : open[keyOf(e)].error ? "error: " + open[keyOf(e)].error
+            : open[keyOf(e)].content || "(empty)"}</pre>`}
       </div>`)}
     </div>`)}
+  </div>`;
+}
+
+/* 📜 log — the console backend's own live log (board t1, operator 2026-09-10:
+   "a live log feed something similar to journalctl -f but specific for the
+   console"). Backlog from GET /api/steward/log, then SSE /api/steward/log/stream
+   (EventSource reconnects on its own; `after` resumes from the last seq seen so
+   a reconnect never duplicates or drops a line). Level + text filters are
+   client-side over what is held; pause queues new lines and lands them on
+   resume; follow pins the view to the newest line and releases when the
+   operator scrolls up. */
+const LOG_LEVEL_RANK = { DEBUG: 10, INFO: 20, WARNING: 30, ERROR: 40, CRITICAL: 50 };
+function LogFeed() {
+  const [rows, setRows] = useState([]);
+  const [err, setErr] = useState(null);
+  const [level, setLevel] = useState("INFO");
+  const [q, setQ] = useState("");
+  const [follow, setFollow] = useState(true);
+  const [paused, setPaused] = useState(false);
+  const boxRef = React.useRef(null);
+  const lastSeq = React.useRef(0);
+  const pausedRef = React.useRef(false);
+  const pending = React.useRef([]);
+  useEffect(() => {
+    pausedRef.current = paused;
+    if (!paused && pending.current.length) { const p = pending.current; pending.current = []; setRows(r => r.concat(p).slice(-3000)); }
+  }, [paused]);
+  useEffect(() => {
+    let es = null, dead = false;
+    api("/api/steward/log?tail=400").then(d => {
+      if (dead) return;
+      const rs = d.rows || [];
+      setRows(rs); if (rs.length) lastSeq.current = rs[rs.length - 1].seq; setErr(null);
+      es = new EventSource("/api/steward/log/stream?after=" + lastSeq.current);
+      es.addEventListener("log", (ev) => {
+        let doc; try { doc = JSON.parse(ev.data); } catch (_) { return; }
+        if (!doc || !(doc.seq > lastSeq.current)) return;
+        lastSeq.current = doc.seq;
+        if (pausedRef.current) { pending.current.push(doc); return; }
+        setRows(r => r.concat([doc]).slice(-3000));
+      });
+      es.onerror = () => setErr("stream reconnecting…");
+      es.onopen = () => setErr(null);
+    }).catch(e => setErr(e.message || "load failed"));
+    return () => { dead = true; if (es) es.close(); };
+  }, []);
+  useEffect(() => { if (follow && boxRef.current) boxRef.current.scrollTop = boxRef.current.scrollHeight; }, [rows, follow]);
+  const min = LOG_LEVEL_RANK[level] || 0;
+  const needle = q.trim().toLowerCase();
+  const shown = rows.filter(r => (LOG_LEVEL_RANK[r.level] || 0) >= min && (!needle || (r.name + " " + r.msg).toLowerCase().includes(needle)));
+  const color = (l) => (l === "ERROR" || l === "CRITICAL") ? "var(--bad)" : l === "WARNING" ? "var(--warn)" : l === "DEBUG" ? "var(--dim)" : "var(--fg, #cde)";
+  const hhmmss = (ts) => new Date(ts * 1000).toTimeString().slice(0, 8);
+  const sel = { fontSize: 10, background: "var(--bg)", color: "var(--fg)", border: "1px solid var(--edge)", borderRadius: 3 };
+  return html`<div style=${{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+    <div style=${{ display: "flex", gap: 6, alignItems: "center", padding: "4px 8px", borderBottom: "1px solid var(--edge)", flex: "none", fontSize: 11 }}>
+      <select value=${level} onChange=${e => setLevel(e.target.value)} style=${sel}>
+        <option value="DEBUG">debug+</option><option value="INFO">info+</option><option value="WARNING">warn+</option><option value="ERROR">error+</option></select>
+      <input value=${q} onInput=${e => setQ(e.target.value)} placeholder="filter (logger name or text)" style=${{ ...sel, flex: 1, minWidth: 0, fontSize: 11, padding: "1px 5px" }} />
+      <button className=${"btn" + (follow ? " on" : "")} title="pin the view to the newest line" onClick=${() => setFollow(f => !f)} style=${{ fontSize: 10 }}>follow</button>
+      <button className=${"btn" + (paused ? " on" : "")} title="hold new lines (they queue and land on resume)" onClick=${() => setPaused(p => !p)} style=${{ fontSize: 10 }}>${paused ? "resume" : "pause"}</button>
+      <button className="btn" title="clear the view (the server keeps its ring)" onClick=${() => setRows([])} style=${{ fontSize: 10 }}>clear</button>
+      <span style=${{ color: "var(--dim)", fontSize: 10, flex: "none" }}>${shown.length}/${rows.length}</span>
+    </div>
+    ${err && html`<div style=${{ color: "var(--warn)", padding: "2px 8px", fontSize: 10 }}>${err}</div>`}
+    <div ref=${boxRef}
+         onScroll=${e => { const el = e.target; if (follow && el.scrollHeight - el.scrollTop - el.clientHeight > 8) setFollow(false); }}
+         style=${{ flex: 1, minHeight: 0, overflowY: "auto", padding: "4px 8px", fontFamily: "ui-monospace,SFMono-Regular,monospace", fontSize: 11, lineHeight: 1.4 }}>
+      ${rows.length === 0 && !err && html`<div style=${{ color: "var(--dim)" }}>no log lines yet — the backend's own records (station.* loggers, audit, library warnings) stream here as they happen.</div>`}
+      ${shown.map(r => html`<div key=${r.seq} style=${{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", color: color(r.level) }}><span style=${{ color: "var(--dim)" }}>${hhmmss(r.ts)}</span> <span style=${{ fontWeight: (r.level === "ERROR" || r.level === "CRITICAL") ? 700 : 400 }}>${(r.level || "").slice(0, 4)}</span> <span style=${{ color: "var(--accent)" }}>${r.name}</span> ${r.msg}</div>`)}
+    </div>
+  </div>`;
+}
+
+/* 📜 journal — a live `journalctl -f` of the LOCUS's STATION KEEPER USER
+   (operator 2026-09-15: "the log, it should be a journalctl -f of the station's
+   keeper user"). What it used to show — this console backend's OWN python log
+   ring — is still one click away behind `console ring`, but the default source
+   is now the locus home itself: the station unit, the seat scopes, everything
+   that user's journal carries. ONE SSE per panel
+   (/api/locus/journal/stream?vm=&after=SEQ): a `meta` event with the RESOLVED
+   source (user, unit, user-vs-system, the exact command) then one `line` per
+   journal line, the server's bounded ring backfilling a reconnect — `after` +
+   the seq guard mean a resume never gaps or duplicates. A line the server
+   marks kind="error" is journald's OWN refusal (e.g. "users in groups 'adm',
+   'systemd-journal' can see all messages"): it is rendered IN the panel,
+   because an empty view would not say why. */
+const JRN_BAD = /\b(error|errors|fail|failed|failing|fatal|denied|refused|traceback|exception|429)\b/i;
+const JRN_WARN = /\b(warn|warning|retry|retrying|timeout|timed out)\b/i;
+function JournalFeed({ vm }) {
+  const [rows, setRows] = useState([]);
+  const [src, setSrc] = useState(null);
+  const [err, setErr] = useState(null);
+  const [q, setQ] = useState("");
+  const [follow, setFollow] = useState(true);
+  const [paused, setPaused] = useState(false);
+  const [mode, setMode] = useState("journal");
+  const boxRef = React.useRef(null);
+  const lastSeq = React.useRef(0);
+  const pausedRef = React.useRef(false);
+  const pending = React.useRef([]);
+  useEffect(() => {
+    pausedRef.current = paused;
+    if (!paused && pending.current.length) { const p = pending.current; pending.current = []; setRows(r => r.concat(p).slice(-3000)); }
+  }, [paused]);
+  useEffect(() => {
+    if (mode !== "journal") return undefined;
+    setRows([]); setSrc(null); setErr(null); lastSeq.current = 0; pending.current = [];
+    const es = new EventSource("/api/locus/journal/stream?vm=" + encodeURIComponent(vm || "") + "&after=0");
+    es.addEventListener("meta", ev => { try { setSrc(JSON.parse(ev.data).source || null); } catch (_) { /* keep the last */ } });
+    es.addEventListener("line", ev => {
+      let d; try { d = JSON.parse(ev.data); } catch (_) { return; }
+      // the browser's own reconnect replays the ring from after=0 — the seq
+      // guard is what makes that idempotent.
+      if (!d || !(d.seq > lastSeq.current)) return;
+      lastSeq.current = d.seq;
+      if (pausedRef.current) { pending.current.push(d); return; }
+      setRows(r => r.concat([d]).slice(-3000));
+    });
+    es.onerror = () => setErr("stream reconnecting…");
+    es.onopen = () => setErr(null);
+    return () => es.close();
+  }, [vm, mode]);
+  useEffect(() => { if (follow && boxRef.current) boxRef.current.scrollTop = boxRef.current.scrollHeight; }, [rows, follow]);
+  const needle = q.trim().toLowerCase();
+  const shown = rows.filter(r => !needle || (r.line || "").toLowerCase().includes(needle));
+  const color = (r) => r.kind === "error" ? "var(--bad)" : r.kind === "meta" ? "var(--dim)"
+    : JRN_BAD.test(r.line) ? "var(--bad)" : JRN_WARN.test(r.line) ? "var(--warn)" : "var(--fg, #cde)";
+  const sel = { fontSize: 10, background: "var(--bg)", color: "var(--fg)", border: "1px solid var(--edge)", borderRadius: 3 };
+  return html`<div style=${{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+    <div style=${{ display: "flex", gap: 6, alignItems: "center", padding: "4px 8px", borderBottom: "1px solid var(--edge)", flex: "none", fontSize: 11 }}>
+      <button className=${"btn" + (mode === "journal" ? " on" : "")} title="journalctl -f of this locus's station keeper user" onClick=${() => setMode("journal")} style=${{ fontSize: 10 }}>journal</button>
+      <button className=${"btn" + (mode === "console" ? " on" : "")} title="this console backend's own log records (the old 📜 source)" onClick=${() => setMode("console")} style=${{ fontSize: 10 }}>console ring</button>
+      ${mode === "journal" && html`
+        <span title=${(src && src.cmd) || "resolving the station keeper user on this locus…"}
+              style=${{ color: "var(--accent)", fontFamily: "ui-monospace,SFMono-Regular,monospace", fontSize: 10, flex: "none" }}>
+          ${src ? src.label : "resolving…"}</span>
+        <input value=${q} onInput=${e => setQ(e.target.value)} placeholder="filter" style=${{ ...sel, flex: 1, minWidth: 0, fontSize: 11, padding: "1px 5px" }} />
+        <button className=${"btn" + (follow ? " on" : "")} title="pin the view to the newest line" onClick=${() => setFollow(f => !f)} style=${{ fontSize: 10 }}>follow</button>
+        <button className=${"btn" + (paused ? " on" : "")} title="hold new lines (they queue and land on resume)" onClick=${() => setPaused(p => !p)} style=${{ fontSize: 10 }}>${paused ? "resume" : "pause"}</button>
+        <span style=${{ color: "var(--dim)", fontSize: 10, flex: "none" }}>${shown.length}/${rows.length}</span>`}
+    </div>
+    ${mode === "console" ? html`<${LogFeed} />` : html`
+      ${err && html`<div style=${{ color: "var(--warn)", padding: "2px 8px", fontSize: 10 }}>${err}</div>`}
+      ${src && !src.ok && html`<div style=${{ color: "var(--bad)", padding: "4px 8px", fontSize: 10 }}>
+        cannot resolve the station keeper user on ${src.locus || "this locus"}: ${src.error}</div>`}
+      <div ref=${boxRef}
+           onScroll=${e => { const el = e.target; if (follow && el.scrollHeight - el.scrollTop - el.clientHeight > 8) setFollow(false); }}
+           style=${{ flex: 1, minHeight: 0, overflowY: "auto", padding: "4px 8px", fontFamily: "ui-monospace,SFMono-Regular,monospace", fontSize: 11, lineHeight: 1.4 }}>
+        ${rows.length === 0 && html`<div style=${{ color: "var(--dim)" }}>waiting for the journal — the last ${"200"} lines arrive first, then every new one as it lands.</div>`}
+        ${shown.map(r => html`<div key=${r.seq} style=${{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", color: color(r) }}>${r.kind === "meta" ? "· " : ""}${r.line}</div>`)}
+      </div>`}
+  </div>`;
+}
+
+/* 🐞 bug scan — an INTERMITTENT LOCAL-AGENT REVIEW of the locus's logs
+   (operator 2026-09-15: "the bug scan should be an intermittent local agent
+   review of the logs, to identify any running problems within the locus
+   home"). The station's own scheduler hands the last window of the SAME
+   journal the 📜 tab follows — plus the console backend's warnings and the
+   seat panes' error tails — to B (the LOCAL keeper seat, never the frontier)
+   under a fixed review prompt, and persists the JSON findings. This panel is a
+   read-mostly window on /api/bugscan plus the three controls the operator
+   asked for: on/off, the interval, and "scan now" (which only QUEUES — a
+   review takes as long as B takes, so the next 15 s poll shows it). Findings
+   are deduped server-side by a subject hash, so a recurring problem is ONE row
+   with a run count, and raw evidence stays collapsed until asked for. The
+   VM-side sidecar scanner (bugreport.v1 — the "report a bug" flow) is
+   unchanged and one click away as `sidecar`. */
+const BUGSCAN_SEV = { high: "var(--bad)", medium: "var(--warn)", low: "var(--dim)" };
+const BUGSCAN_EVERY = [[300, "5m"], [600, "10m"], [1800, "30m"], [3600, "1h"], [21600, "6h"]];
+function BugScanPanel({ vm }) {
+  const [st, setSt] = useState(null);
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [open, setOpen] = useState({});
+  const [view, setView] = useState("scan");
+  const load = React.useCallback(() => api("/api/bugscan?vm=" + encodeURIComponent(vm || ""))
+    .then(d => { setSt(d); setErr(null); })
+    .catch(e => setErr(e.message || "load failed")), [vm]);
+  useEffect(() => {
+    if (view !== "scan") return undefined;
+    load();
+    // live, but never from a backgrounded tab — the review itself runs on the
+    // server's clock; this poll only reads what it has already written.
+    const id = setInterval(() => { if (document.visibilityState !== "hidden") load(); }, 15000);
+    const onVis = () => { if (document.visibilityState === "visible") load(); };
+    document.addEventListener("visibilitychange", onVis);
+    return () => { clearInterval(id); document.removeEventListener("visibilitychange", onVis); };
+  }, [load, view]);
+  const post = (body) => {
+    setBusy(true);
+    return api("/api/bugscan", { method: "POST", body: JSON.stringify({ vm: vm || "", ...body }) })
+      .then(d => { setSt(d); setErr(null); })
+      .catch(e => setErr(e.message || "failed"))
+      .finally(() => setBusy(false));
+  };
+  const findings = (st && st.findings) || [];
+  const sel = { fontSize: 10, background: "var(--bg)", color: "var(--fg)", border: "1px solid var(--edge)", borderRadius: 3 };
+  return html`<div style=${{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+    <div style=${{ display: "flex", gap: 6, alignItems: "center", padding: "4px 8px", borderBottom: "1px solid var(--edge)", flex: "none", fontSize: 11, flexWrap: "wrap" }}>
+      <button className=${"btn" + (view === "scan" ? " on" : "")} title="the local keeper's intermittent review of this locus's logs" onClick=${() => setView("scan")} style=${{ fontSize: 10 }}>review</button>
+      ${vm && html`<button className=${"btn" + (view === "sidecar" ? " on" : "")} title="the VM-side log/process scanner (bugreport.v1) — the report-a-bug flow" onClick=${() => setView("sidecar")} style=${{ fontSize: 10 }}>sidecar</button>`}
+      ${view === "scan" && html`
+        <button className=${"btn" + (st && st.on ? " on" : "")} disabled=${busy || !st}
+                title="run the review on a timer for this locus" onClick=${() => post({ op: st && st.on ? "off" : "on" })}
+                style=${{ fontSize: 10 }}>${st && st.on ? "on" : "off"}</button>
+        <select value=${String((st && st.interval) || 600)} disabled=${busy || !st} style=${sel}
+                onChange=${e => post({ op: "interval", interval: Number(e.target.value) })}>
+          ${BUGSCAN_EVERY.map(([s, lbl]) => html`<option key=${s} value=${String(s)}>every ${lbl}</option>`)}
+        </select>
+        <button className="btn" disabled=${busy || !st || (st && st.running)}
+                title="queue a review right now (it finishes when B finishes)" onClick=${() => post({ op: "now" })}
+                style=${{ fontSize: 10 }}>${st && st.running ? "reviewing…" : "scan now"}</button>
+        <span style=${{ color: "var(--dim)", fontSize: 10 }} title=${(st && st.source && st.source.cmd) || ""}>
+          ${st ? (st.locus || "this station") + " · " + (st.last ? bugRel(st.last) : "never") : "…"}</span>
+        ${st && !st.b && html`<span style=${{ color: "var(--warn)", fontSize: 10 }}>B unavailable — skipped</span>`}
+        ${findings.length > 0 && html`<button className="btn" disabled=${busy} title="forget the findings held for this locus" onClick=${() => post({ op: "clear" })} style=${{ fontSize: 10, marginLeft: "auto" }}>clear</button>`}`}
+    </div>
+    ${view === "sidecar" && vm ? html`<${BugsDrawer} vm=${vm} />` : html`
+      ${err && html`<div style=${{ color: "var(--warn)", padding: "2px 8px", fontSize: 10 }}>${err}</div>`}
+      ${st && st.note && html`<div style=${{ color: "var(--dim)", padding: "2px 8px", fontSize: 10 }}>${st.note}</div>`}
+      <div style=${{ flex: 1, minHeight: 0, overflowY: "auto", padding: "4px 8px", fontSize: 11, lineHeight: 1.45 }}>
+        ${findings.length === 0 && html`<div style=${{ color: "var(--dim)" }}>
+          ${st && st.on ? "no running problems found yet — the local keeper reviews this locus's journal every " + Math.round(((st && st.interval) || 600) / 60) + " min."
+                        : "the review is off for this locus — flip it on, or hit ‘scan now’ for a single pass."}</div>`}
+        ${findings.map(f => html`<div key=${f.hash} style=${{ borderBottom: "1px solid var(--edge)", padding: "4px 0" }}>
+          <div style=${{ display: "flex", gap: 6, alignItems: "baseline" }}>
+            <span style=${{ color: BUGSCAN_SEV[f.severity] || "var(--dim)", fontWeight: f.severity === "high" ? 700 : 400, minWidth: 52, flex: "none", fontSize: 10 }}>${f.severity}</span>
+            <span style=${{ flex: "1 1 auto", minWidth: 0, cursor: "pointer" }} title="click to show the evidence the keeper quoted"
+                  onClick=${() => setOpen(o => ({ ...o, [f.hash]: !o[f.hash] }))}>${open[f.hash] ? "▾ " : "▸ "}${f.subject}</span>
+            ${f.runs > 1 && html`<span style=${{ color: "var(--dim)", fontSize: 10, flex: "none" }} title=${"first seen " + bugRel(f.first_ts)}>×${f.runs}</span>`}
+            ${f.board && html`<span style=${{ color: "var(--accent)", fontSize: 10, flex: "none" }} title="posted to the board once, by local-keeper">☑ ${f.board}</span>`}
+            <span style=${{ color: "var(--dim)", fontSize: 10, flex: "none" }}>${bugRel(f.ts)}</span>
+          </div>
+          ${f.suggested_action && html`<div style=${{ color: "var(--dim)", fontSize: 10, margin: "1px 0 0 58px" }}>→ ${f.suggested_action}</div>`}
+          ${open[f.hash] && html`<pre style=${{ margin: "3px 0 2px 58px", padding: "5px 7px", border: "1px solid var(--edge)", borderRadius: 5, background: "rgba(255,255,255,.02)", maxHeight: 200, overflow: "auto", whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontSize: 10.5 }}>${f.evidence || "(no evidence quoted)"}</pre>`}
+        </div>`)}
+      </div>`}
   </div>`;
 }
 
@@ -7698,15 +8800,19 @@ function FeedGroupDrawer({ vm, embed }) {
         : { display: "flex", flexDirection: "column", height: "100%" }}>
     <div style=${{ display: "flex", gap: 4, padding: "6px 8px", borderBottom: "1px solid var(--edge)", flex: "none", alignItems: "center" }}>
       ${embed && html`<span style=${{ fontWeight: 600, marginRight: 4 }}>📡 feed</span>`}
-      <button className=${"btn" + (sub === "bugs" ? " on" : "")} onClick=${() => setSub("bugs")}>🐞 bugs</button>
+      <button className=${"btn" + (sub === "bugs" ? " on" : "")} title="the local keeper's intermittent review of this locus's logs (the VM-side sidecar scanner is a click inside)" onClick=${() => setSub("bugs")}>🐞 bugs</button>
       <button className=${"btn" + (sub === "live" ? " on" : "")} onClick=${() => setSub("live")}>📡 live</button>
       <button className=${"btn" + (sub === "b" ? " on" : "")} onClick=${() => setSub("b")}>💬 B</button>
+      <button className=${"btn" + (sub === "log" ? " on" : "")} title="journalctl -f of this locus's station keeper user (the console backend's own ring is a click inside)" onClick=${() => setSub("log")}>📜 log</button>
     </div>
     <div style=${{ flex: 1, minHeight: 0, position: "relative", display: "flex", flexDirection: "column" }}>
-      ${sub === "bugs" && (vm ? html`<${BugsDrawer} vm=${vm} />`
-          : html`<div style=${{ color: "var(--dim)", padding: 12, fontSize: 12 }}>Select a VM to scan for bugs.</div>`)}
+      ${/* 2026-09-15: bugs is the local-agent REVIEW of the active locus (no VM
+            needed — "" is this station's own home); the VM-side sidecar scanner
+            lives behind its `sidecar` toggle. log is the locus journal. */ ""}
+      ${sub === "bugs" && html`<${BugScanPanel} vm=${vm} />`}
       ${sub === "live" && html`<${LiveView} />`}
       ${sub === "b" && html`<${BChatDrawer} />`}
+      ${sub === "log" && html`<${JournalFeed} vm=${vm} />`}
     </div>
   </div>`;
 }
@@ -7729,18 +8835,30 @@ function SurfaceTabs() {
   /* shells are multi-instance (t5): "shell", "shell#2", … each its own PTY;
      ＋ opens the next, × on an extra instance closes just that one. */
   const isExtraShell = (s) => /^shell#\d+$/.test(s);
+  const isPull = (s) => /^pull:/.test(s);   // an attached pulled/jump-in seat (its tmux lives on when closed)
   return html`${surfaces.map(s => html`<span key=${s} style=${{ display: "inline-flex", alignItems: "stretch" }}>
     <button className=${"btn term-tab " + (cur === s ? "keeper" : "")}
-      title=${"terminal surface: " + s} onClick=${() => { if (window.__fvSurface) window.__fvSurface.set(s); setCur(s); }}>${s}</button>
+      title=${isPull(s) ? "attached seat " + s.slice(5) + " (tmux -L console)" : "terminal surface: " + s} onClick=${() => { if (window.__fvSurface) window.__fvSurface.set(s); setCur(s); }}>${isPull(s) ? "⤵ " + s.slice(5) : s}</button>
     ${isExtraShell(s) && html`<button className="btn term-tab" title=${"close " + s + " (kills only its PTY)"} style=${{ padding: "0 4px", marginLeft: -2 }}
       onClick=${() => { if (window.__fvSurface && window.__fvSurface.closeShell) { window.__fvSurface.closeShell(s); setTick(x => x + 1); } }}>×</button>`}
-  </span>`)}<button className="btn term-tab" title="＋ another shell on this locus (its own PTY)"
+    ${isPull(s) && html`<button className="btn term-tab" title=${"detach " + s.slice(5) + " (the seat keeps running in tmux)"} style=${{ padding: "0 4px", marginLeft: -2 }}
+      onClick=${() => { if (window.__fvSurface && window.__fvSurface.detachPull) { window.__fvSurface.detachPull(s); setTick(x => x + 1); } }}>×</button>`}
+  </span>`)}<button key="__recover" className="btn term-tab" title="⟳ recover this surface — repaint a frozen viewer and hard-reattach its session (scrollback survives; nothing is killed)"
+    onClick=${() => { if (window.__fvSurface && window.__fvSurface.recover) { window.__fvSurface.recover(cur); setTick(x => x + 1); } }}>⟳</button><button key="__addshell" className="btn term-tab" title="＋ another shell on this locus (its own PTY)"
     onClick=${() => { if (window.__fvSurface && window.__fvSurface.addShell) { const n = window.__fvSurface.addShell(); setCur(n); setTick(x => x + 1); } }}>＋ shell</button>`;
 }
 
-/* ✍ prompt — bottom-docked, collapsible, resizable panel with media uploads.
-   Composes a prompt (+ attached media) and drops it into the active session's
-   workspace prompt-inbox (POST /api/mct/prompt) for the agent to pick up. */
+/* ✍ prompt — collapsible, resizable composer docked BELOW the terminal (op
+   2026-09-10; was in the right drawer column). The live terminal is rendered by
+   fleetview-term.js as a position:fixed flex-column pane (#fv-term-pane), so a
+   normal-flow composer would sit hidden behind it. Instead we append our own
+   flex-none child at the bottom of that pane and PORTAL into it: the terminal
+   host (flex:1) shrinks and the composer shows directly beneath it, full pane
+   width, no geometry math. Composes a prompt (+ attached media) and POSTs
+   /api/mct/prompt, which saves it to the active session's workspace prompt-inbox
+   AND auto-sends it to the live frontier seat: for a host locus the server types
+   a one-line pointer into the running MCT REPL and presses Enter (see mct_prompt
+   in server.py) — no manual send needed. */
 function PromptPanel() {
   const [open, setOpen] = useState(false);
   const [h, setH] = useState(() => { try { return parseInt(localStorage.getItem("prompt_h"), 10) || 50; } catch (_) { return 50; } });
@@ -7750,7 +8868,49 @@ function PromptPanel() {
   const [note, setNote] = useState(null);
   const [rev, setRev] = useState(null);          // ✎ B revision preview {revised, corrections, ambiguities}
   const [revBusy, setRevBusy] = useState(false);
+  const [dock, setDock] = useState(null);        // #fv-prompt-dock inside #fv-term-pane (portal target)
+  /* todo mode (2026-09-18): a switch flips this composer between sending a prompt
+     (OFF, default) and QUEUEING the text as a todo (ON). The type/priority picks
+     ride the add; they're disabled while OFF. Reuses the host-native ☑ board's
+     add mechanism — POST /api/mct/todo {op:"add", type, text, priority} — the same
+     one SessionTodoDrawer.add() uses. */
+  const [todoMode, setTodoMode] = useState(false);
+  const [todoType, setTodoType] = useState("todo");
+  const [todoPrio, setTodoPrio] = useState("low");
   const saveH = (v) => { const n = Math.min(100, Math.max(20, v)); setH(n); try { localStorage.setItem("prompt_h", String(Math.round(n))); } catch (_) {} };
+  // Mount the dock at the bottom of the fixed terminal pane (after #fv-term-host).
+  // The pane may not exist at first paint (fleetview-term.js builds it), so retry
+  // via a MutationObserver until it does.
+  useEffect(() => {
+    let cancelled = false;
+    const attach = () => {
+      const pane = document.getElementById("fv-term-pane");
+      if (!pane) return false;
+      let d = document.getElementById("fv-prompt-dock");
+      if (!d) {
+        d = document.createElement("div");
+        d.id = "fv-prompt-dock";
+        d.style.display = "flex";
+        d.style.flexDirection = "column";
+        d.style.minHeight = "0";
+        pane.appendChild(d);
+      }
+      if (!cancelled) setDock(d);
+      return true;
+    };
+    if (attach()) return () => { cancelled = true; };
+    const obs = new MutationObserver(() => { if (attach()) obs.disconnect(); });
+    obs.observe(document.body, { childList: true, subtree: true });
+    return () => { cancelled = true; obs.disconnect(); };
+  }, []);
+  // Size the dock as a flex item of the pane (open → h% of the pane, collapsed →
+  // its natural bar height) and nudge the terminal to re-fit its xterm canvas.
+  useEffect(() => {
+    if (!dock) return;
+    dock.style.flex = open ? ("0 0 " + h + "%") : "none";
+    dock.style.minHeight = open ? "90px" : "";
+    try { window.dispatchEvent(new Event("resize")); } catch (_) {}
+  }, [dock, open, h]);
   /* ✎ B readability revision (Ctrl+E): local, free. B checks the wording
      against docs/NOMENCLATURE.md — corrects unambiguous mislabels, asks where
      a term is ambiguous. Preview only; apply replaces the text. */
@@ -7765,8 +8925,8 @@ function PromptPanel() {
   const onKey = (e) => { if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "e") { e.preventDefault(); revise(); } };
   const onDrag = (e) => {
     e.preventDefault();
-    const col = e.currentTarget.closest(".rc-col"); if (!col) return;
-    const rect = col.getBoundingClientRect();
+    const pane = document.getElementById("fv-term-pane"); if (!pane) return;
+    const rect = pane.getBoundingClientRect();
     const mv = (ev) => saveH(100 * (rect.bottom - ev.clientY) / rect.height);
     const up = () => { window.removeEventListener("pointermove", mv); window.removeEventListener("pointerup", up); };
     window.addEventListener("pointermove", mv); window.addEventListener("pointerup", up);
@@ -7776,22 +8936,85 @@ function PromptPanel() {
     rd.onload = () => setFiles(fs => [...fs, { name: f.name, type: f.type, dataUrl: rd.result }]);
     rd.readAsDataURL(f);
   });
+  /* Deliver the server's pointer line to the live seat OURSELVES, via the ⌨
+     terminal bridge. window.__fvSend(pointer, "frontier", {submit:true}) targets
+     the ACTIVE frontier backend (its ws carries &backend=<chosen>, so it reaches
+     whichever of mct / claude-code is displayed in the station) and submits with
+     a SEPARATE, delayed Enter (an Ink TUI like claude-code drops a combined
+     text+Enter as a paste and won't submit). If the frontier ws is not connected
+     yet (surface never shown), __fvSend connects it and returns false — retry a
+     few times while it opens. */
+  const injectPointer = (pointer, nf, tries) => {
+    const ok = !!(window.__fvSend && window.__fvSend(pointer, "frontier", { submit: true }));
+    if (ok) { setNote("sent → frontier (A)" + (nf ? " · " + nf + " file(s)" : "")); return; }
+    if ((tries || 0) < 8) { setTimeout(() => injectPointer(pointer, nf, (tries || 0) + 1), 300); return; }
+    setNote("saved to inbox — open the ⌨ frontier terminal to receive it");
+  };
   const send = () => {
-    const t = text.trim(); if ((!t && !files.length) || busy) return;
+    const t = text; if ((!t.trim() && !files.length) || busy) return;
+    const nf = files.length;
     setBusy(true); setNote(null);
-    api("/api/mct/prompt", { method: "POST", timeout: 120000, body: JSON.stringify({ text: t, files }) })
-      .then(d => { setNote(d.note || "sent"); setText(""); setFiles([]); })
+    const mediated = window.__fvBackend && window.__fvBackend.get("frontier") === "mct";
+    /* seat:"tmux" ALWAYS addresses the terminal seat explicitly — the documented
+       escape hatch for the server's serve-mode guard (server.py mct_prompt ~3878
+       refuses to fan a prompt out unless seat=="tmux" while KEEPER_SURFACE=="serve").
+       So the composer's "send" works no matter the surface. NOTE: in serve mode this
+       therefore routes the prompt to the TMUX seat, not the serve-console chat. */
+    const delivery = mediated
+      ? window.__fvMct.submit(t, files)
+      : api("/api/mct/prompt", { method: "POST", timeout: 120000, body: JSON.stringify({ text: t, files, seat: "tmux" }) });
+    delivery
+      .then(d => {
+        // Host path: the server SAVED the prompt (+ media) and returned a pointer —
+        // we inject it into the active frontier seat. VM/central path (d.central)
+        // already typed into that locus's seat server-side, so don't double-send.
+        if (d && d.pointer && !d.central) injectPointer(d.pointer, nf, 0);
+        else setNote(mediated ? "saved · queued for frontier (A)" : d.note || "sent");
+        setText(""); setFiles([]);
+      })
       .catch(e => setNote("error: " + (e.message || e)))
       .finally(() => setBusy(false));
   };
-  if (!open) return html`<div className="prompt-bar" onClick=${() => setOpen(true)}
+  /* todo mode: queue the textarea's text on the host-native ☑ board instead of
+     sending a prompt. Same endpoint/payload as SessionTodoDrawer.add(); shares
+     the SAME `busy` in-flight guard as send() so neither path can double-submit. */
+  const addTodo = () => {
+    const t = text.trim(); if (!t || busy) return;
+    setBusy(true); setNote(null);
+    api("/api/mct/todo", { method: "POST", timeout: 120000,
+        body: JSON.stringify({ op: "add", type: todoType, text: t, priority: todoPrio }) })
+      .then(d => {
+        if (d && d.ok === false) { setNote(d.error || "todo add failed"); return; }
+        setText(""); setTodoPrio("low");
+        setNote("added to ☑ todo (" + todoType + (todoPrio !== "low" ? " · " + todoPrio : "") + ")");
+      })
+      .catch(e => setNote("error: " + (e.message || e)))
+      .finally(() => setBusy(false));
+  };
+  if (!dock) return null;
+  const body = !open
+    ? html`<div className="prompt-bar" onClick=${() => setOpen(true)}
       style=${{ flex: "none", borderTop: "1px solid var(--edge)", padding: "5px 10px", cursor: "pointer", background: "var(--panel)", fontSize: 12, display: "flex", alignItems: "center", gap: 8 }}>
-    <b>✍ prompt</b><span style=${{ color: "var(--dim)" }}>▲ expand${files.length ? " · " + files.length + " file(s) attached" : ""}</span></div>`;
-  return html`<div className="prompt-panel" style=${{ flex: "none", height: h + "%", minHeight: 90, display: "flex", flexDirection: "column", borderTop: "1px solid var(--edge)", background: "var(--panel)" }}>
+    <b>✍ prompt</b><span style=${{ color: "var(--dim)" }}>▲ expand${files.length ? " · " + files.length + " file(s) attached" : ""}</span></div>`
+    : html`<div className="prompt-panel" style=${{ flex: "1 1 auto", minHeight: 0, height: "100%", display: "flex", flexDirection: "column", borderTop: "1px solid var(--edge)", background: "var(--panel)" }}>
     <div onPointerDown=${onDrag} title="drag to resize" style=${{ height: 6, cursor: "ns-resize", background: "var(--edge)", flex: "none" }}></div>
     <div style=${{ display: "flex", alignItems: "center", gap: 8, padding: "4px 10px", flex: "none" }}>
       <b style=${{ fontSize: 12 }}>✍ prompt</b>
       <label className="btn" style=${{ fontSize: 11, cursor: "pointer" }}>📎 media<input type="file" multiple style=${{ display: "none" }} onChange=${e => addFiles(e.target.files)} /></label>
+      ${/* todo mode switch + type/priority picks (2026-09-18): OFF = prompt mode
+            (default, dropdowns greyed); ON = 'add' queues a todo. Row reads
+            media | [todo switch] [type] [priority] | hide. */""}
+      <button className=${"btn" + (todoMode ? " on" : "")} style=${{ fontSize: 11 }}
+              title="todo mode — ON: the send button becomes 'add' and queues the text as a todo (type + priority) on the ☑ board instead of sending a prompt"
+              onClick=${() => setTodoMode(v => !v)}>${todoMode ? "☑ todo: ON" : "☑ todo: off"}</button>
+      <select value=${todoType} disabled=${!todoMode} onChange=${e => setTodoType(e.target.value)}
+              title="todo type (todo mode only)"
+              style=${{ background: "var(--bg)", color: "var(--fg)", border: "1px solid var(--edge)", borderRadius: 4, fontSize: 11, opacity: todoMode ? 1 : .45 }}>
+        <option value="todo">□ todo</option><option value="request">◇ request</option><option value="bookmark">🔖 bookmark</option></select>
+      <select value=${todoPrio} disabled=${!todoMode} onChange=${e => setTodoPrio(e.target.value)}
+              title="todo priority (todo mode only)"
+              style=${{ background: "var(--bg)", color: "var(--fg)", border: "1px solid var(--edge)", borderRadius: 4, fontSize: 11, opacity: todoMode ? 1 : .45 }}>
+        <option value="low">– prio</option><option value="medium">med</option><option value="high">HIGH</option></select>
       <span style=${{ flex: 1 }}></span>
       ${note && html`<span style=${{ color: "var(--dim)", fontSize: 11 }}>${note}</span>`}
       <button className="btn" style=${{ fontSize: 11 }} onClick=${() => setOpen(false)}>▼ hide</button>
@@ -7818,11 +9041,12 @@ function PromptPanel() {
       placeholder="compose a prompt…  (paste or 📎 to attach images / anything · Ctrl+E: ✎ B revises wording vs docs/NOMENCLATURE.md)"
       style=${{ flex: 1, minHeight: 0, resize: "none", margin: "0 10px 8px", background: "var(--bg)", color: "var(--fg)", border: "1px solid var(--edge)", borderRadius: 4, padding: 6, fontFamily: "inherit", fontSize: 12 }} />
     <div style=${{ padding: "0 10px 8px", flex: "none", display: "flex", gap: 6, alignItems: "center" }}>
-      <button className="btn on" disabled=${busy || (!text.trim() && !files.length)} onClick=${send}>${busy ? "saving…" : "send"}</button>
+      <button className="btn on" disabled=${busy || (todoMode ? !text.trim() : (!text.trim() && !files.length))} onClick=${todoMode ? addTodo : send}>${busy ? (todoMode ? "adding…" : "saving…") : (todoMode ? "add" : "send")}</button>
       <button className="btn" disabled=${revBusy || !text.trim()} title="✎ B revises the wording against docs/NOMENCLATURE.md (Ctrl+E) — corrects unambiguous mislabels, asks about ambiguous ones; preview, then apply" onClick=${revise}>${revBusy ? "B…" : "✎ B revise"}</button>
-      <span style=${{ color: "var(--dim)", fontSize: 11 }}>→ session prompt-inbox (for the agent)</span>
+      <span style=${{ color: "var(--dim)", fontSize: 11 }}>→ auto-sent to the live seat (A) · also saved to the prompt-inbox</span>
     </div>
   </div>`;
+  return ReactDOM.createPortal(body, dock);
 }
 
 /* 🔌 per-VM access block (1.0.41): the two ways INTO a station — lxc exec and
@@ -7939,6 +9163,14 @@ function VmsDrawer({ power, busy, active, onSelect }) {
       .catch(e => setErr(e.message || "create failed"))
       .finally(() => setCreating(false));
   };
+  /* ◌ hide / unhide (1.0.80): drop a locus from the tab strip + dropdown WITHOUT
+     touching the VM or ssh host — it stays here, greyed, to unhide. */
+  const hide = (vm, on) => {
+    setErr(null); setNote(null);
+    api("/api/mct/vm", { method: "POST", body: JSON.stringify({ op: on ? "hide" : "unhide", name: vm }) })
+      .then(() => { setNote(on ? "'" + vm + "' hidden from the tab strip (the machine is untouched)" : "'" + vm + "' shown again"); load(); })
+      .catch(e => setErr(e.message || "hide failed"));
+  };
   const del = (vm) => {
     if (!window.confirm("Delete VM '" + vm + "'? Irreversible.")) return;
     setErr(null); setNote(null);
@@ -7953,8 +9185,10 @@ function VmsDrawer({ power, busy, active, onSelect }) {
       <button className=${"btn" + (sub === "host" ? " on" : "")} onClick=${() => setSub("host")}
               title="the locus hugpy Station itself runs on — always present">⌂ host</button>
       ${vms === null && html`<span style=${{ color: "var(--dim)", fontSize: 11 }}>loading…</span>`}
-      ${list.map(v => html`<button key=${v.name} className=${"btn" + (sub === v.name ? " on" : "")} onClick=${() => setSub(v.name)}>
+      ${list.filter(v => !v.hidden).map(v => html`<button key=${v.name} className=${"btn" + (sub === v.name ? " on" : "")} onClick=${() => setSub(v.name)}>
         <span style=${{ color: v.building ? "var(--warn)" : v.status === "RUNNING" ? "var(--ok)" : "var(--dim)" }}>●</span> ${v.kind === "ssh" ? "⇅ " : ""}${v.name}</button>`)}
+      ${list.filter(v => v.hidden).map(v => html`<button key=${v.name} className=${"btn" + (sub === v.name ? " on" : "")} onClick=${() => setSub(v.name)}
+        style=${{ opacity: 0.55 }} title="hidden from the tab strip — open to unhide">◌ ${v.kind === "ssh" ? "⇅ " : ""}${v.name}</button>`)}
       <button className=${"btn" + (sub === "+vm" ? " on" : "")} onClick=${() => setSub("+vm")}>＋ VM</button>
       <button className=${"btn" + (sub === "+ssh" ? " on" : "")} onClick=${() => setSub("+ssh")} title="add an EXISTING machine over ssh — it becomes a station in the dropdown">＋ ssh host</button>
     </div>
@@ -7995,7 +9229,7 @@ function VmsDrawer({ power, busy, active, onSelect }) {
         </div>
         <button className="btn on" disabled=${sBusy || !sName.trim() || !sHost.trim()} onClick=${addSsh} style=${{ marginTop: 10 }}>${sBusy ? "adding + testing…" : "＋ add ssh host"}</button>
         <div style=${{ color: "var(--dim)", fontSize: 11, marginTop: 8, lineHeight: 1.6 }}>
-          Every surface of an ssh host runs over ssh as that user: <b>shell</b> = an interactive ssh login (password login works there),
+          Every surface of an ssh host runs over ssh as that user: <b>shell</b> = an interactive ssh login (only if that host permits it),
           <b>frontier</b> (B/mct or claude-code) and <b>local</b> run on the remote, the 🛡 steward probes it (Claude login, models, sudo).
           Seeding the station key: <code>ssh-copy-id -i ~/.config/hugpy-station/fleet_ssh_key.pub user@host</code>. Stored in <code>~/.config/hugpy-station/ssh-hosts.json</code>.
         </div>
@@ -8006,8 +9240,10 @@ function VmsDrawer({ power, busy, active, onSelect }) {
         <div style=${{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 12 }}>
           <button className="btn" disabled=${cur.status !== "RUNNING"} onClick=${() => onSelect(cur.name)}>⇥ open terminal (ssh)</button>
           <button className="btn" disabled=${sBusy} onClick=${() => testSsh(cur.name)}>⚡ test key login</button>
+          <button className="btn" onClick=${() => hide(cur.name, !cur.hidden)} title=${cur.hidden ? "show it in the tab strip again" : "drop it from the tab strip + dropdown; the host is untouched"}>${cur.hidden ? "◉ unhide" : "◌ hide locus"}</button>
           <button className="btn" onClick=${() => delSsh(cur.name)} style=${{ color: "var(--bad)", borderColor: "var(--bad)" }}>✕ remove</button>
         </div>
+        ${cur.hidden && html`<div style=${{ color: "var(--dim)", fontSize: 11, marginBottom: 8 }}>◌ hidden — not in the tab strip or dropdown; the machine and its ssh entry are untouched.</div>`}
         ${sTest && html`<pre style=${{ fontSize: 11, color: sTest.ok ? "var(--ok)" : "var(--bad)", whiteSpace: "pre-wrap" }}>${sTest.ok ? "✓ " + (sTest.out || "") : "✗ " + (sTest.err || "") + (sTest.hint ? "\n" + sTest.hint : "")}</pre>`}
         <${VmAccessBlock} vm=${cur.name} running=${cur.status === "RUNNING"} onSelect=${onSelect} kind="ssh" />
       ` : cur ? html`
@@ -8018,8 +9254,10 @@ function VmsDrawer({ power, busy, active, onSelect }) {
           <button className="btn" disabled=${!!busy[cur.name] || cur.status !== "RUNNING"} onClick=${() => power(cur.name, "stop")}>■ stop</button>
           <button className="btn" disabled=${!!busy[cur.name]} onClick=${() => power(cur.name, "restart")}>↻ restart</button>
           <button className="btn" disabled=${cur.status !== "RUNNING"} onClick=${() => onSelect(cur.name)}>⇥ open terminal</button>
+          <button className="btn" onClick=${() => hide(cur.name, !cur.hidden)} title=${cur.hidden ? "show it in the tab strip again" : "drop it from the tab strip + dropdown; the VM is untouched (no stop, no delete)"}>${cur.hidden ? "◉ unhide" : "◌ hide locus"}</button>
           <button className="btn" onClick=${() => del(cur.name)} style=${{ color: "var(--bad)", borderColor: "var(--bad)" }}>🗑 delete</button>
         </div>
+        ${cur.hidden && html`<div style=${{ color: "var(--dim)", fontSize: 11, marginBottom: 8 }}>◌ hidden — not in the tab strip or dropdown; the VM is untouched and keeps running if it was.</div>`}
         <${VmAccessBlock} vm=${cur.name} running=${cur.status === "RUNNING"} onSelect=${onSelect} />
       ` : html`<div style=${{ color: "var(--dim)" }}>select a station tab above, ＋ VM to build one, or ＋ ssh host to add an existing machine</div>`)}
       ${note && html`<div style=${{ color: "var(--warn)", marginTop: 10, fontSize: 11 }}>✓ ${note}</div>`}
@@ -8028,9 +9266,73 @@ function VmsDrawer({ power, busy, active, onSelect }) {
   </div>`;
 }
 
+/* SESSION-PULL-PATCH 2026-09-02: ⤵ pulled — claude sessions pulled into the fleet (toolserver loci
+   feed via /api/sessions/pulled) + live jump-in seats on this station's keeper
+   socket. Click a live one to attach its seat as a terminal tab. */
+function PulledChip() {
+  const [rows, setRows] = useState([]);
+  const [open, setOpen] = useState(false);
+  useEffect(() => {
+    let on = true;
+    const go = () => api("/api/sessions/pulled").then(d => { if (on) setRows((d && d.sessions) || []); })
+      .catch(() => { if (on) setRows([]); });
+    go(); const iv = setInterval(go, 15000);
+    return () => { on = false; clearInterval(iv); };
+  }, []);
+  if (!rows.length) return null;
+  const live = rows.filter(r => r.live).length;
+  const attach = (r, e) => { e.stopPropagation(); if (window.__fvSurface && window.__fvSurface.attach) window.__fvSurface.attach(r.tmux); setOpen(false); };
+  return html`<span className="stale" onClick=${() => setOpen(o => !o)}
+      title="claude sessions pulled into the station (toolserver session/pull) — click to attach a live seat"
+      style=${{ position: "relative", cursor: "pointer", background: "#12253a", color: "#58a6ff" }}>
+    ⤵ ${live}/${rows.length} pulled
+    ${open && html`<div onClick=${e => e.stopPropagation()} style=${{ position: "absolute", top: "100%", left: 0, zIndex: 60, background: "var(--panel, #161b22)", border: "1px solid var(--edge)", borderRadius: 6, padding: 6, minWidth: 360, maxHeight: 320, overflow: "auto", textAlign: "left" }}>
+      ${rows.map(r => html`<div key=${r.tmux || r.locus} style=${{ display: "flex", gap: 6, alignItems: "center", padding: "3px 2px", fontSize: 11 }}>
+        <span style=${{ color: r.live ? "var(--ok)" : "var(--dim)" }}>${r.live ? "●" : "○"}</span>
+        <span style=${{ flex: 1, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", color: "var(--fg)" }}
+              title=${(r.ssh && r.ssh.user ? r.ssh.user + "@" + r.ssh.host + ":" : "") + (r.dir || "") + (r.goal ? "\n" + r.goal : "")}>
+          <b>${r.tmux || r.locus}</b>${r.session_id ? " · " + String(r.session_id).slice(0, 8) : ""}${r.dir ? " · " + r.dir : ""}${r.live ? "" : " · not seated here"}</span>
+        <button className="btn" disabled=${!r.live || !r.tmux} onClick=${e => attach(r, e)}>⇥ attach</button>
+      </div>`)}
+    </div>`}
+  </span>`;
+}
+
+function FocusChip() {
+  // Pinned "current focus" from the toolserver focus assessor (via the gated /ts
+  // proxy) — the static reminder of what the operator is on. Hidden when the
+  // toolserver is unreachable or nothing has been assessed yet.
+  const [f, setF] = useState(null);
+  useEffect(() => {
+    let on = true;
+    const go = () => fetch("/ts/assess/focus", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ locus: "" }),
+    }).then(r => r.json()).then(d => { if (on) setF((d && d.result) || null); })
+      .catch(() => { if (on) setF(null); });
+    go(); const iv = setInterval(go, 120000);
+    return () => { on = false; clearInterval(iv); };
+  }, []);
+  if (!f || !f.focus_summary) return null;
+  const done = f.fulfilled === true || (f.item && f.item.status === "done");
+  return html`<span className="stale"
+    title=${(f.rationale || "") + (f.assessed_by ? (" — by " + f.assessed_by) : "")}
+    style=${{ background: done ? "#12351f" : "#3a2d12",
+              color: done ? "#3fb950" : "#d29922", cursor: "default" }}>
+    🎯 ${f.focus_summary}${done ? " ✓" : ""}</span>`;
+}
+
 function App() {
   const [vms, setVms] = useState([]);
   const [active, setActive] = useState(null);
+  /* 1.0.65: the locus chosen BEFORE the current one (fleetview-term's __fvVm.prev),
+     for the ↩ button next to ⌂ host. Follows the terminal's own switch events. */
+  const [prevLocus, setPrevLocus] = useState(null);
+  useEffect(() => {
+    const h = () => { try { const p = window.__fvVm && window.__fvVm.prev(); setPrevLocus(p === undefined ? null : (p || "@keeper")); } catch (_) {} };
+    window.addEventListener("fv-vm", h); h();
+    return () => window.removeEventListener("fv-vm", h);
+  }, []);
   /* panes: "<vm>:<mode>" -> {vm, mode, nonce}. Keyed by (vm, mode), NOT by vm,
      because a VM's shell and its keeper are two different terminals and both
      must be able to exist at once. Keying by vm alone forced one iframe to
@@ -8065,7 +9367,7 @@ function App() {
   const [keeperSessions, setKeeperSessions] = useState({});
   const [todoCounts, setTodoCounts] = useState({}); // vm -> {count, warn} open-work ticker; last known (never flaps to 0 on error)
   const [busy, setBusy] = useState({});         // vm -> verb in flight
-  const [panel, setPanel] = useState("steward");  // side drawer: null | "design" | "todo" | "bugs" | "search" | "steward" | "studio" | "docs" — steward opens by default
+  const [panel, setPanel] = useState("steward");  // side drawer: null | "design" | "todo" | "bugs" | "search" | "steward" | "studio" | "docs" | "db" — steward opens by default
   const [rcW, setRcW] = useState(rcCurrent());    // right-column width — static ⇔ control (salvaged from the per-drawer buttons)
   // Which VM group's ⏻ power tray is expanded (one at a time). Session-only.
   const [powerVm, setPowerVm] = useState(null);
@@ -8195,6 +9497,7 @@ function App() {
   }, [active, activeState]);
 
   const stateOf = (name) => { const v = vms.find(x => x.name === name); return v ? v.state : null; };
+  const homeOf = (name) => { const v = vms.find(x => x.name === name); return (v && v.home) || ""; };
   const isProtected = (name) => !!(health && health.protected && health.protected.includes(name));
   /* First-open default is the KEEPER, not the shell (board t26): a VM's primary
      surface is its keeper (Claude) session, so opening a VM with no prior mode
@@ -8577,15 +9880,17 @@ function App() {
     <div className="app">
       <div className="tabs">
         <div className="tablist">
-        <${SurfaceTabs} />
         ${/* DEPRECATED (operator, 2026-08-12): the inline per-VM group strip
              [inlineVms.map(vmGroup)] — its power tray + keeper controls live in
              the 🖥 VMs tab and the 🛡 steward drawer. In its place: the VM
              dropdown (selecting = open terminal, same select() gesture) and
              two quick tabs — the selected VM's console, and the permanent
              vm_mgr host keeper (the fleet's escalation arm). */""}
+        ${/* 2026-09-18 (operator): the locus/vm/prev/console group leads the
+              tablist; the local/frontier/shell/+shell seat tabs follow to their
+              right (SurfaceTabs moved below). The "console of" label was removed. */""}
         <select className="vm-dd" value=${active || "@keeper"}
-                title="locus — the machine the seats ground in (docs/NOMENCLATURE.md). ⌂ host = this machine (@keeper); ● lxd guest or ⇅ ssh host = that locus's OWN seats (terminal, A/B/local, steward all live there). Kind is an attribute, not the name."
+                title="this console is now this locus's console — its OWN seats (frontier A, local B, shell), files, steward and sessions. ⌂ host = this machine; ● lxd guest / ⇅ ssh host = that machine."
                 onChange=${(e) => { const vm = e.target.value;
                   if (vm === "@keeper") { setActive(null);
                     try { window.__fvVm && window.__fvVm.set("@keeper"); window.__fvSurface && window.__fvSurface.set("frontier"); } catch (err) {}
@@ -8598,24 +9903,28 @@ function App() {
                 title=${active ? "open " + active + "'s console terminal" : "pick a locus first"}
                 onClick=${() => { if (active) open(active); }}>
           ⌨ ${active || "vm"}</button>
-        <button className="btn term-tab"
-                title="⌂ host — switch to this machine's live frontier keeper session (claude-code, or mct when B is on). Not a plain shell."
+        <button className=${"btn term-tab" + (!active ? " keeper" : "")}
+                title="⌂ host — go to this machine's frontier session AND make the console the host's (the locus dropdown follows)."
                 onClick=${() => { try {
+                  setActive(null);                                   // 1.0.65: the dropdown follows
                   window.__fvVm && window.__fvVm.set("@keeper");
                   window.__fvSurface && window.__fvSurface.set("frontier");
                 } catch (e) {} }}>
           ⌂ host</button>
-        ${/* Each station may run its OWN hugpy-station (workbench mode) —
-             A/B/local grounded there BY CONSTRUCTION. This harness is the
-             switcher: ⧉ hands off into the active VM's console (tokened
-             one-click URL; the workbench mints its own session). */""}
-        <button className="btn term-tab" disabled=${!active || active === "keeper"}
-                title=${active ? "open " + active + "'s own hugpy-station (workbench) — A/B/local grounded in that locus" : "pick a locus first"}
-                onClick=${() => { if (!active) return;
-                  api("/api/stations/" + active + "/console-url")
-                    .then(d => { if (d.url) window.open(d.url, "fc-" + active); })
-                    .catch(e => alert(active + ": " + (e.message || "no workbench console — install-vm-console " + active))); }}>
-          ⧉ console</button>
+        ${/* 1.0.65 (operator): the locus chosen BEFORE this one — one click goes to
+              ITS frontier session and re-grounds the console there (dropdown follows). */""}
+        ${prevLocus !== null && prevLocus !== (active || "") && html`
+        <button className="btn term-tab"
+                title=${"↩ back to " + locusLabel(prevLocus) + " — its frontier session; the console becomes that locus's"}
+                onClick=${() => { try {
+                  if (!prevLocus || prevLocus === "@keeper" || prevLocus === "keeper") {
+                    setActive(null); window.__fvVm && window.__fvVm.set("@keeper");
+                  } else { select(prevLocus); }
+                  window.__fvSurface && window.__fvSurface.set("frontier");
+                } catch (e) {} }}>
+          ↩ ${locusLabel(prevLocus)}</button>`}
+        ${/* The terminal pane owns its backend/provider selection now; the old
+             top-level console/local/frontier shortcuts were redundant. */""}
         ${/* Spacer AFTER the group, not between it and the dropdown (operator,
               2026-07-27): with the far-right layout the two controls sat at
               opposite ends of a wide screen, so every VM switch was a long
@@ -8630,40 +9939,44 @@ function App() {
           <span className="stale" title=${"/api/vms failed: " + fleetErr +
                  " — the power states shown are the last ones the console could read, not live"}>
             ⚠ fleet state stale — last update ${agoText}</span>`}
+        <${FocusChip} />
+        <${PulledChip} />
         <div className="actions">
         ${/* reset/reconnect act on the ON-STAGE pane = the selected terminal tab
               (modeOf(active)); power moved onto the per-VM groups above. */ ""}
         ${/* reset / reconnect deprecated (P1): a fresh session is the dropdown's job; VM-specific resets live in the VMs tab. */ ""}
+        ${/* 2026-09-18 (operator): right-side panel buttons ordered
+              Steward · todo · canvas · search · docs · db · resize. 🖥 loci is
+              kept leftmost (it was not part of the requested group). The 🔧 claude
+              button was removed (the panel==="ac" drawer is now unreachable from
+              the toolbar — see note). */""}
         <button className=${"btn" + (panel === "vms" ? " on" : "")}
                 title="VMs — LXD stations: per-VM controls + create (＋ VM)"
                 onClick=${() => togglePanel("vms")}>🖥 loci</button>
-        ${(window.WF || window.FLOW) && html`<button className=${"btn" + (panel === "canvas" ? " on" : "")}
-                title="canvas — design (wireframe) + flow, exchanged with the VM keeper"
-                onClick=${() => togglePanel("canvas")}>◳ canvas</button>`}
-        ${/* legacy per-VM todo removed (P1) — the host-native board below is the single todo. */ ""}
-        ${/* bugs moved into 📡 feed (P1). */ ""}
-        <button className=${"btn" + (panel === "search" ? " on" : "")}
-                title="search — file/content/import search over the VM's finder (grep · files · imports)"
-                onClick=${() => togglePanel("search")}>🔍 search</button>
-        ${/* 📡 feed retired as a top-level tab (operator 2026-08-27) — absorbed
-              into 🛡 steward → session (FeedGroupDrawer embed). */""}
         <button className=${"btn" + (panel === "steward" ? " on" : "")}
                 title="session steward — arm/monitor the in-VM daemon that restarts the keeper at a lull with a written handoff (🛡)"
                 onClick=${() => togglePanel("steward")}>🛡 steward</button>
-        ${/* ✍ prompt is now the bottom-docked collapsible PromptPanel in the right column. */""}
+        ${/* ☑ todo - single host-native board (you + the agent); replaces the legacy per-VM todo. */ ""}
+        <button className=${"btn" + (panel === "sesstodo" ? " on" : "")}
+                title=${"todo — " + ((!active || active === "@keeper") ? "the host keeper's" : active + "'s") + " shared task board (follows the station selection)"}
+                onClick=${() => togglePanel("sesstodo")}>☑ todo</button>
+        ${(window.WF || window.FLOW) && html`<button className=${"btn" + (panel === "canvas" ? " on" : "")}
+                title="canvas — design (wireframe) + flow, one central copy per locus shared live with its keeper (canvas/get|put)"
+                onClick=${() => togglePanel("canvas")}>◳ canvas</button>`}
+        <button className=${"btn" + (panel === "search" ? " on" : "")}
+                title="search — file/content/import search over the VM's finder (grep · files · imports)"
+                onClick=${() => togglePanel("search")}>🔍 search</button>
         ${/* docs are NOT per-VM — this button stays enabled with no active VM, and its
               drawer render slot below carries no `active` gate (board t27). */ ""}
         <button className=${"btn" + (panel === "docs" ? " on" : "")}
                 title="docs — using the console + the keeper dev guide (shipped markdown; no VM needed)"
                 onClick=${() => togglePanel("docs")}>📖 docs</button>
-        ${/* 💬 B moved into 📡 feed (P1). */ ""}
-        ${/* ☑ todo - single host-native board (you + the agent); replaces the legacy per-VM todo. */ ""}
-        <button className=${"btn" + (panel === "sesstodo" ? " on" : "")}
-                title=${"todo — " + ((!active || active === "@keeper") ? "the host keeper's" : active + "'s") + " shared task board (follows the station selection)"}
-                onClick=${() => togglePanel("sesstodo")}>☑ todo</button>
+        ${/* 1.0.85: 🗄 db is central, not per-locus — same no-active-VM rule as docs. */ ""}
+        <button className=${"btn" + (panel === "db" ? " on" : "")}
+                title="db — the central toolserver database, read-only (tables · columns · SELECT queries via the station's /ts/db proxy)"
+                onClick=${() => togglePanel("db")}>🗄 db</button>
         <button className="btn" title="right-column width — cycles 44% / 70% / 88% (applies to every drawer)"
                 onClick=${() => setRcW(rcCycle())}>${RC_LABEL[rcW]}</button>
-        <button className="btn" onClick=${load}>⟳ VMs</button>
         </div>
       </div>
       <div className="main">
@@ -8688,7 +10001,7 @@ function App() {
           // while an unchanged key keeps the exact same element — and with it
           // the session — across every re-render.
           return html`<iframe key=${key + ":" + p.nonce} title=${p.vm} data-vm=${p.vm} data-mode=${p.mode}
-                       src=${termURL(p.vm, p.mode)}
+                       src=${paneSrc(p.vm, p.mode)}
                        style=${{ display: show ? "block" : "none" }} />`;
         })}
         ${!cur && active && html`<div className="hint">
@@ -8703,13 +10016,16 @@ function App() {
         <div className="rc-drawer">
           ${panel === "canvas" && html`<${CanvasDrawer} vm=${active || "@keeper"} />`}
           ${panel === "vms" && html`<${VmsDrawer} power=${power} busy=${busy} active=${active} onSelect=${select} />`}
-          ${panel === "search" && html`<${SearchDrawer} />`}
+          ${panel === "search" && html`<${SearchDrawer} vm=${active} home=${homeOf(active)} />`}
           ${/* feed drawer retired — lives in 🛡 steward → session now; a stale
                 localStorage panel="feed" simply renders an empty drawer once. */""}
           ${panel === "steward" && html`<div style=${{ overflowY: "auto", height: "100%" }}>
                   <${StewardDrawer} vm=${active || "@keeper"}
                   hugpyKeys=${activeUp && (keeperAgents[active] || []).includes("hugpy")} /></div>`}
           ${panel === "docs" && html`<${DocsDrawer} />`}
+          ${panel === "db" && html`<${DbDrawer} />`}
+          ${panel === "ac" && html`<iframe src="/ac/" title="claude settings"
+                style=${{ width: "100%", height: "100%", border: 0, background: "#0e1116" }} />`}
           ${panel === "bchat" && html`<${BChatDrawer} />`}
           ${/* 1.0.42: the ☑ board FOLLOWS the station selection, like every other drawer.
                 It was pinned to vm="keeper" so picking a VM in the dropdown still showed the
@@ -8718,9 +10034,9 @@ function App() {
                 the drawer on a switch so its state never bleeds across boards. */ ""}
           ${panel === "sesstodo" && html`<${TodoDrawer} key=${active || "keeper"} vm=${(!active || active === "@keeper") ? "keeper" : active} onCount=${reportTodoCount} />`}
         </div>
-        <${PromptPanel} />
       </div>`}
       </div>
+      <${PromptPanel} />
       ${/* The footer is the console's own status line, so it renders ALWAYS. It
             used to be gated on ${health && …}: the one moment it mattered — the
             backend not answering — was the one moment it vanished, taking the
@@ -8754,6 +10070,7 @@ ReactDOM.createRoot(document.getElementById("root")).render(html`<${App} />`);
 <link rel="stylesheet" href="/static/xterm.css">
 <script src="/static/xterm.js"></script>
 <script src="/static/xterm-addon-fit.js"></script>
-<script src="/static/fleetview-term.js"></script>
+<script src="/static/mct-renderer.js?v=20260916-t266-choice"></script>
+<script src="/static/fleetview-term.js?v=20260927-hugpy-frontier"></script>
 </body>
 </html>

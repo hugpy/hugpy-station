@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+# sweep-orphan-seat-scopes.sh — reap tmux-spawn-*.scope units left behind by
+# dead seats.
+#
+# 2026-09-16: an orphaned `ugrep -rn ... /` sat for 10 h in a tmux-spawn scope
+# whose tmux session was long gone, read ~854 GB, drove load to ~30 and stalled
+# a build. tmux's systemd integration creates one scope per pane but nothing
+# removes a scope whose pane died while a grandchild kept running.
+#
+# SAFETY CONTRACT — this script must NEVER touch a scope backing a live tmux
+# session (keeper-claude / keeper-codex / keeper-local-opencode and friends):
+#   1. It builds a LIVE PID set from every reachable tmux socket: each session's
+#      pane PIDs, the full descendant closure of those PIDs, and every tmux
+#      server process owned by this user.
+#   2. A scope is a candidate only when NONE of its cgroup.procs appear in that
+#      live set.
+#   3. If tmux enumeration fails, or yields zero sessions while tmux servers are
+#      running, it ABORTS without killing anything (fail-safe, not fail-open).
+#   4. Every process in the scope must have been running > MIN_AGE (60 min).
+#
+# Usage: sweep-orphan-seat-scopes.sh [--dry-run] [--verbose] [--min-age SECONDS]
+set -uo pipefail
+
+MIN_AGE=3600
+DRY_RUN=0
+VERBOSE=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -n|--dry-run) DRY_RUN=1 ;;
+    -v|--verbose) VERBOSE=1 ;;
+    --min-age)    MIN_AGE="${2:-3600}"; shift ;;
+    -h|--help)    sed -n '2,20p' "$0"; exit 0 ;;
+    *) echo "unknown argument: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+log()  { printf '%s sweep-orphan-seat-scopes: %s\n' "$(date -Is)" "$*"; }
+vlog() { [ "$VERBOSE" = 1 ] && log "$*"; return 0; }
+
+UID_N="$(id -u)"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$UID_N}"
+
+# ---------------------------------------------------------------- live PID set
+declare -A LIVE=()
+sessions_seen=0
+sockets_ok=0
+
+add_live() { [ -n "${1:-}" ] && LIVE["$1"]=1; }
+
+# Walk the full descendant tree of a PID so a pane's grandchildren also count
+# as live (a slow child must not make its own live pane look orphaned).
+add_tree() {
+  local pid="$1" kids
+  [ -n "$pid" ] || return 0
+  add_live "$pid"
+  kids="$(ps -o pid= --ppid "$pid" 2>/dev/null)"
+  local k
+  for k in $kids; do add_tree "$k"; done
+}
+
+# Probe the default socket plus every named socket this user owns.
+SOCKETS=("")
+for s in "/tmp/tmux-$UID_N"/* "$XDG_RUNTIME_DIR/tmux-$UID_N"/*; do
+  [ -S "$s" ] || continue
+  SOCKETS+=("$(basename "$s")")
+done
+# `tmux -L console` is the station's seat socket; keep it explicit even if the
+# glob above already found it (deduped by the seen-set below).
+SOCKETS+=("console")
+
+declare -A SEEN_SOCK=()
+for sock in "${SOCKETS[@]}"; do
+  key="${sock:-<default>}"
+  [ -n "${SEEN_SOCK[$key]:-}" ] && continue
+  SEEN_SOCK["$key"]=1
+  if [ -z "$sock" ]; then
+    ls_out="$(tmux ls 2>/dev/null)"; rc=$?
+    panes="$(tmux list-panes -a -F '#{session_name} #{pane_pid}' 2>/dev/null)"
+  else
+    ls_out="$(tmux -L "$sock" ls 2>/dev/null)"; rc=$?
+    panes="$(tmux -L "$sock" list-panes -a -F '#{session_name} #{pane_pid}' 2>/dev/null)"
+  fi
+  [ $rc -eq 0 ] || { vlog "socket $key: no server"; continue; }
+  sockets_ok=$((sockets_ok + 1))
+  while read -r sname spid; do
+    [ -n "${spid:-}" ] || continue
+    sessions_seen=$((sessions_seen + 1))
+    vlog "live session $key/$sname pane_pid=$spid"
+    add_tree "$spid"
+  done <<< "$panes"
+done
+
+# Every tmux server itself is live, whatever its sessions look like.
+for p in $(pgrep -u "$UID_N" tmux 2>/dev/null); do add_live "$p"; done
+tmux_servers="$(pgrep -u "$UID_N" tmux 2>/dev/null | wc -l)"
+
+# --- fail-safe: never sweep on a blind read of tmux state -------------------
+if [ "$tmux_servers" -gt 0 ] && [ "$sessions_seen" -eq 0 ]; then
+  log "ABORT: $tmux_servers tmux server(s) running but zero sessions enumerated — refusing to sweep"
+  exit 3
+fi
+vlog "live set: ${#LIVE[@]} pids across $sessions_seen session(s), $sockets_ok socket(s), $tmux_servers server(s)"
+
+# ------------------------------------------------------------------- the sweep
+killed=0
+examined=0
+CG_BASE="/sys/fs/cgroup/user.slice/user-$UID_N.slice/user@$UID_N.service"
+
+while read -r scope; do
+  [ -n "$scope" ] || continue
+  examined=$((examined + 1))
+  cgpath=""
+  for cand in "$CG_BASE/app.slice/$scope" "$CG_BASE/session.slice/$scope" "$CG_BASE/$scope"; do
+    [ -f "$cand/cgroup.procs" ] && { cgpath="$cand"; break; }
+  done
+  if [ -z "$cgpath" ]; then vlog "$scope: no cgroup path, skip"; continue; fi
+
+  mapfile -t procs < "$cgpath/cgroup.procs"
+  if [ "${#procs[@]}" -eq 0 ]; then vlog "$scope: empty, skip"; continue; fi
+
+  # (2) any live pane/server PID in the scope => hands off, unconditionally.
+  live_hit=""
+  for p in "${procs[@]}"; do
+    [ -n "${LIVE[$p]:-}" ] && { live_hit="$p"; break; }
+  done
+  if [ -n "$live_hit" ]; then
+    vlog "$scope: LIVE (pid $live_hit belongs to a running tmux session) — skip"
+    continue
+  fi
+
+  # (4) youngest process must still be older than MIN_AGE.
+  youngest=""
+  for p in "${procs[@]}"; do
+    e="$(ps -o etimes= -p "$p" 2>/dev/null | tr -d ' ')"
+    [ -n "$e" ] || continue
+    if [ -z "$youngest" ] || [ "$e" -lt "$youngest" ]; then youngest="$e"; fi
+  done
+  if [ -z "$youngest" ]; then vlog "$scope: processes vanished, skip"; continue; fi
+  if [ "$youngest" -le "$MIN_AGE" ]; then
+    vlog "$scope: orphaned but youngest proc ${youngest}s <= ${MIN_AGE}s — skip"
+    continue
+  fi
+
+  detail="$(ps -o pid=,etimes=,args= -p "$(IFS=,; echo "${procs[*]}")" 2>/dev/null \
+            | sed 's/^/      /' | cut -c1-200)"
+  if [ "$DRY_RUN" = 1 ]; then
+    log "DRY-RUN would TERM orphan $scope (${#procs[@]} procs, age ${youngest}s)"
+    printf '%s\n' "$detail"
+  else
+    log "TERM orphan $scope (${#procs[@]} procs, age ${youngest}s)"
+    printf '%s\n' "$detail"
+    systemctl --user kill --signal=SIGTERM "$scope" 2>/dev/null \
+      || kill -TERM "${procs[@]}" 2>/dev/null
+    killed=$((killed + 1))
+  fi
+done < <(systemctl --user list-units --type=scope --all --no-legend --plain 2>/dev/null \
+         | awk '{print $1}' | grep -E '^tmux-spawn-.*\.scope$')
+
+log "done: examined=$examined orphans_killed=$killed live_sessions=$sessions_seen dry_run=$DRY_RUN"
+exit 0

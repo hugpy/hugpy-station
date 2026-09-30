@@ -1,14 +1,10 @@
-# hugpy Station — standalone repo
-/node_modules/
+# The repo root ignores build/ and dist/ globally (python/node build output).
+# station-app/build/ is SOURCE — the electron-builder buildResources dir holding
+# the icon set and the after-install/after-remove scriptlet templates — so it is
+# re-included here, anchored so it only applies to THIS directory.
+!/build/
 /dist/
-__pycache__/
-*.pyc
-*.egg-info/
-# secrets — NEVER commit
-.secret
-.auth
-*.env
-*.pem
-*.key
-# local backup files
-*.bak-*
+/node_modules/
+
+# Cookie-signing key — runtime secret, never commit (rotation tracked as board t312)
+/resources/backend/.secret

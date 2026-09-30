@@ -1,0 +1,28 @@
+# hugpy Station web (headless) — USER-MANAGER unit (1.0.90).
+# managed by hugpy-station-user-install — the user-unit derivative of the SAME
+# .deb: payload at @BASE@/app/current (-> app/<version>, rollback = repoint),
+# state at @BASE@ (HUGPY_STATION_STATE), env at @BASE@/env/. Needs
+# `loginctl enable-linger <user>` for the station to outlive the login session.
+[Unit]
+Description=hugpy Station web (headless) — user unit
+
+[Service]
+WorkingDirectory=@BASE@
+EnvironmentFile=-@BASE@/env/toolserver.env
+EnvironmentFile=-@BASE@/env/station.env
+Environment=HOST=127.0.0.1
+Environment=PORT=8898
+Environment=STATION_CONSOLE_REQUIRE_AUTH=1
+Environment=STATION_CONSOLE_PROXY_TLS=1
+Environment=HUGPY_STATION_STATE=@BASE@
+Environment=AC_ROOT=@BASE@/abstract-claude
+Environment=HUGPY_STATION_APP_ROOT=@BASE@/app/current
+# bash -l: the account's own login PATH (~/.local/bin for claude/abstract-claude,
+# /snap/bin for lxc). The run wrapper derives the payload from its own path,
+# pins the state dir, re-runs the idempotent first-run, then exec's server.py.
+ExecStart=/bin/bash -l @BASE@/app/current/resources/bin/hugpy-station-web-run
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

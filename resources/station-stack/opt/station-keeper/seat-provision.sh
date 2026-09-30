@@ -91,10 +91,40 @@ else
   log "pip up-to-date (${cur:-?})"
 fi
 
-# ── 5. seat CLIs ─────────────────────────────────────────────────────────────
-log "installing seat packages (abstract-claude, hugpy-agent)"
-$PIP install -q -U abstract-claude >/dev/null 2>&1 && log "abstract-claude ok" || log "abstract-claude FAILED"
-$PIP install -q -U hugpy-agent    >/dev/null 2>&1 && log "hugpy-agent ok"     || log "hugpy-agent (optional) not installed"
+# ── 5. seat packages — the PINNED module manifest ────────────────────────────
+# 1.0.107: install the whole pinned set (resources/REQUIREMENTS.txt), force-
+# upgraded (`-U`) so an already-installed OLDER version is lifted to the pin —
+# this kills the "flail" where a long-lived venv sat at a stale abstract_claude/
+# hugpy_agent while the pins moved on. 1.0.112: bundled wheels DEPRECATED — every
+# pin is on PyPI and installed from there (no --find-links); PyPI resolves
+# transitive deps too. Legacy PyPI fallback kept for a payload without REQUIREMENTS.txt.
+log "installing seat packages from the pinned manifest"
+_here="$(cd "$(dirname "$(readlink -f "$0")")" 2>/dev/null && pwd)"
+REQ=""
+for d in "${HUGPY_STATION_APP_ROOT:-}/resources" "$_here/../../.." /opt/hugpy-station/resources \
+         "${HUGPY_STATION_STATE:-${XDG_CONFIG_HOME:-$HOME/.config}/hugpy-station}/app/current/resources"; do
+  [ -n "$d" ] && [ -f "$d/REQUIREMENTS.txt" ] && { REQ="$d/REQUIREMENTS.txt"; break; }
+done
+if [ -n "$REQ" ]; then
+  if $PIP install -q -U -r "$REQ" >/dev/null 2>&1; then
+    log "seat module set OK ($(grep -vE '^\s*#|^\s*$' "$REQ" | tr '\n' ' '))"
+  else
+    log "manifest install FAILED — retrying verbose"; $PIP install -U -r "$REQ" 2>&1 | tail -20
+  fi
+else
+  # Fallback: payload without REQUIREMENTS.txt — install the seat CLIs from PyPI.
+  if $PIP install -q -U abstract-claude >/dev/null 2>&1; then
+    log "abstract-claude ok (PyPI)"
+  else
+    log "abstract-claude FAILED"
+  fi
+  HA_SPEC="${HUGPY_AGENT_SPEC:-hugpy-agent[mct,serve]>=0.1.78}"
+  if $PIP install -q -U "$HA_SPEC" >/dev/null 2>&1; then
+    log "hugpy-agent ok ($HA_SPEC)"
+  else
+    log "hugpy-agent (optional) not installed"
+  fi
+fi
 for exe in abstract-claude hugpy-agent; do
   [ -x "$VENV/bin/$exe" ] && ln -sfn "$VENV/bin/$exe" "$BIN/$exe" && log "linked $exe -> $BIN"
 done

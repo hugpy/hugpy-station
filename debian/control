@@ -2,7 +2,7 @@ Package: hugpy-station
 Provides: fleet-console
 Conflicts: fleet-console
 Replaces: fleet-console
-Version: 1.0.48
+Version: 1.0.92
 License: hugpy Source-Available
 Vendor: keeper <keeper@abstractendeavors>
 Architecture: amd64

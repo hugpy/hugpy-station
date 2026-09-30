@@ -1,0 +1,38 @@
+#!/bin/bash
+# hugpy-station-web-run — the headless station's ExecStart (1.0.90), for BOTH
+# layouts. The unit runs it under `bash -l` (the account's own login PATH), and
+# it derives the payload from its own location, so the SAME file serves
+#   /opt/hugpy-station/resources/bin/hugpy-station-web-run          (hugpy-station-web@<user>)
+#   <state>/app/current/resources/bin/hugpy-station-web-run          (user unit, hugpy-station-user-install)
+#
+# It pins the ONE state dir explicitly (HUGPY_STATION_STATE, default
+# ${XDG_CONFIG_HOME:-<home>/.config}/hugpy-station), points abstract-claude at the station's own
+# AC_ROOT (<state>/abstract-claude: model + fresh-session config the seats
+# inherit), re-runs the idempotent first-run so every directory the app expects
+# exists before server.py starts, then exec's the backend.
+_self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+APP_ROOT="$(cd "$(dirname "$_self")/../.." 2>/dev/null && pwd)"
+[ -f "$APP_ROOT/resources/backend/server.py" ] || APP_ROOT=/opt/hugpy-station
+
+export HUGPY_STATION_STATE="${HUGPY_STATION_STATE:-${XDG_CONFIG_HOME:-$HOME/.config}/hugpy-station}"
+export AC_ROOT="${AC_ROOT:-$HUGPY_STATION_STATE/abstract-claude}"
+export STATION_CONSOLE_AUDIT="${STATION_CONSOLE_AUDIT:-$HUGPY_STATION_STATE/audit.log}"
+export HUGPY_STATION_APP_ROOT="$APP_ROOT"
+# ONE board file per locus: the station UI reads $HUGPY_HOME/state/todo.json
+# (server.py _hugpy_path), the reverse sync writes it, and the shipped
+# hugpy-station-board@<user> mirror watches the SAME path (TODO_FILE) — all
+# derived here, never hand-edited. ~/todo.json is the after-install's compat
+# symlink to it.
+export HUGPY_HOME="${HUGPY_HOME:-$HOME/.hugpy}"
+export TODO_FILE="${TODO_FILE:-$HUGPY_HOME/state/todo.json}"
+mkdir -p "$HUGPY_HOME/state" "$HUGPY_HOME/config" "$HUGPY_HOME/logs" "$HUGPY_HOME/run" 2>/dev/null || true
+# ~/.local/bin carries mct-pull/mct-push and the seat CLIs — on PATH even when
+# the login profile did not add it (a fresh account, or a non-login shell).
+case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) export PATH="$HOME/.local/bin:$PATH" ;; esac
+
+"$APP_ROOT/resources/bin/hugpy-station-firstrun" --self --quiet --app-root "$APP_ROOT" \
+    --state "$HUGPY_STATION_STATE" || true
+
+PY="${HUGPY_STATION_PYTHON:-python3}"
+cd "$HUGPY_STATION_STATE" 2>/dev/null || cd "$HOME" || true
+exec "$PY" "$APP_ROOT/resources/backend/server.py"

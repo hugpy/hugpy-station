@@ -51,6 +51,7 @@ directories:
 # read by the station-fix.sh repair path; burying it in the asar would break both.
 files:
   - main.js
+  - preload.js
   - package.json
 
 # -> <install root>/resources/... ; main.js resolves these via process.resourcesPath.
@@ -70,8 +71,27 @@ extraResources:
       - "!**/__pycache__"
       - "!**/__pycache__/**"
       - "!**/*.pyc"
+      # 1.0.90: in-place edit backups (server.py.bak-*, index.html.bak-*) and
+      # unit tests never ship — they were riding along in every package.
+      - "!**/*.bak"
+      - "!**/*.bak-*"
+      - "!**/*.bak.*"
+      - "!**/*.tmp"
+      - "!**/test_*.py"
   - from: resources/bin
     to: bin
+  # 2026-09-19 anti-drift: the inventory of live artifacts that no shipping repo
+  # owns. resources/bin/station-drift-check.sh reads it (section G) and
+  # build-release.sh will not build while an entry is outstanding, so it has to
+  # travel with the payload for the check to be runnable on an installed box.
+  - from: resources/unshipped-artifacts.tsv
+    to: unshipped-artifacts.tsv
+  # 1.0.112: the PINNED per-seat module manifest (abstract_claude / abstract_gpt /
+  # hugpy-agent[mct] / abstract-search). Bundled wheels DEPRECATED — these pins now
+  # install from PyPI at their exact versions (station-provision-venv /
+  # seat-provision.sh), so only the manifest travels with the payload.
+  - from: resources/REQUIREMENTS.txt
+    to: REQUIREMENTS.txt
   # station-stack (2026-08-27): the VM-side keeper stack bin/station-stack-install
   # deploys via lxc exec. Shipped so a reinstall no longer erases the hand-added
   # drift copy (station-app-source-of-truth). Same hygiene filters as backend.
@@ -89,6 +109,10 @@ extraResources:
     to: systemd
   - from: resources/VERSION
     to: VERSION
+  # Native shell for abstract-claude serve. Its source ships in the pinned wheel;
+  # this desktop entry and wrapper make it discoverable on a Station install.
+  - from: resources/abstract-claude-console.desktop
+    to: abstract-claude-console.desktop
 
 # -> <install root>/... (siblings of the Electron binary, NOT inside resources/).
 # The launcher must sit next to `hugpy-station` because it derives APP_ROOT from

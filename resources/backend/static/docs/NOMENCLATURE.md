@@ -9,12 +9,12 @@ file.
 |---|---|---|
 | **locus** | The machine whose filesystem, processes and shell the seats ground in. What the locus dropdown selects. Kind is an attribute: `lxd` (a guest VM), `ssh` (a remote host), `host` (this machine, shown as **⌂ host**). | console, station, instance, VM |
 | **seat** | One attachable terminal surface on a locus: **A** (frontier), **B**/**local** (local keeper), **shell**. Each seat runs one **backend**. | session, tab |
-| **backend** | The program a seat runs: frontier `mct` (the pointer-exchange arbiter, promoted 2026-08-27) / `mct-deprecated` (the original broker) / `claude-code` / `clawd-code`; local `opencode` / `qwen-code`; shell `exec` / `ssh`. Each backend has its own tmux session (`keeper-mct`, `keeper-claude`, …). | model |
+| **backend** | The program a seat runs: frontier `serve` (`abstract-claude serve` — the `/ac/` console, the DEFAULT keeper surface since 2026-09-16) / `mct` (the pointer-exchange arbiter, promoted 2026-08-27) / `claude-code` / `codex`; local `opencode` / `qwen-code`; shell `exec` / `ssh`. Every frontier backend except `serve` has its own tmux session (`keeper-claude`, `keeper-codex`, …) and is labelled "terminal seat (tmux) · …" in the picker; `serve` is a user unit (`abstract-claude-serve@station`), not a seat. Retired from the picker: `mct-deprecated`, `clawd-code`. | model, surface |
 | **model** | The LLM a backend calls (e.g. A's claude alias, B's local model). | backend |
 | **A** | The frontier (metered) model/seat. | keeper (A is *a* keeper; "the keeper" unqualified = the frontier seat of the active locus) |
 | **B** | The local, free model that mediates C→B→A, judges todo pings, revises prompts. Mediates the `mct` exchange (and lived inside the deprecated broker `mct`). | local shell |
 | **C** | The operator (you). | — |
-| **frontier** | Adjective for the metered side: the A seat, its backends (`mct` / `mct-deprecated` / `claude-code` / `clawd-code`) and the paid API model behind them. "The frontier" unqualified = the A seat of the active locus. | local |
+| **frontier** | Adjective for the metered side: the A surface, its backends (`serve` / `mct` / `claude-code` / `codex`) and the paid API model behind them. "The frontier" unqualified = the A surface of the active locus. | local |
 | **local** | Adjective for the free, on-hardware side: the B seat, its backends (`opencode` / `qwen-code`) and the local model. Also the short name of the B seat itself. | the `host` locus (that is a *place*; local is a *cost side*) |
 | **shell** | The third seat: a plain terminal on the locus, no model attached. Its backend is `exec` (host/lxd) or `ssh` (remote loci). | B, "local shell" as a name for B |
 | **VM** | Loosely used in code and API paths (`/api/vm/<name>/…`) where **locus** is meant. In prose, prefer locus; say "LXD guest" only when the kind itself matters. | locus of kind `ssh` (an ssh host is not a VM here, even if it is a guest elsewhere) |

@@ -7,7 +7,7 @@
    on a locus are keeper-writable (group `station-keepers`); every revision is a receipt in
    `~/.hugpy/station-revisions/revisions.jsonl` with a backup and a rollback (`ops/station-revise.sh`),
    and is reconciled into the Station source before the next release.
-3. **Coordination is peer-to-peer.** Boards (`~/todo.json`), canvas (`~/flow.json`), mail
+3. **Coordination is peer-to-peer.** Boards (`~/todo.json`), canvas (toolserver `canvas/get|put`), mail
    (`~/keeper-mail/`, kmsg.v1, `ops/keeper-msg.sh`), and `~/keeper-mail/{peers,locus}.json` are the
    fabric. Any keeper may message, request, and propose to any other. Ids are namespaced per
    keeper (`or-*` hugpy, `opk-*` op).

@@ -46,6 +46,13 @@ if [ -f "$DESKTOP_FILE" ]; then
     sed -i "s|^Exec=.*|Exec=\"$LAUNCHER\" %U|" "$DESKTOP_FILE" || true
 fi
 
+# The companion native window is source-owned by the bundled abstract-claude
+# wheel; install its menu entry only when this Station payload carries it.
+if [ -f "$APP_ROOT/resources/abstract-claude-console.desktop" ]; then
+    cp -f "$APP_ROOT/resources/abstract-claude-console.desktop" \
+        /usr/share/applications/abstract-claude-console.desktop 2>/dev/null || true
+fi
+
 # --- supersede previous hugpy Station desktop entries (1.0.45) ----------------
 # ONE "hugpy Station" in the menu: the entry this package just installed.
 # Previous incarnations leave entries that either duplicate it or SHADOW it
@@ -92,6 +99,8 @@ ln -sf "$APP_ROOT/resources/bin/vm-new" /usr/bin/fleet-vm-new 2>/dev/null || tru
 if [ -d /etc/systemd/system ] && [ -f "$APP_ROOT/resources/systemd/hugpy-station-web@.service" ]; then
     ln -sf "$APP_ROOT/resources/systemd/hugpy-station-web@.service" \
         /etc/systemd/system/hugpy-station-web@.service 2>/dev/null || true
+    ln -sf "$APP_ROOT/resources/systemd/hugpy-station-board@.service" \
+        /etc/systemd/system/hugpy-station-board@.service 2>/dev/null || true
 fi
 systemctl daemon-reload 2>/dev/null || true
 
@@ -181,6 +190,70 @@ else
     fix_seat_settings "$(getent passwd 1000 2>/dev/null | cut -d: -f1)"
 fi
 
+# --- hugpy Station 1.0.90: ONE-SHOT first-run for every station user -----------
+# "Install the .deb" is the whole story. This block (a) puts the seat CLIs and
+# the install tools on the system PATH, (b) establishes the headless station
+# instance for the installing user (hugpy-station-locus: instance env with a
+# free PORT, STATION_LOCUS, HUGPY_STATION_STATE, console token; unit enabled),
+# (c) runs hugpy-station-firstrun for EVERY station user on the host — the
+# installing user plus every existing /etc/hugpy-station/<user>.env instance —
+# which seeds the state dir, the working model default, the local-keeper
+# charge, the abstract-claude config, ~/.local/bin/mct-pull|mct-push, and
+# HUGPY_URL/HUGPY_API_KEY (found on the host or minted), and (d) restarts the
+# running instances so they run exactly THIS package. Idempotent; never fatal.
+# Set HUGPY_STATION_NO_HEADLESS=1 in the installer env to skip (b) and (d).
+ln -sf "$APP_ROOT/resources/bin/hugpy-station-locus" /usr/bin/hugpy-station-locus 2>/dev/null || true
+for cli in hugpy-station-firstrun hugpy-station-user-install mct-pull mct-push; do
+    ln -sf "$APP_ROOT/resources/bin/$cli" "/usr/local/bin/$cli" 2>/dev/null || true
+done
+station_users=""
+for f in /etc/hugpy-station/*.env; do
+    [ -f "$f" ] || continue
+    n="$(basename "$f" .env)"
+    case "$n" in toolserver|hugpy-api|*.bak*) continue ;; esac
+    id "$n" >/dev/null 2>&1 && station_users="$station_users $n"
+done
+install_user="$SUDO_USER"
+[ -n "$install_user" ] || install_user="$(getent passwd 1000 2>/dev/null | cut -d: -f1)"
+if [ -n "$install_user" ] && [ "$install_user" != root ]; then
+    station_users="$station_users $install_user"
+    # SOVEREIGN USER LAYOUT (1.0.90): an account that already runs the station
+    # from its OWN systemd user manager (hugpy-station-user-install: unit in
+    # ~/.config/systemd/user, payload under <state>/app/current) must NOT also
+    # get a root-owned system instance. Minting one would enable a SECOND
+    # station for that user on a freshly picked port, with its own env file and
+    # console token, competing with the sovereign one. This matters on the
+    # keeper, where the .deb is installed into /opt by an operator whose
+    # $SUDO_USER is exactly that sovereign account.
+    install_home="$(getent passwd "$install_user" 2>/dev/null | cut -d: -f6)"
+    if [ -n "$install_home" ] \
+       && [ -f "$install_home/.config/systemd/user/hugpy-station-web.service" ]; then
+        echo "hugpy-station: '$install_user' runs a sovereign user-manager station — not minting a system instance."
+        echo "               update it with:  hugpy-station-user-install <deb>   (as $install_user)"
+    elif [ -z "$HUGPY_STATION_NO_HEADLESS" ] && [ -x "$APP_ROOT/resources/bin/hugpy-station-locus" ]; then
+        "$APP_ROOT/resources/bin/hugpy-station-locus" enable "$install_user" --quiet \
+            || echo "hugpy-station: headless instance for '$install_user' not enabled (see above); the desktop app still works"
+    fi
+fi
+for u in $(printf '%s\n' $station_users | sort -u); do
+    "$APP_ROOT/resources/bin/hugpy-station-firstrun" "$u" --app-root "$APP_ROOT" --quiet || true
+done
+if [ -z "$HUGPY_STATION_NO_HEADLESS" ]; then
+    systemctl daemon-reload 2>/dev/null || true
+    # an upgrade must leave every instance running THIS payload (not the old one in memory)
+    systemctl try-restart 'hugpy-station-web@*' 2>/dev/null || true
+    # ONE board file per locus: the shipped mirror watches the file the station
+    # UI reads. Enabled per station user unless the host already runs its own
+    # board-mirror@<user> (that one stays authoritative — never two mirrors), or
+    # the operator retired that locus instance (/etc/hugpy-station/<user>.retired).
+    for u in $(printf '%s\n' $station_users | sort -u); do
+        [ -e "/etc/hugpy-station/$u.retired" ] && continue
+        systemctl is-enabled "board-mirror@$u.service" >/dev/null 2>&1 && continue
+        systemctl is-active "board-mirror@$u.service" >/dev/null 2>&1 && continue
+        systemctl enable --now "hugpy-station-board@$u.service" >/dev/null 2>&1 || true
+    done
+fi
+
 # --- hugpy Station: provision the model-seat CLIs (best-effort, never fatal) --
 # A fresh box has none of the seat backends, so frontier (claude / abstract-
 # claude mct) and local (hugpy-agent) report unavailable and only the shell
@@ -196,7 +269,9 @@ provision_seats() {
     seat_prov='/opt/hugpy-station/resources/station-stack/opt/station-keeper/seat-provision.sh'
     [ -r "$seat_prov" ] || return 0
     echo "hugpy-station: provisioning seat CLIs for '$seat_user' in the background (log: $seat_home/.local/share/station-seats/provision.log)"
-    install -d -o "$seat_user" -g "$seat_user" -m 0755 "$seat_home/.local/share/station-seats" 2>/dev/null || true
+    for d in "$seat_home/.local" "$seat_home/.local/share" "$seat_home/.local/bin" "$seat_home/.local/share/station-seats"; do
+        install -d -o "$seat_user" -g "$seat_user" -m 0755 "$d" 2>/dev/null || true
+    done
     # Forward an install-time OAuth token (if the installer set one) so the seat
     # user's provision authenticates with the same durable token as the toolserver.
     setsid sudo -u "$seat_user" -H \
@@ -208,6 +283,44 @@ if [ -n "$SUDO_USER" ]; then
     provision_seats "$SUDO_USER"
 else
     provision_seats "$(getent passwd 1000 2>/dev/null | cut -d: -f1)"
+fi
+
+# --- hugpy Station: toolserver credential, BUILT INTO THE INSTALL (1.0.63) ------
+# The station carries its own operator token in <user>/.config/hugpy-station/
+# toolserver.env (0600). The backend loads it at startup, authenticates every
+# toolserver call with it (loci-sync, handoffs, exchanges) and exports it to
+# every seat it spawns (mct uploads, MCP bridge). Provisioned here from the
+# installer's environment:   HUGPY_OPERATOR_TOKEN=… [HUGPY_TOOLSERVER_URL=…] sudo -E dpkg -i …
+# Never overwrites an existing file. Without a token: the CLI below sets it later.
+ln -sf "$APP_ROOT/resources/bin/hugpy-station-toolserver" /usr/local/bin/hugpy-station-toolserver 2>/dev/null || true
+provision_toolserver_cred() {
+    cred_user="$1"; cred_home=""
+    [ -n "$cred_user" ] && [ "$cred_user" != 'root' ] || return 0
+    cred_home="$(getent passwd "$cred_user" 2>/dev/null | cut -d: -f6)"
+    [ -n "$cred_home" ] && [ -d "$cred_home" ] || return 0
+    cred_dir="$cred_home/.config/hugpy-station"; cred_file="$cred_dir/toolserver.env"
+    if [ -s "$cred_file" ]; then
+        echo "hugpy-station: toolserver credential present ($cred_file)"; return 0
+    fi
+    if [ -z "$HUGPY_OPERATOR_TOKEN" ]; then
+        echo "hugpy-station: NO toolserver credential — the station cannot read/write the fleet DB until one is set:"
+        echo "               hugpy-station-toolserver set <operator token>     (as $cred_user)"
+        echo "               or reinstall with: HUGPY_OPERATOR_TOKEN=... sudo -E dpkg -i <deb>"
+        return 0
+    fi
+    install -d -o "$cred_user" -g "$cred_user" -m 0700 "$cred_dir" 2>/dev/null || true
+    {
+        echo "# hugpy-station toolserver credential — written by the package install; 0600"
+        [ -n "$HUGPY_TOOLSERVER_URL" ] && echo "STATION_CONSOLE_TOOLSERVER=$HUGPY_TOOLSERVER_URL"
+        echo "HUGPY_OPERATOR_TOKEN=$HUGPY_OPERATOR_TOKEN"
+    } > "$cred_file.tmp" && chown "$cred_user:$cred_user" "$cred_file.tmp" && chmod 0600 "$cred_file.tmp" \
+        && mv -f "$cred_file.tmp" "$cred_file" \
+        && echo "hugpy-station: toolserver credential installed for '$cred_user' -> $cred_file"
+}
+if [ -n "$SUDO_USER" ]; then
+    provision_toolserver_cred "$SUDO_USER"
+else
+    provision_toolserver_cred "$(getent passwd 1000 2>/dev/null | cut -d: -f1)"
 fi
 
 exit 0

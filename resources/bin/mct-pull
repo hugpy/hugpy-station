@@ -1,0 +1,19 @@
+#!/bin/sh
+# mct-pull — resolve immutable objects from this station's durable MCT ledger.
+#
+#   mct-pull <mct://handle> [--output FILE]          -> the object (JSON prompt/pointer)
+#   mct-pull <mct://handle> --reply-file <file>      -> publish the reply, prints the reply pointer
+#
+# Layout-agnostic (1.0.90): the gateway is resolved NEXT TO THIS SCRIPT, so the
+# same file works from /opt/hugpy-station/resources/bin (the .deb) and from a
+# user layout's <state>/app/current/resources/bin. The state dir is
+# HUGPY_STATION_STATE, else the canonical ~/.config/hugpy-station.
+self="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+here="$(cd "$(dirname "$self")" 2>/dev/null && pwd)"
+gw="$here/../backend/mct_gateway.py"
+[ -f "$gw" ] || gw=/opt/hugpy-station/resources/backend/mct_gateway.py
+if [ -z "${HUGPY_STATION_STATE:-}" ]; then
+    HUGPY_STATION_STATE="${XDG_CONFIG_HOME:-$HOME/.config}/hugpy-station"
+    export HUGPY_STATION_STATE
+fi
+exec "${HUGPY_STATION_PYTHON:-python3}" "$gw" "$@"

@@ -1,0 +1,7 @@
+{
+  "_": "hugpy-station shipped default (1.0.90). Seeded into <state>/frontier-models.json on first run only; edit that file (or 🛡 steward → models). claude-opus-4-8 is the WORKING default — claude-fable-5 was over quota (429) on fresh stations.",
+  "mct": "claude-opus-4-8",
+  "claude-code": "claude-opus-4-8",
+  "codex": "",
+  "hugpy": ""
+}

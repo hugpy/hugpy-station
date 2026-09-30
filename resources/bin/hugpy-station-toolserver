@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# hugpy-station-toolserver — the station's toolserver credential (1.0.63).
+#
+# The station CARRIES its own operator token in ~/.config/hugpy-station/toolserver.env
+# (0600). The backend loads it at startup, uses it for every toolserver call
+# (loci-sync, handoffs, exchanges) and exports it to every seat it spawns.
+#
+#   hugpy-station-toolserver set <token> [--url https://toolserver.hugpy.ai]
+#   hugpy-station-toolserver status
+#   hugpy-station-toolserver test          # loci/list against the toolserver with the stored token
+#
+# Run as the station user (no sudo). The package's after-install writes the same
+# file when the installer exports HUGPY_OPERATOR_TOKEN:  HUGPY_OPERATOR_TOKEN=… sudo -E dpkg -i …
+set -euo pipefail
+STATE="${HUGPY_STATION_STATE:-${XDG_CONFIG_HOME:-$HOME/.config}/hugpy-station}"
+F="$STATE/toolserver.env"
+die() { echo "hugpy-station-toolserver: $*" >&2; exit 1; }
+url_of() { sed -n 's/^STATION_CONSOLE_TOOLSERVER=//p' "$F" 2>/dev/null | head -1; }
+tok_of() { sed -n 's/^HUGPY_OPERATOR_TOKEN=//p' "$F" 2>/dev/null | head -1; }
+case "${1:-}" in
+  set)
+    TOK="${2:-}"; URL=""
+    shift 2 2>/dev/null || die "usage: set <token> [--url URL]"
+    while [ $# -gt 0 ]; do case "$1" in --url) URL="$2"; shift 2;; *) die "unknown option $1";; esac; done
+    [ -n "$TOK" ] || die "token required"
+    [[ "$TOK" =~ ^[A-Za-z0-9_.:-]{16,200}$ ]] || die "token looks wrong (16-200 url-safe chars)"
+    mkdir -p "$STATE"; chmod 700 "$STATE" 2>/dev/null || true
+    ( umask 077
+      { echo "# hugpy-station toolserver credential — written by hugpy-station-toolserver; 0600"
+        [ -n "$URL" ] && echo "STATION_CONSOLE_TOOLSERVER=$URL"
+        echo "HUGPY_OPERATOR_TOKEN=$TOK"; } > "$F.tmp" && mv -f "$F.tmp" "$F" )
+    chmod 600 "$F"
+    echo "stored $F (url: ${URL:-default https://toolserver.hugpy.ai})"
+    echo "restart hugpy-station (or POST /api/toolserver/config) for the running station to pick it up" ;;
+  status)
+    if [ -r "$F" ]; then t="$(tok_of)"; echo "file : $F"; echo "url  : $(url_of)"; [ -z "$(url_of)" ] && echo "       (default https://toolserver.hugpy.ai)"; echo "token: ${t:0:4}…${t: -2} (${#t} chars)"
+    else echo "no credential: $F absent — run: hugpy-station-toolserver set <token>"; exit 1; fi ;;
+  test)
+    t="$(tok_of)"; [ -n "$t" ] || die "no token stored (set one first)"
+    u="$(url_of)"; u="${u:-https://toolserver.hugpy.ai}"
+    code=$(curl -s -m 10 -o /tmp/.hst.$$ -w '%{http_code}' -H "X-Operator-Token: $t" -H 'Content-Type: application/json' "$u/loci/list" -d '{}' || true)
+    if [ "$code" = 200 ]; then echo "ok: $u accepts the token; loci: $(python3 -c 'import json,sys; d=json.load(open(sys.argv[1]))["result"]; print(len(d if isinstance(d,list) else d.get("loci") or d.get("rows") or []))' /tmp/.hst.$$ 2>/dev/null)"; rm -f /tmp/.hst.$$
+    else rm -f /tmp/.hst.$$; die "$u answered $code (401 = wrong token, 000 = unreachable)"; fi ;;
+  -h|--help|"") sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//' ;;
+  *) die "unknown command $1 (set|status|test)" ;;
+esac

@@ -5,8 +5,8 @@ Supersedes nothing: this is a NEW line of work beside the 07-25 handoffs
 
 1. `IDEA_PHASE/FLOW-cinema-inference-end-to-end.md` — the flow map, the 🔖
    central goal, the robust TODO list (§2), the external proposals (§3).
-   The same flow is on the host console canvas (`~/flow.json`, ⋔ drawer,
-   `/api/vm/@keeper/flow`).
+   The same flow is on the host console canvas (toolserver `canvas/get
+   locus=<locus> kind=flow`, ⋔ drawer, `/api/vm/@keeper/flow`).
 2. `IDEA_PHASE/METHOD-vigilant-inference.md` — the method, what is built,
    the independent verification (§7) and what it changed.
 3. `IDEA_PHASE/GAP-AUDIT-oracle-2026-08-20.md` — the pre-implementation audit.

@@ -22,6 +22,7 @@ import asyncio
 import base64
 import fcntl
 import getpass
+import logging
 import hashlib
 import hmac
 import ipaddress
@@ -32,6 +33,7 @@ import re
 import secrets
 import shlex
 import shutil
+import socket
 import subprocess
 import signal
 import contextlib
@@ -310,7 +312,119 @@ def csrf_ok(request):
     return bool(sent) and hmac.compare_digest(sent, csrf_token_for(cookie))
 
 
+# ── 📜 console log feed (board t1, operator 2026-09-10: "a live log feed
+# something similar to journalctl -f but specific for the console"). A ring of
+# the backend's OWN log records (every station.* logger, warnings from any
+# library, audit lines mirrored below) served as a backlog (/api/steward/log)
+# and a live SSE stream (/api/steward/log/stream). Independent of journald so
+# it works identically for the dev unit and the packaged desktop app.
+import collections
+_LOG_RING = collections.deque(maxlen=2000)
+_LOG_SUBS = set()            # one asyncio.Queue per open stream
+_LOG_LOOP = None             # the server loop — records may come from executor threads
+_LOG_SEQ = [0]
+_alog = logging.getLogger("station.audit")
+
+
+class _RingLogHandler(logging.Handler):
+    def emit(self, record):
+        if record.name.startswith("aiohttp.access"):      # request noise: not a console event
+            return
+        try:
+            msg = self.format(record)
+        except Exception:
+            msg = str(record.getMessage())
+        _LOG_SEQ[0] += 1
+        doc = {"seq": _LOG_SEQ[0], "ts": round(record.created, 3), "level": record.levelname,
+               "name": record.name, "msg": msg[:4000]}
+        _LOG_RING.append(doc)
+        loop = _LOG_LOOP
+        if loop is not None and _LOG_SUBS:
+            try:
+                loop.call_soon_threadsafe(_log_fanout, doc)
+            except RuntimeError:
+                pass                                       # loop closing
+
+
+def _log_fanout(doc):
+    for q in list(_LOG_SUBS):
+        try:
+            q.put_nowait(doc)
+        except asyncio.QueueFull:
+            pass
+
+
+def _install_log_ring():
+    root = logging.getLogger()
+    if any(isinstance(h, _RingLogHandler) for h in root.handlers):
+        return
+    if not root.handlers:
+        # Once root has a handler, logging's lastResort (WARNING+ → stderr) no
+        # longer applies; keep that path so journald still sees warnings.
+        sh = logging.StreamHandler(sys.stderr)
+        sh.setLevel(logging.WARNING)
+        sh.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+        root.addHandler(sh)
+    h = _RingLogHandler()
+    h.setLevel(logging.DEBUG)
+    h.setFormatter(logging.Formatter("%(message)s"))
+    root.addHandler(h)
+    if root.level > logging.INFO:
+        root.setLevel(logging.INFO)
+
+
+_install_log_ring()
+
+
+async def _start_log_ring(app):
+    global _LOG_LOOP
+    _LOG_LOOP = asyncio.get_running_loop()
+    _alog.info("console backend up — log feed live (ring %d)", _LOG_RING.maxlen)
+
+
+async def api_steward_log(request):
+    """GET /api/steward/log?tail=N — the console backend's own recent log
+    records, oldest first: {seq, ts, level, name, msg}."""
+    try:
+        n = max(1, min(_LOG_RING.maxlen, int(request.query.get("tail") or 300)))
+    except ValueError:
+        n = 300
+    rows = list(_LOG_RING)[-n:]
+    return web.json_response({"ok": True, "rows": rows, "seq": _LOG_SEQ[0], "capacity": _LOG_RING.maxlen})
+
+
+async def api_steward_log_stream(request):
+    """GET /api/steward/log/stream?after=SEQ — Server-Sent Events: the backlog
+    newer than SEQ first, then one `log` event per record as it happens;
+    `: keepalive` every 15 s. EventSource reconnects on its own."""
+    try:
+        after = int(request.query.get("after") or 0)
+    except ValueError:
+        after = 0
+    resp = web.StreamResponse(headers={"Content-Type": "text/event-stream",
+                                       "Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    await resp.prepare(request)
+    q = asyncio.Queue(maxsize=1000)
+    _LOG_SUBS.add(q)
+    try:
+        await resp.write(b": connected\n\n")
+        for doc in [d for d in list(_LOG_RING) if d["seq"] > after]:
+            await resp.write(("event: log\ndata: " + json.dumps(doc) + "\n\n").encode())
+        while True:
+            try:
+                doc = await asyncio.wait_for(q.get(), 15)
+                await resp.write(("event: log\ndata: " + json.dumps(doc) + "\n\n").encode())
+            except asyncio.TimeoutError:
+                await resp.write(b": keepalive\n\n")
+    except (ConnectionResetError, asyncio.CancelledError, RuntimeError):
+        pass
+    finally:
+        _LOG_SUBS.discard(q)
+    return resp
+
+
 def audit(request, action, detail="", ok=True):
+    _alog.log(logging.INFO if ok else logging.WARNING, "%s %s", action, detail)
     try:
         with open(AUDIT_FILE, "a") as f:
             f.write(json.dumps({
@@ -514,16 +628,31 @@ def _bridge_open(name):
     return (BRIDGE_STATE / f"{name}.gate").exists()
 
 
+_DISCOVER_CACHE = {"ts": 0.0, "stations": None, "err": None}
+_DISCOVER_TTL = 2.0  # collapse rapid known_names()/discover() calls into one `lxc list`
+
+
 async def discover():
     # Workbench mode (the console installed INSIDE a station, no LXD of its
     # own): no stations is a normal answer, not a crash — the terminal
     # surfaces, board, feed, and B chat are the point of such an install.
+    # 2026-09-18: short TTL cache so per-request known_names() callers do not
+    # each shell out to `lxc list` (was spawning dozens of snap.lxd transient
+    # scopes per minute, ×3 station users).
+    _now = time.monotonic()
+    if _now - _DISCOVER_CACHE["ts"] < _DISCOVER_TTL and (
+            _DISCOVER_CACHE["stations"] is not None or _DISCOVER_CACHE["err"] is not None):
+        if _DISCOVER_CACHE["err"] is not None:
+            raise RuntimeError(_DISCOVER_CACHE["err"])
+        return _DISCOVER_CACHE["stations"]
     try:
         rc, out, err = await _run("lxc", "list", "--format", "json")
     except OSError:
+        _DISCOVER_CACHE.update(ts=_now, stations=[], err=None)
         return []
     if rc != 0:
-        raise RuntimeError(f"lxc list failed: {err.strip()}")
+        _DISCOVER_CACHE.update(ts=_now, stations=None, err=f"lxc list failed: {err.strip()}")
+        raise RuntimeError(_DISCOVER_CACHE["err"])
     stations = []
     for inst in json.loads(out):
         name = inst["name"]
@@ -539,11 +668,21 @@ async def discover():
             "bridge": _bridge_open(name),
         })
     stations.sort(key=lambda s: (s["base"], s["name"]))
+    _DISCOVER_CACHE.update(ts=_now, stations=stations, err=None)
     return stations
 
 
 async def known_names():
-    return {s["name"] for s in await discover()}
+    """Addressable station names: LXD guests (when lxc works here) plus the
+    ssh/toolserver loci. 2026-09-03: on ae the vm_mgr user cannot run the snap
+    lxc CLI ("home directories outside of /home needs configuration"), which
+    made every caller a raw 500 — lxc failure now degrades to the loci list."""
+    try:
+        names = {s["name"] for s in await discover()}
+    except RuntimeError as e:
+        logging.getLogger("station.fleet").warning("known_names: %s", e)
+        names = set()
+    return names | set(_ssh_hosts())
 
 
 # --------------------------------------------------------------------------- #
@@ -593,6 +732,7 @@ async def api_console_url(request):
     this harness is the switcher between them. Returns a one-click tokened URL
     (the workbench exchanges it for a session cookie). The token lives in
     $VMCONSOLE_TOKEN_DIR/vmconsole-<name>.token, written by install-vm-console."""
+    return _retired("workbench console-url", request.match_info["name"])
     name = request.match_info["name"]
     h = _ssh_host(name)
     if name not in await known_names() and not h:
@@ -746,7 +886,15 @@ async def api_keeper_log_show(request):
 
 
 async def api_keeper_backups(request):
-    rc, out, err = await _run(str(VM_BIN / "keeper-backup"), "status")
+    # 1.0.85: keeper-backup is a vm_mgr-only tool — hugpy Station does not ship
+    # it (VM_BIN/keeper-backup absent → FileNotFoundError → HTTP 500 before).
+    exe = VM_BIN / "keeper-backup"
+    if not exe.is_file():
+        return web.json_response({"ok": False, "text": "keeper-backup is not shipped with hugpy Station (vm_mgr-only tool)"})
+    try:
+        rc, out, err = await _run(str(exe), "status")
+    except OSError as e:
+        return web.json_response({"ok": False, "text": f"keeper-backup could not run: {e}"})
     return web.json_response({"ok": rc == 0, "text": out or err})
 
 
@@ -1272,6 +1420,67 @@ A_DEFAULT_SETTINGS = json.dumps({
 FV_STATE_HOME = Path(os.environ.get("HUGPY_STATION_STATE") or os.path.join(
     os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config"),
     "hugpy-station"))
+
+# --- toolserver credential (1.0.63) ------------------------------------------
+# The station CARRIES its own toolserver credential: FV_STATE_HOME/toolserver.env
+# (KEY=VALUE lines, 0600) — written by the package's after-install from the
+# installer's HUGPY_OPERATOR_TOKEN, or later by `hugpy-station-toolserver set` /
+# POST /api/toolserver/config. Loaded into the process environment at startup
+# (a real env var always wins), so loci-sync / handoff / exchange calls to the
+# token-gated toolserver authenticate, AND every seat this station spawns
+# inherits HUGPY_OPERATOR_TOKEN (the mct's exchange uploads, the abstract-claude
+# MCP bridge). Built into the install; no shell-of-launch dependency.
+TOOLSERVER_ENV_PATH = FV_STATE_HOME / "toolserver.env"
+_TS_TOKEN_NAMES = ("STATION_CONSOLE_TOOLSERVER_TOKEN", "HUGPY_OPERATOR_TOKEN",
+                   "TOOLSERVER_OPERATOR_TOKEN", "TOOLSERVER_TOKEN")
+# 1.0.65: the same file may carry the hugpy central base (HUGPY_URL / HUGPY_BASE) for
+# the console-api sidecar's model list + B chat — ae: http://127.0.0.1:7002 (default),
+# other hosts: https://api.hugpy.ai or the LAN address.
+_TS_ENV_KEYS = ("STATION_CONSOLE_TOOLSERVER", "HUGPY_URL", "HUGPY_BASE",
+                "STATION_LOCUS", "STATION_IDLE_RELAUNCH_MIN") + _TS_TOKEN_NAMES
+
+
+def _load_toolserver_env(path=None):
+    """Read toolserver.env into os.environ (env wins). Returns the keys loaded."""
+    loaded = []
+    try:
+        lines = Path(path or TOOLSERVER_ENV_PATH).read_text(encoding="utf-8").splitlines()
+    except OSError:
+        lines = []
+    for ln in lines:
+        ln = ln.strip()
+        if not ln or ln.startswith("#") or "=" not in ln:
+            continue
+        k, v = ln.split("=", 1)
+        k, v = k.strip(), v.strip().strip('"').strip("'")
+        if k in _TS_ENV_KEYS and v and not os.environ.get(k):
+            os.environ[k] = v
+            loaded.append(k)
+    tok = next((os.environ.get(n) for n in _TS_TOKEN_NAMES if os.environ.get(n)), "")
+    if tok:                                   # one token serves every consumer name
+        for n in _TS_TOKEN_NAMES:
+            os.environ.setdefault(n, tok)
+    return loaded
+
+
+def _write_toolserver_env(token, url=""):
+    """Persist {token, url} to toolserver.env (0600) and apply it live."""
+    TOOLSERVER_ENV_PATH.parent.mkdir(parents=True, exist_ok=True)
+    body = "# hugpy-station toolserver credential — written by the station; 0600\n"
+    if url:
+        body += "STATION_CONSOLE_TOOLSERVER=%s\n" % url
+    body += "HUGPY_OPERATOR_TOKEN=%s\n" % token
+    tmp = TOOLSERVER_ENV_PATH.with_suffix(".env.tmp")
+    tmp.write_text(body, encoding="utf-8")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, TOOLSERVER_ENV_PATH)
+    for n in _TS_TOKEN_NAMES:
+        os.environ[n] = token
+    if url:
+        os.environ["STATION_CONSOLE_TOOLSERVER"] = url
+
+
+_TOOLSERVER_ENV_LOADED = _load_toolserver_env()
 A_SETTINGS_TEMPLATE_PATH = (Path(os.environ["A_SETTINGS_TEMPLATE"])
                             if os.environ.get("A_SETTINGS_TEMPLATE")
                             else FV_STATE_HOME / "a-settings-template.json")
@@ -1353,6 +1562,95 @@ async def term_bgate(request):
             json.dumps({"enabled": enabled}) + "\n")
         return web.json_response({"ok": True, "enabled": enabled})
     return web.json_response({"enabled": _b_enabled()})
+
+
+async def term_unstick(request):
+    """POST /api/term/unstick — send the raw undo byte (Ctrl+_ / 0x1F) straight
+    into the live keeper-claude tmux pane's PTY, by session name, over tmux
+    send-keys — NOT over the browser's /wsterm keystroke path.
+
+    operator 2026-09-15/16 ("is it fixed or not... it's not fixed"): the
+    Ctrl+_ browser-zoom fix in fleetview-term.js calls fvSend, which (a)
+    no-ops whenever the frontier surface is showing its mct-pointer-exchange
+    display (the default) and (b) even unblocked, /wsterm's websocket for
+    that display is bound to the DIFFERENT keeper-mct tmux session, not the
+    stuck keeper-claude one. Neither the mode nor which browser view is open
+    matters here: this always targets the real keeper-claude session by
+    name, the same way _ping_station_keeper / the /model live-apply path
+    already do."""
+    sess = _tmux_session_for("frontier", "claude-code") or "keeper-claude"
+    if not await _tmux_has(sess):
+        audit(request, "term-unstick", sess + " (no live seat)", ok=False)
+        return web.json_response(
+            {"ok": False, "error": "no live keeper-claude seat", "session": sess},
+            status=409)
+    rc, _o, err = await _run(
+        "tmux", "-L", KEEPER_TMUX_SOCK, "send-keys", "-t", "=" + sess + ":", "C-_")
+    audit(request, "term-unstick", sess, ok=(rc == 0))
+    if rc != 0:
+        return web.json_response(
+            {"ok": False, "error": (err or "").strip()[:200], "session": sess},
+            status=502)
+    return web.json_response({"ok": True, "session": sess})
+
+
+# --- paste bypass: /api/term/paste (operator 2026-09-17) --------------------
+# The operator cannot paste into the browser terminal at all: right-click is
+# swallowed by fleetview-term.js's contextmenu handler and Ctrl+V shows the
+# "not allowed" cursor, so the browser keystroke path is a dead end. Same wall
+# term_unstick hit for Ctrl+_, and the same resolution: do NOT go through
+# /wsterm — inject into the live tmux pane by SESSION NAME with send-keys.
+TERM_PASTE_MAX = 200_000        # matches queue.py MAX_TEXT
+TERM_PASTE_CHUNK = 2000         # well under the execve argv limit
+
+
+async def term_paste(request):
+    """POST /api/term/paste {"text": str, "session"?: str} — type text straight
+    into the live keeper tmux pane, by session name, over tmux send-keys.
+
+    NEVER sends Enter: the text is inserted and the operator reviews and
+    submits it themselves. Newline handling (tested on tmux 3.4): send-keys -l
+    passes a real "\\n" through as 0x0A, which a TUI reads as Enter and would
+    submit early — so multi-line text is wrapped in bracketed-paste markers
+    (ESC[200~ … ESC[201~), which claude-code/ink and readline treat as ONE
+    paste with embedded newlines. Single-line text is sent bare, so a pane
+    that has bracketed paste off never sees stray "200~" noise.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": 'body must be {"text": <str>}'}, status=400)
+    text = body.get("text")
+    if not isinstance(text, str) or not text:
+        return web.json_response(
+            {"error": 'body must be {"text": <non-empty str>}'}, status=400)
+    if len(text) > TERM_PASTE_MAX:
+        audit(request, "term-paste", "%d chars (over cap)" % len(text), ok=False)
+        return web.json_response(
+            {"ok": False, "error": "text over %d chars" % TERM_PASTE_MAX,
+             "len": len(text)}, status=413)
+    sess = (body.get("session") or "").strip() \
+        or _tmux_session_for("frontier", "claude-code") or "keeper-claude"
+    if not await _tmux_has(sess):
+        audit(request, "term-paste", sess + " (no live seat)", ok=False)
+        return web.json_response(
+            {"ok": False, "error": "no live seat", "session": sess}, status=409)
+    chunks = [text[i:i + TERM_PASTE_CHUNK]
+              for i in range(0, len(text), TERM_PASTE_CHUNK)]
+    bracketed = "\n" in text
+    parts = (["\x1b[200~"] + chunks + ["\x1b[201~"]) if bracketed else chunks
+    for part in parts:                       # sequential: order is the paste
+        rc, _o, err = await _run("tmux", "-L", KEEPER_TMUX_SOCK, "send-keys",
+                                 "-t", "=" + sess + ":", "-l", "--", part)
+        if rc != 0:
+            audit(request, "term-paste",
+                  "%s (%d chars, send-keys rc=%d)" % (sess, len(text), rc), ok=False)
+            return web.json_response(
+                {"ok": False, "error": (err or "").strip()[:200], "session": sess},
+                status=502)
+    audit(request, "term-paste", "%s (%d chars)" % (sess, len(text)), ok=True)
+    return web.json_response({"ok": True, "session": sess, "chars": len(text),
+                              "chunks": len(chunks), "bracketed": bracketed})
 
 
 # --- 🌐 browser access: the console IS a web app — serve it to LAN browsers -
@@ -1505,6 +1803,11 @@ if not os.environ.get("FLEETVIEW_MCT_WS"):
 # migration source. Fall back to legacy solely if app home couldn't be created.
 _mct_base = _APP_MCT_ROOT if _APP_MCT_ROOT.exists() else _LEGACY_MCT_ROOT
 FV_MCT_WS = os.environ.get("FLEETVIEW_MCT_WS") or str(_mct_base / "repl")
+# mct v2 (2026-09-15): ONE canonical mct workspace — FV_MCT_WS / the active
+# session (<state>/mct/<session>, default <state>/mct/repl). The retired
+# standalone-REPL workspace <state>/mct2/repl is read as a one-time migration
+# / fallback source only (guidance, exchange log); nothing writes there now.
+_LEGACY_MCT2_WS = FV_STATE_HOME / "mct2" / "repl"
 
 # --- Named MCT sessions (workspaces). The console is a multi-session workbench:
 # each session is its own ~/.mct/<name>/ dir (own object store, derived memory,
@@ -1631,14 +1934,242 @@ async def mct_sessions_post(request):
                               "sessions": _list_sessions()})
 
 
+# ── MCT (abstract-claude mct) usage from the seat's OWN transcript ─────────────
+# The promoted `mct` backend is `abstract-claude mct <ws>`: it drives Claude Code
+# with --resume, so its exact per-request usage lives in a Claude Code transcript
+# (~/.claude-sessions/<stamp>-<pid>/projects/<ws slug>/<session_id>.jsonl), NOT in
+# the hugpy-agent broker's object store that `hugpy-agent mct-usage` reads. The
+# steward drawer's "MCT (host A)" tracker therefore never moved (operator,
+# 2026-09-10): the endpoint kept asking the deprecated <state>/mct/repl workspace.
+# <ws>/session.json (written by abstract_claude.mct_repl) names the live session;
+# this reads that transcript and shapes the same report `hugpy-agent mct-usage`
+# returns, so the widget renders unchanged. The broker path stays as fallback.
+_MCT2_WS_CANDIDATES = (
+    lambda: _active_ws(),                       # mct v2: the canonical workspace first
+    lambda: FV_STATE_HOME / "mct2" / "repl",    # retired standalone-REPL workspace (read-only fallback)
+    lambda: Path.home() / ".config" / "hugpy-station" / "mct2" / "repl",
+)
+_MODEL_OUTPUT_PRICE = {"claude-fable-5-1": 50.0, "claude-fable-5": 50.0, "claude-opus-5": 25.0,
+                       "claude-opus-4-8": 25.0, "claude-opus-4-7": 25.0, "claude-opus-4-6": 25.0,
+                       "claude-sonnet-5": 10.0, "claude-sonnet-4-6": 15.0, "claude-haiku-4-5": 5.0}
+
+
+def _mct2_live_workspace():
+    """The abstract-claude mct workspace whose session.json names a live session,
+    or None. The station's own state home first; the packaged app's home second
+    (a dev console attaching to the packaged keeper-mct tmux session sees that)."""
+    for mk in _MCT2_WS_CANDIDATES:
+        try:
+            ws = mk()
+            if (ws / "session.json").is_file():
+                return ws
+        except OSError:
+            continue
+    return None
+
+
+def _mct2_transcript_for(session_id):
+    """Newest transcript file for a Claude Code session id across the config dirs a
+    seat may run from (per-launch ~/.claude-sessions/<stamp>, legacy ~/.claude-seat,
+    the account's ~/.claude). None if not found."""
+    if not session_id or not re.fullmatch(r"[A-Za-z0-9_-]{8,80}", session_id):
+        return None
+    import glob as _glob
+    home = str(Path.home())
+    cands = []
+    for pat in (os.path.join(home, ".claude-sessions", "*", "projects", "*", session_id + ".jsonl"),
+                os.path.join(home, ".claude-seat", "*", "projects", "*", session_id + ".jsonl"),
+                os.path.join(home, ".claude", "projects", "*", session_id + ".jsonl")):
+        cands.extend(_glob.glob(pat))
+    if not cands:
+        return None
+    return max(cands, key=lambda f: os.path.getmtime(f) if os.path.exists(f) else 0)
+
+
+def _mct2_usage_report(ws, turns_keep=20):
+    """Build the mct-usage report dict from the live abstract-claude mct session's
+    transcript. Sync + file-bound: run it via asyncio.to_thread."""
+    try:
+        sid = (json.loads((ws / "session.json").read_text()).get("session_id") or "").strip()
+    except (OSError, ValueError, AttributeError):
+        sid = ""
+    base = {"workspace": str(ws), "backend": "mct", "source": "abstract-claude transcript", "sessions": []}
+    if not sid:
+        base["error"] = "no MCT session yet (session.json has no session_id)"
+        return base
+    path = _mct2_transcript_for(sid)
+    if not path:
+        base["sessions"] = [{"session_id": sid, "report": _mct2_empty_report(), "per_turn": [], "cache": None}]
+        base["error"] = "transcript for session %s not found yet" % sid[:8]
+        return base
+    return _transcript_usage_report(path, sid, base, turns_keep)
+
+
+def _transcript_usage_report(path, sid, base, turns_keep=20):
+    """Exact usage/cost report for ONE Claude Code transcript (any seat: the mct
+    pointer-exchange session or the claude-code seat itself — board t5 puts a
+    tracker under each). Sync + file-bound: run it via asyncio.to_thread."""
+    # One transcript line per content block, all carrying the same request usage
+    # (apiBlockIndex 0,1,…): dedupe by requestId, keeping the LAST row per request.
+    by_req, order = {}, []
+    model = ""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for ln in fh:
+                if '"usage"' not in ln:
+                    continue
+                try:
+                    r = json.loads(ln)
+                except ValueError:
+                    continue
+                if r.get("type") != "assistant":
+                    continue
+                m = r.get("message") or {}
+                u = m.get("usage")
+                if not isinstance(u, dict):
+                    continue
+                if not any(int(u.get(k) or 0) for k in ("input_tokens", "output_tokens",
+                                                         "cache_read_input_tokens", "cache_creation_input_tokens")):
+                    continue                      # synthetic / zero rows are not turns
+                rid = r.get("requestId") or r.get("uuid") or str(len(order))
+                if rid not in by_req:
+                    order.append(rid)
+                by_req[rid] = (r, m, u)
+                model = m.get("model") or model
+    except OSError as e:
+        base["error"] = str(e)
+        return base
+    rows = [by_req[k] for k in order]
+    p_in = next((v for k, v in _MODEL_INPUT_PRICE.items() if model.startswith(k)), None)
+    p_out = next((v for k, v in _MODEL_OUTPUT_PRICE.items() if model.startswith(k)), None)
+
+    def _ts(r):
+        t = r.get("timestamp") or ""
+        try:
+            import datetime as _dt
+            return _dt.datetime.strptime(t[:19], "%Y-%m-%dT%H:%M:%S").replace(
+                tzinfo=_dt.timezone.utc).timestamp()
+        except Exception:
+            return 0.0
+
+    agg = {"input": 0, "cache_write": 0, "cache_read": 0, "output": 0}
+    billed = 0.0
+    per_turn = []
+    for r, m, u in rows:
+        i = int(u.get("input_tokens") or 0); o = int(u.get("output_tokens") or 0)
+        cr = int(u.get("cache_read_input_tokens") or 0); cw = int(u.get("cache_creation_input_tokens") or 0)
+        cc = u.get("cache_creation") or {}
+        wmult = 2.0 if int(cc.get("ephemeral_1h_input_tokens") or 0) > 0 else 1.25
+        agg["input"] += i; agg["output"] += o; agg["cache_read"] += cr; agg["cache_write"] += cw
+        billed += i + cw * wmult + cr * 0.1
+        per_turn.append({"ts": int(_ts(r)), "model": m.get("model") or "", "input": i, "output": o,
+                         "cache_write": cw, "cache_read": cr, "stop_reason": m.get("stop_reason") or ""})
+    relayed = agg["input"] + agg["cache_write"] + agg["cache_read"]
+    cost = ((billed / 1e6) * p_in if p_in else 0.0) + ((agg["output"] / 1e6) * p_out if p_out else 0.0)
+    report = {
+        "turns": len(rows), "input": agg["input"], "cache_write": agg["cache_write"],
+        "cache_read": agg["cache_read"], "output": agg["output"],
+        "relayed_input": relayed, "billed_input_equiv": round(billed, 1),
+        "cost_usd": round(cost, 4) if (p_in or p_out) else 0.0,
+        "cached_pct": round(agg["cache_read"] / relayed * 100, 1) if relayed else 0.0,
+        "input_cost_saved_by_cache_pct": round((1 - billed / relayed) * 100, 1) if relayed else 0.0,
+        "model": model, "price_known": bool(p_in and p_out),
+    }
+    cache = None
+    if rows:
+        r, m, u = rows[-1]
+        cc = u.get("cache_creation") or {}
+        ttl = 3600 if int(cc.get("ephemeral_1h_input_tokens") or 0) > 0 else 300
+        last_ts = _ts(r)
+        age = max(0.0, time.time() - last_ts)
+        cr = int(u.get("cache_read_input_tokens") or 0); cw = int(u.get("cache_creation_input_tokens") or 0)
+        cache = {"age_sec": round(age, 1), "ttl_sec": ttl,
+                 "state": "expected-valid" if age < ttl else "expired",
+                 "cached_tokens": cr + cw, "cache_read": cr, "cache_creation": cw,
+                 "context_tokens": int(u.get("input_tokens") or 0) + cr + cw,
+                 "last_request_ts": int(last_ts), "expires_at": int(last_ts + ttl),
+                 "model": m.get("model") or "", "stop_reason": m.get("stop_reason") or ""}
+    base["transcript"] = path
+    base["sessions"] = [{"session_id": sid, "report": report, "per_turn": per_turn[-turns_keep:], "cache": cache}]
+    return base
+
+
+def _mct2_empty_report():
+    return {"turns": 0, "input": 0, "cache_write": 0, "cache_read": 0, "output": 0,
+            "relayed_input": 0, "billed_input_equiv": 0, "cost_usd": 0.0,
+            "cached_pct": 0.0, "input_cost_saved_by_cache_pct": 0.0}
+
+
+async def _tmux_has(sess):
+    if not sess:
+        return False
+    rc, _o, _e = await _run("tmux", "-L", KEEPER_TMUX_SOCK, "has-session", "-t", "=" + sess)
+    return rc == 0
+
+
+async def _claude_seat_transcript():
+    """Newest transcript of the live keeper-claude seat: its pane cwd → Claude
+    Code's project slug → newest *.jsonl across the config dirs a seat runs
+    from (per-launch ~/.claude-sessions/<stamp>, legacy ~/.claude-seat, the
+    account's ~/.claude). '' when no live seat or nothing written yet."""
+    sess = _tmux_session_for("frontier", "claude-code") or "keeper-claude"
+    rc, cwd, _e = await _run("tmux", "-L", KEEPER_TMUX_SOCK, "display-message", "-p",
+                             "-t", "=" + sess + ":", "#{pane_current_path}")
+    cwd = (cwd or "").strip() if rc == 0 else ""
+    if not cwd:
+        return ""
+    slug = re.sub(r"[^A-Za-z0-9]", "-", cwd)
+    import glob as _glob
+    home = str(Path.home())
+    for pat in (".claude-sessions/*/projects/%s/*.jsonl", ".claude-seat/*/projects/%s/*.jsonl",
+                ".claude/projects/%s/*.jsonl"):
+        c = _glob.glob(os.path.join(home, pat % slug))
+        if c:
+            return max(c, key=os.path.getmtime)
+    return ""
+
+
 async def a_usage(request):
-    """GET /api/a/usage — precise MCT token/cost accounting + cache-shadow
-    timing, via `hugpy-agent mct-usage` (source of truth: A's own stored
-    transcripts). 502s cleanly when hugpy-agent is unavailable. With an
-    active VM the readout comes from THAT VM's workbench (grounding rule)."""
+    """GET /api/a/usage?backend=mct|claude-code — precise token/cost accounting
+    + cache timing for a frontier seat, from that seat's OWN Claude Code
+    transcript (board t5: one tracker per frontier backend). mct = the
+    abstract-claude pointer-exchange session (see _mct2_usage_report);
+    claude-code = the keeper-claude seat's newest transcript. No backend =
+    mct, and when no mct2 session exists the deprecated broker's
+    `hugpy-agent mct-usage` still answers. With an active VM the readout comes
+    from THAT VM's workbench (grounding rule)."""
     resp = await _sidecar_proxy(request)
     if resp is not None:
         return resp
+    backend = (request.query.get("backend") or "mct").strip()
+    if backend == "codex":
+        return web.json_response({"backend": "codex", "sessions": [],
+                                  "source": "Codex native /status",
+                                  "error": "Use /status in the ChatGPT lane for usage; harness accounting is not connected."})
+    if backend == "claude-code":
+        sess = _tmux_session_for("frontier", "claude-code") or "keeper-claude"
+        live = await _tmux_has(sess)
+        base = {"backend": "claude-code", "source": "claude-code seat transcript", "sessions": [],
+                "live_session": sess if live else ""}
+        path = await _claude_seat_transcript() if live else ""
+        if not path:
+            base["error"] = "no live claude-code seat" if not live else "the seat has not written a transcript yet"
+            return web.json_response(base)
+        sid = os.path.basename(path)[:-len(".jsonl")]
+        try:
+            doc = await asyncio.wait_for(asyncio.to_thread(_transcript_usage_report, path, sid, base), timeout=20)
+        except asyncio.TimeoutError:
+            return web.json_response({"error": "seat transcript read timed out"}, status=502)
+        return web.json_response(doc)
+    ws2 = _mct2_live_workspace()
+    if ws2 is not None:
+        try:
+            doc = await asyncio.wait_for(asyncio.to_thread(_mct2_usage_report, ws2), timeout=20)
+        except asyncio.TimeoutError:
+            return web.json_response({"error": "mct transcript read timed out"}, status=502)
+        doc["live_session"] = (_tmux_session_for("frontier", "mct") or "keeper-mct") if await _tmux_has(
+            _tmux_session_for("frontier", "mct") or "keeper-mct") else ""
+        return web.json_response(doc)
     exe = shutil.which("hugpy-agent")
     if not exe:
         return web.json_response({"error": "hugpy-agent not on PATH"}, status=502)
@@ -1675,20 +2206,79 @@ def _bg_user_path(ws=None):
     ws = ws or _active_ws()
     up = ws / "operator-guidance.user.md"
     cp = ws / "operator-guidance.md"
-    if not up.exists() and cp.exists():
-        try:
-            up.write_text(cp.read_text(encoding="utf-8"), encoding="utf-8")
-        except OSError:
-            pass
+    if not up.exists():
+        # mct v2 (2026-09-15): the canonical workspace is FV_MCT_WS / the active
+        # session; a user file left in the retired mct2/repl workspace migrates
+        # once so a guidance edit made there is not silently lost.
+        legacy = _LEGACY_MCT2_WS / "operator-guidance.user.md"
+        src = legacy if legacy.exists() else cp if cp.exists() else None
+        if src is not None:
+            try:
+                # A COMPOSED file (directive + user text) must never become the
+                # user text — that is how the directive got doubled at every
+                # later composition. Strip the directive on the way in.
+                ws.mkdir(parents=True, exist_ok=True)
+                up.write_text(_strip_directive(src.read_text(encoding="utf-8")), encoding="utf-8")
+            except OSError:
+                pass
     return up
+
+
+def _strip_directive(text):
+    """Remove every copy of the frontier directive (and the composition
+    headers it travels with) from operator guidance text, so the directive is
+    composed into a seat's governing instruction EXACTLY once."""
+    t = text or ""
+    try:
+        d = _frontier_directive_text()[0].strip()
+    except Exception:
+        d = ""
+    if d and d in t:
+        t = t.replace(d, "")
+    # headers that only the composer emits; a user file never legitimately has them
+    for hdr in ("# Operator guidance\n", "# Session init prompt (handoff — this launch only)\n",
+                "# Session init prompt (handoff)\n"):
+        t = t.replace(hdr, "")
+    for marker in (_DELEGATE_ONLY_TEXT, _DELEGATE_OFF_TEXT):
+        try:
+            if marker and marker.strip() and marker.strip() in t:
+                t = t.replace(marker.strip(), "")
+        except NameError:
+            pass
+    return re.sub(r"\n{3,}", "\n\n", t).strip() + ("\n" if t.strip() else "")
+
+
+def _frontier_handoff_pending():
+    """1.0.65: the per-session init prompt (frontier-handoff.md) — text or ''."""
+    try:
+        return FRONTIER_HANDOFF_PATH.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _frontier_handoff_consume(reason=""):
+    """The init prompt is handed off exactly once: delete the file after the
+    launch that carried it (operator 2026-09-02: once handed off it must no
+    longer be populated)."""
+    try:
+        if FRONTIER_HANDOFF_PATH.exists():
+            FRONTIER_HANDOFF_PATH.unlink()
+            return True
+    except OSError:
+        pass
+    return False
 
 
 def _compose_guidance(user_text):
     """What B injects as the governing_instruction: the frontier directive,
-    then the operator's guidance. The steward tab shows exactly this."""
+    then the operator's guidance, then (this launch only) the session init
+    prompt. The steward tab shows exactly this."""
     d = _frontier_directive_text()[0].rstrip()
-    u = (user_text or "").strip()
-    return d + ("\n\n# Operator guidance\n" + u if u else "") + "\n"
+    u = _strip_directive(user_text).strip()      # the directive is composed ONCE, here
+    h = _frontier_handoff_pending()
+    return (d + ("\n\n# Operator guidance\n" + u if u else "")
+            + "\n\n" + _delegate_section("mct")
+            + ("\n\n# Session init prompt (handoff — this launch only)\n" + h if h else "") + "\n")
 
 
 def _render_guidance(ws=None):
@@ -1712,7 +2302,7 @@ async def _push_guidance_to_ssh(name, session):
     script = (f'mkdir -p "$HOME/.config/hugpy-station" {ws}; '
               f'cat > "$HOME/.config/hugpy-station/frontier-directive.md" <<\'__HSDIR__\'\n{d}\n__HSDIR__\n'
               f'u={ws}/operator-guidance.user.md; c={ws}/operator-guidance.md; '
-              f'[ -f "$u" ] || {{ [ -f "$c" ] && cp "$c" "$u" || : ; }}; '
+              f'[ -f "$u" ] || : > "$u";'
               f'{{ cat "$HOME/.config/hugpy-station/frontier-directive.md"; '
               f'if [ -s "$u" ]; then printf "\\n\\n# Operator guidance\\n"; cat "$u"; fi; echo; }} > "$c"')
     rc, _o, _e = await _ssh_run(name, script, 20)
@@ -1726,6 +2316,13 @@ async def _push_mct_to_locus(vm):
     (same freshness + directive-path rules). Best effort; the seat still
     launches if this fails — `abstract-claude mct` then reports the missing
     package in the terminal."""
+    # 2026-09-14: a peer machine (SSH-reachable in the loci feed) runs its OWN
+    # hugpy-station and owns its frontier-directive.md — pushing ours there
+    # overwrites it (this clobbered a peer keeper's appended init-prompt once).
+    # Only push guidance to loci WE manage (lxd guests / local host); a peer
+    # station composes its own from its own directive.
+    if vm in _TS_LOCI.get("hosts", {}):
+        return True
     d = _frontier_directive_text()[0]
     ws = "$HOME/.config/hugpy-station/mct2/repl"
     script = ('command -v abstract-claude >/dev/null 2>&1 || '
@@ -1734,7 +2331,7 @@ async def _push_mct_to_locus(vm):
               f'mkdir -p {ws}; '
               f'cat > "$HOME/.config/hugpy-station/frontier-directive.md" <<\'__HSDIR__\'\n{d}\n__HSDIR__\n'
               f'u={ws}/operator-guidance.user.md; c={ws}/operator-guidance.md; '
-              f'[ -f "$u" ] || {{ [ -f "$c" ] && cp "$c" "$u" || : ; }}; '
+              f'[ -f "$u" ] || : > "$u";'
               f'{{ cat "$HOME/.config/hugpy-station/frontier-directive.md"; '
               f'if [ -s "$u" ]; then printf "\\n\\n# Operator guidance\\n"; cat "$u"; fi; echo; }} > "$c"')
     if _ssh_host(vm):
@@ -1761,7 +2358,7 @@ async def _push_guidance_to_vm(vm, session):
     script = (f'mkdir -p "$HOME/.config/hugpy-station" {shlex.quote(ws)}; '
               f'cat > "$HOME/.config/hugpy-station/frontier-directive.md"; '
               f'u={shlex.quote(ws)}/operator-guidance.user.md; c={shlex.quote(ws)}/operator-guidance.md; '
-              f'[ -f "$u" ] || {{ [ -f "$c" ] && cp "$c" "$u" || : ; }}; '
+              f'[ -f "$u" ] || : > "$u";'
               f'{{ cat "$HOME/.config/hugpy-station/frontier-directive.md"; '
               f'if [ -s "$u" ]; then printf "\n\n# Operator guidance\n"; cat "$u"; fi; echo; }} > "$c"')
     try:
@@ -1883,12 +2480,22 @@ VM_MCT_ROOT = os.environ.get("STATION_CONSOLE_VM_MCT_ROOT", "/home/ubuntu/.mct")
 # @keeper host seat, or the /api/vm/keeper/* aliases) keeps the host-native
 # path. A VM with no reachable workbench answers 502 with the install hint —
 # a host-file answer about a VM surface would be a lie.
-VMCONSOLE_TOKEN_DIR = Path(os.environ.get("VMCONSOLE_TOKEN_DIR") or (
-    "/srv/vm_mgr/secrets" if os.path.isdir("/srv/vm_mgr/secrets") else str(Path(
-        os.environ.get("HUGPY_STATION_STATE") or os.path.join(
-            os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config"),
-            "hugpy-station")) / "vmconsole")))
-_WB_SESS_SYNCED = {}   # vm -> session name last selected on its workbench
+# ── WORKBENCH TRANSPORT RETIRED (operator 2026-09-02: "that was before the
+# central db. all of that can be gutted"). A locus used to run its OWN station
+# ("workbench") that this harness reached at http://<host>:8800 with a
+# vmconsole-<locus>.token. The address was per MACHINE, so two loci on one host
+# collided (hugpy's drawers hit vm_mgr's station → 401), every station needed a
+# copy of every token, and a closed port hung every drawer 60 s. The toolserver
+# (DB arm) is the one thing reachable from anywhere that knows every locus, so
+# per-locus drawers are served from it: board = todo/*, prompts = prompt/*;
+# the rest answer an honest 404 until their toolserver source lands
+# (fleet-consolidation/STATION-LOCUS-MAP-2026-09-02.md §2).
+def _retired(what, vm=""):
+    return web.json_response(
+        {"ok": False, "retired": True,
+         "error": (what + (f" for {vm}" if vm else "")
+                   + ": served by the toolserver (DB arm) — not wired yet; the per-locus"
+                     " workbench transport was retired 2026-09-02")}, status=404)
 
 
 async def _sidecar_vm(request):
@@ -1899,69 +2506,308 @@ async def _sidecar_vm(request):
     if request.path.startswith("/api/vm/keeper/"):
         return ""              # the host keeper's own board/aliases stay host
     vm = (request.query.get("vm") or "").strip()
-    if vm == "@keeper":
+    if vm in ("@keeper", "host"):
         return ""
-    if vm and (vm in await known_names() or _ssh_host(vm)):
-        return vm
-    return MODEL_VM
+    if vm:
+        if _ssh_host(vm):
+            return vm
+        try:
+            names = await known_names()
+        except Exception:      # lxc unavailable (snap home-outside-/home as a
+            names = set()      # service user, lxd down): never 500 a drawer
+        if vm in names:
+            return vm
+    return ""                  # host-native (the static model-VM pin retired with the workbench)
 
 
-def _wb_token(vm):
-    try:
-        return (VMCONSOLE_TOKEN_DIR / f"vmconsole-{vm}.token").read_text(
-            encoding="utf-8").strip()
-    except OSError:
+# ── central (DB-arm) boards for ssh-host loci (2026-09-02) ───────────────────
+# An ssh-host locus on THIS machine (ae-vm-mgr and hugpy are both
+# 192.168.1.100) has no workbench of its own: :8800 here is this very station
+# behind nginx, so forwarding looped back onto the HOST board with a foreign
+# token (401) or died on a missing token file (502) — "the todo does not show
+# up for anything other than host". Those loci's boards live in the toolserver
+# `todos` table (todo/list locus=… — the same slice every keeper, seat and
+# comms.ping writes with todo_add), so the ☑ drawer reads AND writes that
+# slice for them. A REMOTE ssh host with a vmconsole token keeps its own
+# workbench; one without a token falls back to the central slice, not a 502.
+_LOCAL_IPS_CACHE = {"ts": 0.0, "ips": set()}
+
+
+def _local_ips_cached():
+    now = time.time()
+    if now - _LOCAL_IPS_CACHE["ts"] > 300 or not _LOCAL_IPS_CACHE["ips"]:
+        _LOCAL_IPS_CACHE["ips"] = _local_ips()
+        _LOCAL_IPS_CACHE["ts"] = now
+    return _LOCAL_IPS_CACHE["ips"]
+
+
+def _central_locus(vm):
+    """The toolserver locus whose central board serves `vm` — '' when the
+    locus is host-native, an LXD station, or a remote ssh host that has its
+    own workbench (vmconsole token present)."""
+    if not vm or vm in ("keeper", "@keeper", "host"):
         return ""
+    return vm if _ssh_host(vm) else ""
 
 
-async def _wb_request(request, vm, body=None, path=None):
-    """Forward this request to the VM's own workbench station. Returns the
-    proxied web.Response, or None when the workbench is unreachable."""
-    tok = _wb_token(vm)
-    sess = request.app.get("proxy_sess")
-    if not tok or sess is None:
+def _central_todo_path(locus):
+    return f"{TS_UPSTREAM.rstrip('/')}/todo/list?locus={locus}"
+
+
+# The central (toolserver) `todos` table has NO comments column — comments live
+# IN the note (the established idiom: see _central_todo_post). We encode each as
+# ONE human-readable note line that also carries the exact epoch (#<ts>), so the
+# read side (_central_item) reconstructs a todo.v1 comments array whose {by,ts,
+# text} round-trips EXACTLY — the console's postComment() verify-after-write then
+# matches without any frontend change (its o8 note: "when it lands, landed starts
+# coming back true"). Legacy lines without #<ts> parse with a minute-resolution ts.
+_CENTRAL_COMMENT_RE = re.compile(
+    r"^\[comment\s+(?P<by>\S+)\s+"
+    r"(?P<date>\d{4}-\d{2}-\d{2} \d{2}:\d{2}(?::\d{2})?)"
+    r"(?:\s+#(?P<ts>\d+))?\]\s?(?P<text>.*)$")
+
+
+def _encode_comment(c):
+    """One todo.v1 comment dict -> a single note line, parseable by
+    _split_note_comments. Single-line (newlines flattened) so one comment is
+    always one line."""
+    by = str((c or {}).get("by") or "operator")[:24]
+    ts = (c or {}).get("ts")
+    ts = int(ts) if isinstance(ts, (int, float)) else int(time.time())
+    text = str((c or {}).get("text") or "").strip().replace("\r", " ").replace("\n", " ")
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
+    return f"[comment {by} {when} #{ts}] {text}"
+
+
+def _split_note_comments(note):
+    """Split a central note into (human_note, comments[]). `[comment ...]` lines
+    are pulled into a todo.v1 comments array so the console renders them as a 💬
+    thread exactly like a local board; every other line stays in the human note."""
+    human, comments = [], []
+    for ln in str(note or "").split("\n"):
+        m = _CENTRAL_COMMENT_RE.match(ln)
+        if not m:
+            human.append(ln)
+            continue
+        if m.group("ts"):
+            ts = int(m.group("ts"))
+        else:
+            try:
+                ts = int(time.mktime(time.strptime(m.group("date")[:16], "%Y-%m-%d %H:%M")))
+            except Exception:
+                ts = 0
+        comments.append({"by": m.group("by")[:24], "ts": ts, "text": m.group("text")})
+    return "\n".join(human), comments
+
+
+def _central_item(r):
+    """toolserver todos row -> todo.v1 item (same field names, low priority
+    pops the field exactly like todo_norm)."""
+    if not isinstance(r, dict) or not str(r.get("text") or "").strip():
         return None
-    h = _ssh_host(vm)          # ssh locus: its workbench serves on its address
-    ip = h["host"] if h else await _vm_ip(vm)
-    if not ip:
-        return None
-    base = f"http://{ip}:{os.environ.get('VMCONSOLE_PORT', '8800')}"
-    hdrs = {"X-Console-Token": tok, "Content-Type": "application/json"}
-    to = aiohttp.ClientTimeout(total=60)
+    human, comments = _split_note_comments(r.get("note"))
+    it = {"id": str(r.get("id") or ""),
+          "type": r.get("type") if r.get("type") in TODO_TYPES else "todo",
+          "text": str(r.get("text"))[:500],
+          "note": human[:2000],
+          "status": r.get("status") if r.get("status") in TODO_STATUS else "open",
+          "by": str(r.get("by") or "")[:24],
+          "ts": int(r.get("updated") or r.get("created") or 0)}
+    p = str(r.get("priority") or "").strip().lower()
+    if p in ("medium", "high"):
+        it["priority"] = p
+    if r.get("source"):
+        it["source"] = str(r["source"])[:64]
+    if comments:
+        it["comments"] = comments
+    return it
+
+
+async def _central_todo_state(app, locus):
+    rows = await _ts_call(app, "todo/list", {"locus": locus, "limit": 500}, timeout=15)
+    items = [i for i in (_central_item(r) for r in reversed(rows or [])) if i]
+    return {"schema": "todo.v1", "items": items, "locus": locus, "central": True}
+
+
+async def _central_todo_get(request, locus):
     try:
-        want = _active_session()
-        if _WB_SESS_SYNCED.get(vm) != want:
-            async with sess.post(base + "/api/mct/sessions", headers=hdrs,
-                                 json={"op": "select", "name": want},
-                                 timeout=to) as r0:
-                await r0.read()
-                if r0.status == 200:
-                    _WB_SESS_SYNCED[vm] = want
-        data = body if body is not None else (await request.read() or None)
-        async with sess.request(request.method, base + (path or request.path),
-                                headers=hdrs, data=data, timeout=to,
-                                allow_redirects=False) as r:
-            payload = await r.read()
-            ct = (r.headers.get("Content-Type") or "application/json")
-            return web.Response(status=r.status, body=payload,
-                                content_type=ct.split(";")[0].strip())
-    except (aiohttp.ClientError, asyncio.TimeoutError, OSError):
-        return None
+        state = await _central_todo_state(request.app, locus)
+    except Exception as e:
+        return web.json_response(
+            {"ok": False, "error": f"{locus}: central board unreachable — {e}"}, status=502)
+    return web.json_response({"ok": True, "state": state, "central": True,
+                              "path": _central_todo_path(locus)})
+
+
+async def _central_todo_post(request, locus):
+    """The ☑ drawer's op set against the central slice: add / set / edit /
+    remove / resolve / comment (UI dialect) and add / update / del (canonical)
+    map onto todo/add, todo/update, todo/remove. `replace` has no central
+    equivalent. Comments have no column: they append to the note."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"error": "body must be JSON"}, status=400)
+    verb = (body.get("op") or "").strip()
+    app = request.app
+    tid = str(body.get("id") or "")
+    try:
+        if verb == "add":
+            item = body.get("item") if isinstance(body.get("item"), dict) else body
+            text = str(item.get("text") or "").strip()
+            if not text:
+                return web.json_response({"ok": False, "error": "item needs non-empty text"}, status=400)
+            pr = str(item.get("priority") or "").strip().lower()
+            await _ts_call(app, "todo/add", {
+                "text": text[:500], "type": item.get("type") or "todo",
+                "priority": pr if pr in MCT_TODO_PRIOS else None,
+                "note": str(item.get("note") or "")[:2000],
+                "by": str(item.get("by") or "operator")[:24],
+                "source": "station:" + _station_id(), "locus": locus}, timeout=15)
+        elif verb in ("set", "edit", "update"):
+            f = body.get("fields") if verb == "update" else body
+            f = f if isinstance(f, dict) else {}
+            upd = {"id": tid}
+            if str(f.get("status", "")).lower() in MCT_TODO_STATUSES:
+                upd["status"] = str(f["status"]).lower()
+            if "priority" in f:
+                p = str(f.get("priority") or "").strip().lower()
+                upd["priority"] = p if p in MCT_TODO_PRIOS else "low"
+            if "text" in f and str(f.get("text") or "").strip():
+                upd["text"] = str(f["text"]).strip()[:500]
+            if "note" in f:
+                upd["note"] = str(f.get("note") or "")[:2000]
+            # comments have no column on a central board — persist them IN the note
+            # (the established idiom). The console POSTs the FULL comments array, so
+            # rebuild note = human text + every comment re-encoded, reading the RAW
+            # (uncapped) note so a long human note AND any prior comments both survive.
+            if isinstance(f.get("comments"), list):
+                lines = [_encode_comment(c) for c in f["comments"]
+                         if isinstance(c, dict) and str(c.get("text") or "").strip()]
+                if lines:
+                    if "note" in upd:
+                        human = _split_note_comments(upd["note"])[0]
+                    else:
+                        rows = await _ts_call(app, "todo/list",
+                                              {"locus": locus, "limit": 500}, timeout=15)
+                        raw = next((str(r.get("note") or "") for r in (rows or [])
+                                    if str(r.get("id") or "") == tid), None)
+                        if raw is None:   # never clobber a note we couldn't read back
+                            return web.json_response({"ok": False, "error": "no such item"}, status=404)
+                        human = _split_note_comments(raw)[0]
+                    upd["note"] = (human + ("\n" if human else "")) + "\n".join(lines)
+            if len(upd) == 1:
+                return web.json_response({"ok": False, "error": "nothing to update"}, status=400)
+            await _ts_call(app, "todo/update", upd, timeout=15)
+        elif verb in ("remove", "del"):
+            await _ts_call(app, "todo/remove", {"id": tid}, timeout=15)
+        elif verb in ("resolve", "comment"):
+            if verb == "resolve" and body.get("verdict") not in ("accepted", "declined"):
+                return web.json_response({"error": "verdict must be accepted|declined"}, status=400)
+            ctext = (body.get("text") or "").strip()
+            if verb == "comment" and not ctext:
+                return web.json_response({"error": "comment needs text"}, status=400)
+            cur = next((i for i in (await _central_todo_state(app, locus))["items"]
+                        if i["id"] == tid), None)
+            if not cur:
+                return web.json_response({"error": "no such item"}, status=404)
+            if verb == "resolve":
+                upd = {"id": tid, "status": "done",
+                       "note": ("[" + body["verdict"] + "] " + (cur.get("note") or ""))[:2000]}
+            else:
+                note = cur.get("note") or ""
+                upd = {"id": tid, "note": ((note + "\n") if note else "")
+                       + "[comment operator " + time.strftime("%Y-%m-%d %H:%M") + "] " + ctext}
+                upd["note"] = upd["note"][:2000]
+            await _ts_call(app, "todo/update", upd, timeout=15)
+        elif verb == "replace":
+            return web.json_response(
+                {"ok": False, "error": "replace is not supported on a central (toolserver) board"},
+                status=400)
+        else:
+            return web.json_response({"ok": False, "error": f"unknown op {verb!r}"}, status=400)
+        state = await _central_todo_state(app, locus)
+    except RuntimeError as e:          # toolserver said no ({"error": ...})
+        msg = str(e)
+        return web.json_response({"ok": False, "error": msg},
+                                 status=404 if msg.startswith("no todo") else 400)
+    except Exception as e:
+        return web.json_response(
+            {"ok": False, "error": f"{locus}: central board unreachable — {e}"}, status=502)
+    return web.json_response({"ok": True, "state": state, "central": True,
+                              "path": _central_todo_path(locus)})
+
+
+# ◳ canvas on the DB arm (operator 2026-09-03): a locus's design (wireframe.v1)
+# and flow (flow.v1) documents live in the toolserver `canvas` table
+# (canvas/get|put|list) — ONE copy that this drawer, every other station and
+# every seat (MCP canvas_get/canvas_put) share; puts fan out on the change bus
+# (table "canvas") so open drawers reload live. Replaces the retired per-locus
+# sidecar files (~/wireframe.json, ~/flow.json) for ssh loci AND the host seat
+# (which is a locus too — _station_locus()). The JSON contract is the one the
+# drawer always spoke: GET → {ok, state, rev, path}, POST {state[, notify]}.
+def _central_canvas_path(locus, kind):
+    return f"{TS_UPSTREAM.rstrip('/')}/canvas/get locus={locus} kind={kind}"
+
+
+async def _central_canvas_route(request, locus, kind):
+    app = request.app
+    if request.method == "GET":
+        try:
+            r = await _ts_call(app, "canvas/get", {"locus": locus, "kind": kind}, timeout=15)
+        except Exception as e:
+            return web.json_response(
+                {"ok": False, "error": f"{locus}: central canvas unreachable — {e}"}, status=502)
+        if not isinstance(r, dict) or not r.get("state"):
+            return web.json_response({"ok": False, "central": True, "locus": locus,
+                                      "error": f"no {kind} for {locus} yet"})
+        return web.json_response({"ok": True, "central": True, "locus": locus, "vm": locus,
+                                  "state": r["state"], "rev": r.get("rev", 0),
+                                  "by": r.get("by", ""), "mtime": r.get("updated", 0),
+                                  "path": _central_canvas_path(locus, kind)})
+    if request.method != "POST":
+        raise web.HTTPMethodNotAllowed(request.method, ["GET", "POST"])
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    st = (body or {}).get("state")
+    if not isinstance(st, dict):
+        return web.json_response({"error": f"body must carry a {kind} state object"}, status=400)
+    try:
+        r = await _ts_call(app, "canvas/put", {
+            "locus": locus, "kind": kind, "state": st,
+            "by": str(body.get("by") or "operator")[:40],
+            "note": str(body.get("note") or "")[:500],
+            "notify": bool(body.get("notify"))}, timeout=20)
+    except Exception as e:
+        msg = str(e)
+        status = 400 if "rejected" in msg else 502
+        return web.json_response({"ok": False, "error": msg}, status=status)
+    audit(request, kind + "_push@" + locus,
+          f"rev {r.get('rev')}" + (" +notify" if body.get("notify") else ""), ok=True)
+    return web.json_response({"ok": True, "central": True, "locus": locus, "vm": locus,
+                              "rev": r.get("rev", 0), "changed": r.get("changed"),
+                              "notified": r.get("notified"), "mtime": r.get("updated", 0),
+                              "state": r.get("state"),
+                              "path": _central_canvas_path(locus, kind)})
+
+
+async def _central_todo_route(request, locus):
+    if request.method == "GET":
+        return await _central_todo_get(request, locus)
+    if request.method == "POST":
+        return await _central_todo_post(request, locus)
+    raise web.HTTPMethodNotAllowed(request.method, ["GET", "POST"])
 
 
 async def _sidecar_proxy(request):
-    """None = stay host-native; else the workbench's response (or the 502
-    install hint when the VM's workbench cannot be reached)."""
+    """None = host-native (answer from this station's own files); else the
+    locus's drawer is a toolserver concern — 404 until wired (see _retired)."""
     vm = await _sidecar_vm(request)
     if not vm:
         return None
-    resp = await _wb_request(request, vm)
-    if resp is not None:
-        return resp
-    return web.json_response(
-        {"ok": False, "error": f"{vm}: workbench console unreachable — "
-                               f"install/start it: install-vm-console {vm}"},
-        status=502)
+    return _retired(request.path, vm)
 
 
 def _b_answer_in_vm(text, history, vm=""):
@@ -2018,7 +2864,111 @@ def _hugpy_python():
     return ""
 
 
+# --- Lookup-first guard for the in-process fallback (operator, 2026-09-29):
+# mirrors hugpy_agent.mct.b_lookup, which the one-shot paths above already
+# run. An ack / help / state question, or ANY message against an EMPTY state
+# (no policy, empty catalog, no derived memory), is answered from the state
+# text with the same "(ts · tokens 0 · dur · lookup)" metadata line — the
+# fleet model is never spent on a string lookup. Anything else keeps the
+# gateway path below unchanged.
+_B_LOOKUP_MODEL = "lookup"
+_B_ACK_WORDS = frozenset((
+    "ok", "okay", "k", "kk", "thanks", "thank", "thx", "ty", "got", "it", "cool",
+    "great", "nice", "noted", "ack", "yes", "no", "sure", "alright", "roger",
+    "cheers", "you", "fine", "good", "perfect", "done", "right", "yep", "yup", "nope"))
+_B_HELP_RE = re.compile(
+    r"^\s*/?help\b|^\s*(commands|usage)\s*\??\s*$|what can you do|how do i (use|talk|ask)"
+    r"|what (commands|do you (support|accept))", re.I)
+_B_STATE_BARE_RE = re.compile(
+    r"^\s*(status|state|what do you have|what do you know|what have you got|what is your state"
+    r"|what'?s your state|readout|overview|summary of (your )?state|/?bstate)\s*[?.!]*\s*$", re.I)
+_B_STATE_FIELD_RE = re.compile(
+    r"\b(policy|policies|governing instruction|catalog|catalogue|sources?|entries|files"
+    r"|objects|pullable|memory|memories|facts?|decisions?|derived|remember|learned|tokens?"
+    r"|cost|spend|spent|usage|budget|logs?|rolling log|ledger|events?|event log|history"
+    r"|last turn|turn|previous turn|last answer)\b", re.I)
+_B_STATE_ASK_RE = re.compile(
+    r"\b(what|which|show|list|print|dump|display|tell me|how many|how much|do you have"
+    r"|have you|is there|are there|any|give me|report|read out|readout|status|state"
+    r"|whats|what's|contents?|current)\b", re.I)
+_B_HELP_TEXT = (
+    "I answer from my own state without inference: ask what is in the catalog / "
+    "policy / memory / ledger / tokens / log, or 'status'. Only a request that "
+    "needs synthesis over non-empty state (summarize, judge, rewrite) goes to "
+    "the fleet model. In the terminal: /bstate shows the state, /policy sets "
+    "the governing instruction, /root + /file or /source populate the catalog, "
+    "/memory lists derived facts, /tokens the spend, /tail the rolling log.")
+_B_EMPTY_TEXT = (
+    "My state is empty — no policy, no catalog entries, no derived memory. A "
+    "policy is set with /policy <text>; the catalog fills when sources are "
+    "registered (/root + /file, /source) or A pulls through me; derived memory "
+    "is written by compaction after A's turns.")
+
+
+def _b_meta_line(model, tokens, started):
+    """The operator's per-reply line: (timestamp · tokens N · duration · model)."""
+    ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    return (f"({ts} · tokens {int(tokens)} · "
+            f"{max(0.0, time.monotonic() - started):.3f}s · {model})")
+
+
+def _b_state_empty(sess, srv):
+    """True when B has nothing to ground on: no policy, empty catalog, no facts.
+    Same three fields hugpy_agent.mct.b_lookup.BState.empty checks."""
+    if getattr(sess, "_policy_text", None) or getattr(sess, "_policy_pointer", None):
+        return False
+    try:
+        sess._materialize_file_sources()
+    except Exception:
+        pass
+    if getattr(sess, "_catalog", None):
+        return False
+    try:
+        if srv.compaction.facts(sess.session_id):
+            return False
+    except Exception:
+        pass
+    return True
+
+
+def _b_lookup_kind(text):
+    """'ack' | 'help' | 'state' | None (None = needs synthesis). Deterministic,
+    no I/O — the same shape as b_lookup.classify minus search/meta."""
+    t = (text or "").strip()
+    words = re.findall(r"[a-z']+", t.lower())
+    if not words:
+        return "ack"
+    if len(words) <= 4 and "?" not in t and all(w in _B_ACK_WORDS for w in words):
+        return "ack"
+    if _B_HELP_RE.search(t):
+        return "help"
+    if _B_STATE_BARE_RE.match(t) or (_B_STATE_FIELD_RE.search(t) and _B_STATE_ASK_RE.search(t)):
+        return "state"
+    return None
+
+
+def _b_fallback_lookup(text, ground, empty, started):
+    """The deterministic reply (metadata line attached) for an ack / help /
+    state question or an empty state; None when the message needs the model."""
+    kind = _b_lookup_kind(text)
+    if kind == "ack":
+        body = "Noted."
+    elif kind == "help":
+        body = _B_HELP_TEXT
+    elif empty:
+        body = _B_EMPTY_TEXT
+    elif kind == "state":
+        body = ground
+    else:
+        return None
+    return f"{body.rstrip()}\n{_b_meta_line(_B_LOOKUP_MODEL, 0, started)}"
+
+
 def _b_answer(text, history, vm=""):
+    if vm in ("", "@keeper") and _b_findings_ask(text):
+        # "what's broken" is a lookup over this station's findings (1.0.124)
+        return {"reply": _b_findings_reply(_b_findings_rows(), time.monotonic()),
+                "offline": False, "model": _B_LOOKUP_MODEL, "tokens": 0}
     try:
         if vm != "@keeper":       # the host keeper seat NEVER defers to the pin
             return _b_answer_in_vm(text, history, vm)
@@ -2043,9 +2993,13 @@ def _b_answer(text, history, vm=""):
         except Exception:
             pass                  # fall through to in-process grounding
     from hugpy_agent.mct.repl import _b_state_text
+    started = time.monotonic()
     srv = _console_b_server()
     sess = srv.session(_latest_session_id(srv))
     ground = _b_state_text(sess, srv, {"last": None})
+    hit = _b_fallback_lookup(text, ground, _b_state_empty(sess, srv), started)
+    if hit is not None:           # lookup answered — no model call
+        return {"reply": hit, "offline": False, "model": _B_LOOKUP_MODEL, "tokens": 0}
     msgs = [{"role": "system", "content": _B_SYSMSG + ground}]
     for m in (history or [])[-20:]:
         r, c = m.get("role"), m.get("content")
@@ -2058,6 +3012,8 @@ def _b_answer(text, history, vm=""):
         gw = Gateway.from_config(load_config())
         res = gw.chat(msgs, max_tokens=700)
         reply = getattr(res, "text", None) or getattr(res, "content", None) or str(res)
+        _meter_tokens("b_chat", int(getattr(res, "est_tokens", 0) or 0)
+                      or (sum(len(m.get("content") or "") for m in msgs) + len(reply or "")) // 4)
         return {"reply": (reply or "").strip() or "(no reply)", "offline": False}
     except Exception as exc:
         return {"reply": "[B offline - deterministic state readout]\n"
@@ -2086,8 +3042,8 @@ async def b_chat(request):
                      "bar (or POST /api/term/bgate) to re-enable]",
             "offline": True})
     vm = str(body.get("vm") or "").strip()
-    if vm != "@keeper" and (not vm or vm not in await known_names()):
-        vm = ""                   # unknown name → static pin / host fallback
+    if vm != "@keeper" and (not vm or vm not in await _known_names_safe()):
+        vm = ""                   # ssh locus / unknown name → this station's own B (no lxc exec)
     try:
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, _b_answer, text, history, vm)
@@ -2105,7 +3061,7 @@ async def b_chat(request):
 # ERROR, not a blank board). The board lives in the CURRENT MCT workspace
 # (todo.json), shared with the agent — the file IS the interface. -------------
 MCT_TODO_STATUSES = ("open", "doing", "done")
-MCT_TODO_TYPES = ("todo", "request", "bookmark", "operator", "proposal")
+MCT_TODO_TYPES = ("todo", "request", "bookmark", "operator", "proposal", "direction")
 MCT_TODO_PRIOS = ("low", "medium", "high")
 TODO_TYPES = set(MCT_TODO_TYPES)
 TODO_STATUS = set(MCT_TODO_STATUSES)
@@ -2182,10 +3138,113 @@ def _mct_todo_write(state):
     tmp.replace(p)
 
 
+# ── toolserver → file board sync (2026-09-15) ────────────────────────────────
+# The keeper board UI is file-primary (t186: /api/vm/keeper/todo always reads
+# _mct_todo_path(), never the toolserver — see _sidecar_vm/_central_locus,
+# "the host keeper's own board/aliases stay host"). board-mirror@<locus> only
+# runs FILE -> central `board` table, one-way, read-only on the file by design
+# ("truth stays local; a keeper edit never blocks on the DB"). Nothing ever
+# ran the other direction, so an item created straight in the toolserver
+# `todos` table (todo_add/todo_update over MCP, or comms_ping) never reached
+# the local file the UI reads — it was invisible to the operator no matter
+# how long they waited. This adds the missing reverse leg, symmetric with
+# board-mirror's guarantees: read-only on the toolserver, ADD-ONLY on the file
+# (never edits/removes an item already there — a local edit always wins),
+# fail-open (no toolserver, no locus, bad response -> idle, UI keeps working
+# off the file). Pulls this station's own locus (_station_locus()) plus the
+# fleet-wide '' locus so cross-locus items (t2..t246-style) land too.
+_TODO_TS_SYNC_POLL = int(os.environ.get("STATION_TODO_TS_SYNC_POLL", "30") or 30)
+_tslog = logging.getLogger("station.todo-ts-sync")
+
+
+async def _todo_ts_sync_once(app):
+    # board-sot 2026-09-18: was _station_locus(), which returns '' on the host
+    # keeper (STATION_LOCUS unset) and made this whole DB->file reverse sync
+    # early-return every tick — the reason central `todos` items never reached
+    # the file the UI reads. _keeper_locus() resolves the canonical 'keeper' slice.
+    locus = _keeper_locus()
+    if not locus:
+        return
+    rows = []
+    for loc in {locus, ""}:
+        try:
+            rows.extend(await _ts_call(app, "todo/list", {"locus": loc, "limit": 500}, timeout=15))
+        except Exception as e:
+            _tslog.warning("todo/list locus=%r: %s", loc, str(e)[:200])
+    items = [i for i in (_central_item(r) for r in rows) if i]
+    if not items:
+        return
+    with _todo_locked():
+        state, err = _mct_todo_read()
+        if state is None:
+            _tslog.warning("skip merge: %s", err)
+            return
+        have = {it.get("id"): it for it in state["items"] if isinstance(it, dict)}
+        added = [it for it in items if it.get("id") and it["id"] not in have]
+        # 1.0.97 (t338): mirror central EDITS too, not just new rows. The
+        # central board is where the keeper closes/annotates items, so a
+        # local copy that only ever gained rows kept showing done items as
+        # open — and B's reminder cycle (which reads this file) kept pushing
+        # them. Central-owned fields follow the newer central row; local-only
+        # state (B comments, watch counters, flag) is preserved.
+        updated = 0
+        for it in items:
+            loc = have.get(it.get("id"))
+            if loc is None or int(it.get("ts") or 0) <= int(loc.get("ts") or 0):
+                continue
+            for k in ("type", "text", "note", "status", "by", "ts", "source"):
+                if k in it:
+                    loc[k] = it[k]
+            if it.get("priority"):
+                loc["priority"] = it["priority"]
+            else:
+                loc.pop("priority", None)
+            if it.get("comments") and not loc.get("comments"):
+                loc["comments"] = it["comments"]
+            updated += 1
+        if not added and not updated:
+            return
+        state["items"] = state["items"] + added
+        _mct_todo_write(state)
+    _tslog.info("merged %d new + %d updated toolserver item(s) into %s",
+                len(added), updated, _mct_todo_path())
+
+
+async def _todo_ts_sync_loop(app):
+    await asyncio.sleep(5)   # let the station finish startup before the first pull
+    while True:
+        try:
+            await _todo_ts_sync_once(app)
+        except Exception as e:
+            _tslog.warning("sync tick failed: %s", str(e)[:200])
+        await asyncio.sleep(_TODO_TS_SYNC_POLL)
+
+
+async def _start_todo_ts_sync(app):
+    app["todo_ts_sync"] = asyncio.create_task(_todo_ts_sync_loop(app))
+
+
+async def _stop_todo_ts_sync(app):
+    t = app.get("todo_ts_sync")
+    if t:
+        t.cancel()
+
+
+# Board ids carry the TYPE's first letter (t todo, r request, b bookmark, o operator,
+# p proposal, d direction, m message — operator 2026-09-16, "makes my sifting
+# streamlined"). The number is the identity; the letter is presentation.
+TODO_TYPE_LETTER = {"todo": "t", "request": "r", "bookmark": "b", "operator": "o",
+                    "proposal": "p", "direction": "d", "message": "m"}
+
+
+def todo_type_letter(typ):
+    return TODO_TYPE_LETTER.get(str(typ or "").strip().lower(), "t")
+
+
 def todo_next_id(items):
     n = 0
     for it in items:
-        m = re.match(r"^t(\d+)$", str(it.get("id", "")))
+        m = re.match(r"^[a-z]*(\d+)$", str(it.get("id", "")))
         if m:
             n = max(n, int(m.group(1)))
     return n + 1
@@ -2199,8 +3258,9 @@ def todo_norm(raw, by, nid):
         return None
     typ = str(raw.get("type", "todo")).strip().lower()
     status = str(raw.get("status", "open")).strip().lower()
-    return {"id": f"t{nid}",
-            "type": typ if typ in TODO_TYPES else "todo",
+    typ = typ if typ in TODO_TYPES else "todo"
+    return {"id": f"{todo_type_letter(typ)}{nid}",
+            "type": typ,
             "text": text,
             "note": str(raw.get("note", "") or "").strip()[:2000],
             **({"priority": str(raw.get("priority")).strip().lower()}
@@ -2313,7 +3373,7 @@ def todo_apply(state, body):
                 it["id"] = _o15_id
                 it["ts"] = int(raw.get("ts") or it["ts"])
             else:
-                it["id"] = f"t{nid}"
+                it["id"] = f"{todo_type_letter(it.get('type'))}{nid}"
                 nid += 1
             # o10: ids stay unique within the replaced list too
             _o10_seen = {str(x.get("id")) for x in out}
@@ -2326,20 +3386,260 @@ def todo_apply(state, body):
     return None, f"unknown op {op!r}"
 
 
-# --- Host-native finder (POST /api/mct/finder). Searches THIS host directly — no
-# VM, no lxc, no per-VM vernacular. grep -> abstract_search.findContent (exact
-# {file_path, lines:[{line,content}]} shape); collect/dirs/view -> stdlib. Roots
-# are absolute host paths from the body. --------------------------------------
+# --- Locus finder (POST /api/mct/finder). The search tab enumerates the ACTIVE
+# LOCUS — the host the seats ground in — never the operator's own client. The
+# pre-1.0.90 route was host-native (os.walk on whichever machine ran this
+# backend, i.e. the desktop client's own disk). body.vm is the wire locus and
+# resolves like a seat launch: "@keeper"/"host" = this station's own host; a
+# name = lxd guest or ssh host; "" = MODEL_VM. Transport mirrors _in_vm /
+# handoff_spawn: local-self -> bash here; ssh locus -> ssh via its ssh-host
+# entry (_ssh_argv); lxd guest -> lxc exec as ubuntu. The locus side is one
+# bash script over find/grep/cat (nothing to install there). Roots must sit
+# under the seat user's $HOME (the dir seats cd into); output is bounded by
+# entries / depth / bytes / time. Result shape is unchanged for the drawer. ----
+FINDER_MAX_ENTRIES = 2000        # rows per answer (the drawer shows SEARCH_CAP=500)
+FINDER_MAX_DEPTH = 12            # find -maxdepth ceiling
+FINDER_MAX_BYTES = 1_500_000     # stdout cap (head -c); also the view-file cap
+FINDER_TIMEOUT = 60              # s, the ssh/lxc hop included
+_FINDER_TOK_RE = re.compile(r"^[^\x00/\\]{1,64}$")   # ext / dir-name / glob tokens
+_FINDER_LOCUS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
 def _finder_roots(body):
+    """body.roots -> [abs path] (1-8, absolute, no NUL, no '..' hops). Only
+    roots[0] is walked; the locus resolves it and fences it under $HOME."""
     roots = body.get("roots")
     if not isinstance(roots, list) or not (1 <= len(roots) <= 8):
         return None
     out = []
     for r in roots:
-        if not isinstance(r, str) or "\x00" in r or not r.startswith("/"):
+        if (not isinstance(r, str) or "\x00" in r or not r.startswith("/")
+                or ".." in r.split("/")):
             return None
-        out.append(os.path.abspath(r))
+        out.append(os.path.normpath(r))
     return out
+
+
+async def _finder_ground(req_vm):
+    """Wire locus -> (ground, err); '' = this station's own host. Same rule as
+    api_seat_status / the terminal launch. The operator's own client (`op`,
+    kind=session, board-only) is never a locus name, so it can never be listed."""
+    v = (req_vm or "").strip()
+    if v in ("@keeper", "keeper", "host"):
+        return "", ""
+    v = v or MODEL_VM
+    if not v:
+        return "", ""
+    if not _FINDER_LOCUS_RE.match(v):
+        return None, "bad locus name"
+    if v not in await all_locus_names():
+        return None, f"{v} is not a searchable locus (an lxd guest, an ssh host, or this host)"
+    return v, ""
+
+
+def _finder_kind(ground):
+    return "host" if not ground else ("ssh" if _ssh_host(ground) else "lxd")
+
+
+async def _finder_exec(ground, script, timeout=FINDER_TIMEOUT):
+    """Run the finder script in the locus as its seat user -> (rc, out, err).
+    Grounded exactly like a seat: local-self (this host, or an ssh-host entry
+    that names THIS station's own user@host), ssh (script on stdin over the
+    entry's key/port/mux, BatchMode), lxd (lxc exec as ubuntu)."""
+    h = _ssh_host(ground) if ground else None
+    if h and _is_self_target(f"{h.get('user') or 'root'}@{h['host']}:{int(h.get('port') or 22)}"):
+        h, ground = None, ""                    # local-self: no ssh hop
+    if not ground:
+        argv, stdin = ["bash", "-c", script], None
+    elif h:
+        argv, stdin = _ssh_argv(h) + ["bash", "-s"], script.encode()
+    else:
+        argv, stdin = ["lxc", "exec", ground, "--", "sudo", "-u", "ubuntu", "-H",
+                       "bash", "-c", script], None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE)
+    except OSError as e:
+        return 127, "", str(e)
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(stdin), timeout)
+    except asyncio.TimeoutError:
+        with contextlib.suppress(Exception):
+            proc.kill()
+        return 124, "", f"finder timed out after {timeout}s"
+    return proc.returncode, out.decode(errors="replace"), err.decode(errors="replace")
+
+
+def _finder_script(op, body, root):
+    """The locus-side bash: resolve + fence the root under $HOME, then ONE
+    bounded find / grep / cat pipeline. stdout = home NL root NL data."""
+    q = shlex.quote
+    toks = lambda key: [t for t in _fv_list(body, key)[:16] if _FINDER_TOK_RE.match(t)]
+    hidden = bool(body.get("no_add"))           # raw: keep dot-entries
+    depth = 1 if body.get("no_recursive") else _fv_int(body, "maxdepth")
+    depth = FINDER_MAX_DEPTH if depth is None or depth < 1 else min(depth, FINDER_MAX_DEPTH)
+    n = FINDER_MAX_ENTRIES
+    lim = _fv_int(body, "limit")
+    if lim and 0 < lim < n:
+        n = lim
+    cap = f" | head -c {FINDER_MAX_BYTES}"
+    pre = ("H=$(cd ~ 2>/dev/null && pwd -P) || { echo 'no home in this locus' >&2; exit 90; }\n"
+           + ("printf '%s\\n' \"$H\"; exit 0\n" if op == "home" else "")
+           + f"P={q(root)}\n"
+           "R=$(realpath -e -- \"$P\" 2>/dev/null) || R=$(readlink -f -- \"$P\" 2>/dev/null) || R=\"$P\"\n"
+           "[ -e \"$R\" ] || { echo \"$P does not exist in this locus\" >&2; exit 91; }\n"
+           "case \"$R\" in \"$H\"|\"$H\"/*) ;; *) echo \"$P is outside the locus root $H\" >&2; exit 92;; esac\n"
+           "printf '%s\\n%s\\n' \"$H\" \"$R\"\n")
+    if op == "home":
+        return pre
+    if op == "view":
+        return pre + ("[ -f \"$R\" ] || { echo \"$P is not a regular file\" >&2; exit 93; }\n"
+                      "wc -l < \"$R\"\n"
+                      f"head -c {FINDER_MAX_BYTES} -- \"$R\"\nexit 0\n")
+    if op == "dirs":                            # depth-1, for the browse picker
+        # p513: enumerate FILES too (drop -type d), tagging each row with its
+        # find %y type so _finder_parse can split dirs vs files. The `dirs`
+        # array stays populated (fetchDirs cache + dir navigation depend on it);
+        # `files` is the new sibling array the browse UI reads.
+        return pre + ("find \"$R\" -mindepth 1 -maxdepth 1 "
+                      + ("" if hidden else "! -name '.*' ")
+                      + f"-printf '%y\\t%p\\n' 2>/dev/null | sort | head -n {n}{cap}\nexit 0\n")
+    # collect / grep share the walk: prune dot-entries (unless raw) and
+    # exclude_dir subtrees, then the ext / glob / dir / type / size / mtime tests.
+    prune = []
+    if not hidden:
+        prune.append("-name '.*'")
+    xd = toks("exclude_dir")
+    if xd:
+        prune.append("-type d \\( " + " -o ".join("-iname " + q(d) for d in xd) + " \\)")
+    tests = []
+    ext = [e.lstrip(".") for e in toks("ext") if e.lstrip(".")]
+    if ext:
+        tests.append("\\( " + " -o ".join("-iname " + q("*." + e) for e in ext) + " \\)")
+    for e in toks("exclude_ext"):
+        if e.lstrip("."):
+            tests.append("! -iname " + q("*." + e.lstrip(".")))
+    pats = toks("pattern")
+    if pats:
+        tests.append("\\( " + " -o ".join("-iname " + q(p) for p in pats) + " \\)")
+    for p in toks("exclude_pattern"):
+        tests.append("! -iname " + q(p))
+    dirs = toks("dir")
+    if dirs:
+        tests.append("\\( " + " -o ".join("-path " + q("*/" + d + "/*") for d in dirs) + " \\)")
+    if op == "grep":
+        tests.append("-type f")
+    else:
+        t = (_fv_list(body, "type") or [""])[0]
+        if t in ("f", "d", "l"):
+            tests.append("-type " + t)
+        mn, mx = _fv_int(body, "min_size"), _fv_int(body, "max_size")
+        if mn is not None and mn > 0:
+            tests.append(f"-size +{mn - 1}c")
+        if mx is not None and mx >= 0:
+            tests.append(f"-size -{mx + 1}c")
+        a, b = _fv_date(body, "after"), _fv_date(body, "before")
+        if a is not None:
+            tests.append(f"-newermt @{int(a)}")
+        if b is not None:
+            tests.append(f"! -newermt @{int(b)}")
+    find = f"find \"$R\" -mindepth 1 -maxdepth {depth} "
+    if prune:
+        find += "\\( " + " -o ".join(prune) + " \\) -prune -o "
+    find += " ".join(tests) + " "
+    if op == "collect":
+        return pre + find + f"-printf '%y\\t%s\\t%T@\\t%p\\n' 2>/dev/null | head -n {n}{cap}\nexit 0\n"
+    # grep: fixed strings, any-of at the line level (ALL-match is settled
+    # station-side per file); -Z NUL-terminates the path so ':' in names is safe.
+    strings = [s for s in _fv_list(body, "string")[:5] if "\x00" not in s and len(s) <= 256]
+    grep = "grep -nIHZ -F " + " ".join("-e " + q(s) for s in strings) + " --"
+    return pre + find + (f"-print0 2>/dev/null | xargs -0 -r {grep} 2>/dev/null"
+                         f" | cut -b1-800 | head -n {n}{cap}\nexit 0\n")
+
+
+def _finder_parse(op, body, out):
+    """Locus stdout -> (result in the drawer's shape, {home, root})."""
+    home, _, rest = out.partition("\n")
+    root, _, data = rest.partition("\n")
+    meta = {"home": home, "root": root}
+    if op == "home":
+        return {"home": home}, {"home": home, "root": home}
+    if op == "dirs":
+        # p513: rows are now "%y\t%p" — split by find type into dirs vs files.
+        # 'd' -> dirs (nav + fetchDirs cache), everything else -> files.
+        dirs, files = [], []
+        for l in data.split("\n"):
+            if not l:
+                continue
+            typ, sep, path = l.partition("\t")
+            if not sep:                         # tolerate an untyped row
+                path, typ = typ, "d"
+            (dirs if typ == "d" else files).append(path)
+        return {"dirs": dirs, "files": files}, meta
+    if op == "view":
+        tot, _, text = data.partition("\n")
+        all_lines = text.split("\n")
+        try:
+            total = int(tot.strip()) if len(text) >= FINDER_MAX_BYTES else len(all_lines)
+        except ValueError:
+            total = len(all_lines)
+        spec = (_fv_list(body, "lines") or [""])[0]
+        ranges = []
+        if not spec:
+            ranges = [(1, len(all_lines))]
+        else:
+            for part in spec.split(","):
+                part = part.strip()
+                if "-" in part:
+                    a, b = part.split("-", 1)
+                    try: ranges.append((int(a), int(b)))
+                    except ValueError: pass
+                elif part.isdigit():
+                    ranges.append((int(part), int(part)))
+        spans = []
+        for a, b in ranges:
+            a = max(1, a); b = min(len(all_lines), b)
+            spans.append({"lines": [{"line": n, "content": all_lines[n - 1]}
+                                    for n in range(a, b + 1)]})
+        return {"path": root, "total": total, "spans": spans}, meta
+    if op == "collect":                         # rows: type TAB size TAB mtime TAB path
+        rows = []
+        for l in data.split("\n"):
+            p = l.split("\t", 3)
+            if len(p) != 4:
+                continue
+            try:
+                rows.append({"path": p[3], "type": p[0], "size": int(p[1]), "mtime": int(float(p[2]))})
+            except ValueError:
+                continue
+        sort = (_fv_list(body, "sort") or ["name"])[0]
+        key = {"size": lambda r: r["size"], "mtime": lambda r: r["mtime"]}.get(sort, lambda r: r["path"])
+        rows.sort(key=key, reverse=bool(body.get("reverse")))
+        lim = _fv_int(body, "limit")
+        if lim and lim > 0:
+            rows = rows[:lim]
+        return {"files": rows if body.get("meta") else [r["path"] for r in rows]}, meta
+    # grep: path NUL line ':' content per row. ALL-match (the default) keeps a
+    # file only when its hit lines cover every string (findContent's total_strings).
+    strings = _fv_list(body, "string")[:5]
+    by = {}
+    for l in data.split("\n"):
+        path, nul, rest = l.partition("\0")
+        if not nul:
+            continue
+        ln, _, content = rest.partition(":")
+        if not ln.isdigit():
+            continue
+        by.setdefault(path, []).append({"line": int(ln), "content": content})
+    results = []
+    for path, lines in by.items():
+        if not body.get("any") and len(strings) > 1:
+            blob = "\n".join(x["content"] for x in lines)
+            if not all(s in blob for s in strings):
+                continue
+        results.append({"file_path": path, "lines": lines})
+    return {"results": results}, meta
 
 
 def _fv_list(body, key):
@@ -2391,124 +3691,41 @@ def _finder_filters(body):
 
 
 async def mct_finder(request):
+    """POST /api/mct/finder {op, vm, roots, ...filters} — grep | collect |
+    dirs | view | home, run IN the active locus (see the header above). Gated
+    by auth_mw like every /api route. Answers carry locus/kind/home/root so
+    the drawer can show where it is looking and fence its root picker."""
     try:
         body = await request.json()
+        assert isinstance(body, dict)
     except Exception:
         return web.json_response({"ok": False, "error": "body must be JSON"}, status=400)
     op = (body.get("op") or "").strip()
-    roots = _finder_roots(body)
+    if op not in ("home", "grep", "collect", "dirs", "view"):
+        return web.json_response({"ok": False, "error": "op must be home|grep|collect|dirs|view"}, status=400)
+    ground, gerr = await _finder_ground(body.get("vm"))
+    if ground is None:
+        return web.json_response({"ok": False, "error": gerr}, status=400)
+    who = {"locus": ground or "@keeper", "kind": _finder_kind(ground)}
+    roots = ["/"] if op == "home" else _finder_roots(body)
     if roots is None:
-        return web.json_response({"ok": False, "error": "roots must be 1-8 absolute host paths"}, status=400)
-
-    def _work():
-        if op == "grep":
-            from abstract_search.find_content import findContent
-            strings = _fv_list(body, "string")
-            if not strings:
-                return {"ok": False, "error": "grep needs at least one string"}
-            results = findContent(*roots, strings=strings,
-                                  total_strings=not body.get("any"),
-                                  get_lines=True, **_finder_filters(body))
-            norm = [r for r in results if isinstance(r, dict) and r.get("lines")]
-            return {"ok": True, "result": {"results": norm}}
-        if op in ("collect", "dirs"):
-            import fnmatch
-            recursive = not body.get("no_recursive")
-            maxdepth = _fv_int(body, "maxdepth")
-            allowed_ext = {e.lstrip(".").lower() for e in _fv_list(body, "ext")}
-            exclude_ext = {e.lstrip(".").lower() for e in _fv_list(body, "exclude_ext")}
-            exclude_dir = {d.lower() for d in _fv_list(body, "exclude_dir")}
-            pats = [p.lower() for p in _fv_list(body, "pattern")]
-            xpats = [p.lower() for p in _fv_list(body, "exclude_pattern")]
-            hidden = bool(body.get("no_add"))
-            ftype = (_fv_list(body, "type") or [None])[0]
-            minsz, maxsz = _fv_int(body, "min_size"), _fv_int(body, "max_size")
-            after, before = _fv_date(body, "after"), _fv_date(body, "before")
-            limit = _fv_int(body, "limit")
-            files, dirs = [], []
-            for base in roots:
-                base_depth = base.rstrip("/").count("/")
-                for dp, dns, fns in os.walk(base):
-                    depth = dp.rstrip("/").count("/") - base_depth
-                    dns[:] = [d for d in dns if d.lower() not in exclude_dir
-                              and (hidden or not d.startswith("."))]
-                    if op == "dirs":
-                        dirs += [os.path.join(dp, d) for d in dns]
-                        dns[:] = []          # depth-1 for the browse picker
-                        continue
-                    if not recursive and depth >= 1:
-                        dns[:] = []
-                    if maxdepth is not None and depth >= maxdepth:
-                        dns[:] = []
-                    if ftype == "d":
-                        continue
-                    for fn in fns:
-                        if not hidden and fn.startswith("."):
-                            continue
-                        if allowed_ext and fn.rsplit(".", 1)[-1].lower() not in allowed_ext:
-                            continue
-                        if exclude_ext and fn.rsplit(".", 1)[-1].lower() in exclude_ext:
-                            continue
-                        low = fn.lower()
-                        if pats and not any(fnmatch.fnmatch(low, p) for p in pats):
-                            continue
-                        if xpats and any(fnmatch.fnmatch(low, p) for p in xpats):
-                            continue
-                        fp = os.path.join(dp, fn)
-                        try:
-                            st = os.stat(fp)
-                        except OSError:
-                            continue
-                        if minsz is not None and st.st_size < minsz:  continue
-                        if maxsz is not None and st.st_size > maxsz:  continue
-                        if after is not None and st.st_mtime < after:  continue
-                        if before is not None and st.st_mtime > before: continue
-                        files.append(fp)
-            if op == "dirs":
-                return {"ok": True, "result": {"dirs": sorted(set(dirs))}}
-            sort = (_fv_list(body, "sort") or ["name"])[0]
-            key = {"size": lambda p: _safe_stat(p, "st_size"),
-                   "mtime": lambda p: _safe_stat(p, "st_mtime")}.get(sort)
-            files = sorted(set(files), key=key) if key else sorted(set(files))
-            if body.get("reverse"):
-                files = files[::-1]
-            if limit:
-                files = files[:limit]
-            return {"ok": True, "result": {"files": files}}
-        if op == "view":
-            path = roots[0]
-            spec = (_fv_list(body, "lines") or [""])[0]
-            try:
-                with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                    all_lines = fh.read().split("\n")
-            except OSError as e:
-                return {"ok": False, "error": str(e)}
-            ranges = []
-            if not spec:
-                ranges = [(1, len(all_lines))]
-            else:
-                for part in spec.split(","):
-                    part = part.strip()
-                    if "-" in part:
-                        a, b = part.split("-", 1)
-                        try: ranges.append((int(a), int(b)))
-                        except ValueError: pass
-                    elif part.isdigit():
-                        ranges.append((int(part), int(part)))
-            spans = []
-            for a, b in ranges:
-                a = max(1, a); b = min(len(all_lines), b)
-                spans.append({"lines": [{"line": n, "content": all_lines[n - 1]}
-                                        for n in range(a, b + 1)]})
-            return {"ok": True, "result": {"spans": spans}}
-        return {"ok": False, "error": "op must be grep|collect|dirs|view"}
-
+        return web.json_response({"ok": False, "error": "roots must be 1-8 absolute locus paths (no ..)",
+                                  **who}, status=400)
+    if op == "grep" and not _fv_list(body, "string"):
+        return web.json_response({"ok": False, "error": "grep needs at least one string", **who}, status=400)
+    rc, out, err = await _finder_exec(ground, _finder_script(op, body, roots[0]))
+    if rc != 0:
+        msg = (err.strip().splitlines() or [f"finder rc {rc}"])[-1]
+        # 90-93 are the script's own root/home verdicts (operator-fixable);
+        # anything else is the hop (ssh/lxc) or the locus failing.
+        return web.json_response({"ok": False, "error": msg, **who},
+                                 status=400 if 90 <= rc <= 93 else 502)
     try:
-        result = await asyncio.get_event_loop().run_in_executor(None, _work)
+        result, meta = _finder_parse(op, body, out)
     except Exception as e:
-        return web.json_response({"ok": False, "error": str(e)}, status=500)
-    status = 200 if result.get("ok") else 400
-    return web.json_response(result, status=status)
+        return web.json_response({"ok": False, "error": str(e), **who}, status=500)
+    return web.json_response({"ok": True, "result": result, **who, **meta,
+                              "truncated": len(out) >= FINDER_MAX_BYTES})
 
 
 def _safe_stat(path, attr):
@@ -2535,13 +3752,17 @@ _VM_JOBS = {}   # name -> {state, log} for in-flight vm-new builds (this process
 
 async def mct_vm_get(request):
     """GET /api/mct/vm — LXD stations on this host, as candidate VM sessions."""
+    lxc_err = ""
     try:
         rc, out, err = await _run("lxc", "list", "--format", "csv", "-c", "ns")
-    except Exception as e:
-        return web.json_response({"ok": False, "error": str(e)}, status=502)
+    except Exception as e:      # noqa: BLE001
+        rc, out, err = 1, "", str(e)
     if rc != 0:
-        return web.json_response({"ok": False, "error": (err or out).strip() or "lxc list failed"},
-                                 status=502)
+        # 2026-09-03: no lxc here (e.g. the snap CLI refuses vm_mgr on ae) must
+        # not blank the 🖥 drawer — the ssh/toolserver loci still list, and the
+        # reason rides along as `lxc_error`.
+        lxc_err = (err or out).strip() or "lxc list failed"
+        out = ""
     vms = []
     for line in (out or "").splitlines():
         parts = line.split(",")
@@ -2556,7 +3777,12 @@ async def mct_vm_get(request):
         vms.append({"name": n, "kind": "ssh", "host": h["host"], "user": h.get("user", "root"),
                     "port": h.get("port", 22), "building": False,
                     "status": "RUNNING" if await _ssh_alive(h) else "UNREACHABLE"})
-    return web.json_response({"ok": True, "vms": vms, "vm_new": bool(VM_NEW_BIN and os.path.exists(VM_NEW_BIN))})
+    hidden = _hidden_loci()
+    for v in vms:                       # the drawer sees hidden ones too (to unhide them)
+        v["hidden"] = v["name"] in hidden
+    return web.json_response({"ok": True, "vms": vms, "hidden": sorted(hidden),
+                              "lxc_error": lxc_err or None,
+                              "vm_new": bool(VM_NEW_BIN and os.path.exists(VM_NEW_BIN))})
 
 
 async def mct_vm_post(request):
@@ -2571,6 +3797,16 @@ async def mct_vm_post(request):
         return web.json_response({"ok": False, "error": "bad station name (a-z, then a-z0-9-, <=31)"}, status=400)
     if name in ("golden", "sandbox", "default", "none"):
         return web.json_response({"ok": False, "error": "reserved name"}, status=400)
+    if op in ("hide", "unhide"):
+        # ◌ non-destructive: a view preference of THIS station, no provision gate
+        hidden = _hidden_loci()
+        (hidden.add if op == "hide" else hidden.discard)(name)
+        try:
+            _hidden_loci_save(hidden)
+        except OSError as e:
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+        audit(request, "locus-" + op, name, ok=True)
+        return web.json_response({"ok": True, "op": op, "name": name, "hidden": sorted(hidden)})
     try:
         require_provision(request)           # homebase + provision cap + CSRF
     except web.HTTPException:
@@ -2625,7 +3861,11 @@ def _mct2_live_turns():
     """The mct (pointer-exchange) backend's turn log, from its canonical
     record: <ws>/exchange/turn-NNNN-{prompt,response}.md plus status.json.
     Shaped like mct.db turns so 📡 live renders both streams as one."""
-    base = FV_STATE_HOME / "mct2" / "repl"
+    # mct v2: the canonical workspace first, the retired mct2/repl one as a
+    # read-only fallback (its archived exchange files stay visible).
+    base = _active_ws()
+    if not (base / "exchange").is_dir():
+        base = _LEGACY_MCT2_WS
     exch = base / "exchange"
     if not exch.is_dir():
         return []
@@ -2652,6 +3892,56 @@ def _mct2_live_turns():
     return turns
 
 
+def _mct_ledger_live_turns(app, limit=12):
+    """The ledger half of /api/mct/live: recent native-seat turns with their
+    pointer events. Nothing inline — bodies are pulled on demand by handle."""
+    broker = app.get("mct_broker") if app is not None else None
+    if broker is None:
+        return []
+    return broker.store.turn_log(limit=limit)
+
+
+_MCT_LIVE_OBJECT_MAX = 256 * 1024
+
+
+async def mct_live_object(request):
+    """GET /api/mct/live/object?handle=mct://… — render ONE ledger object for
+    the operator's live view: {content, name, mime, size, sha256, truncated}.
+    Text is decoded (replacement on bad bytes) and capped; binaries report
+    metadata only (download via /api/mct/object)."""
+    resp = await _sidecar_proxy(request)
+    if resp is not None:
+        return resp
+    broker = request.app.get("mct_broker")
+    if broker is None:
+        return web.json_response({"ok": False, "error": "no MCT ledger on this station"}, status=404)
+    handle = (request.query.get("handle") or "").strip()
+    try:
+        meta = await asyncio.to_thread(broker.store.describe, handle)
+        raw = await asyncio.to_thread(broker.store.pull, handle)
+    except ValueError as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=404)
+    mime = meta.get("mime") or "application/octet-stream"
+    textual = mime.startswith("text/") or mime.split(";")[0] in ("application/json", "application/xml", "application/x-yaml", "application/javascript")
+    content, truncated = "", False
+    if textual:
+        if len(raw) > _MCT_LIVE_OBJECT_MAX:
+            raw, truncated = raw[:_MCT_LIVE_OBJECT_MAX], True
+        content = raw.decode("utf-8", "replace")
+        if meta.get("kind") == "context":
+            try:   # the manifest is a pointer set; show it pretty and without the seat protocol text
+                doc = json.loads(content)
+                doc.pop("response_instructions", None)
+                content = json.dumps(doc, indent=1, ensure_ascii=False)
+            except ValueError:
+                pass
+    return web.json_response({"ok": True, "handle": handle, "content": content, "textual": textual,
+                              "truncated": truncated, "name": meta.get("name"), "mime": mime,
+                              "kind": meta.get("kind"), "size": meta.get("size"), "sha256": meta.get("sha256"),
+                              "origin": meta.get("origin") or "broker",
+                              "download": "/api/mct/object?handle=" + __import__("urllib.parse").parse.quote(handle, safe="")})
+
+
 async def mct_live(request):
     """GET /api/mct/live — the frontier's live turn log: the mct backend's
     pointer-exchange turns (exchange files + status.json) MERGED with the
@@ -2664,6 +3954,13 @@ async def mct_live(request):
         return resp
     import sqlite3
     out, sid = [], None
+    try:
+        # mct v2: the durable ledger's turns FIRST — every event is a pointer
+        # (prompt/attachment/context/response/artifact handles); the operator
+        # reads a reply by pulling its object (/api/mct/live/object?handle=).
+        out.extend(_mct_ledger_live_turns(request.app))
+    except Exception:
+        pass                       # the ledger must never sink the view
     try:
         out.extend(_mct2_live_turns())
     except Exception:
@@ -2700,6 +3997,58 @@ async def mct_live(request):
                               "session": sid or _active_session()})
 
 
+async def _central_prompt(request, vm):
+    try:
+        body = await request.json()
+        text = (body.get("text") or "").strip()
+        files = [f for f in (body.get("files") or []) if isinstance(f, dict)][:20]
+    except Exception:
+        return web.json_response({"error": "bad body"}, status=400)
+    if not text and not files:
+        return web.json_response({"error": "empty prompt"}, status=400)
+    try:
+        doc = await _ts_call(request.app, "prompt/submit", {
+            "locus": vm, "text": text, "files": files, "by": _station_id(),
+            "session": _active_session()}, timeout=120)
+    except Exception as e:
+        return web.json_response(
+            {"ok": False, "error": f"{vm}: toolserver prompt inbox unreachable — {e}"}, status=502)
+    if not isinstance(doc, dict) or not doc.get("path"):
+        return web.json_response({"ok": False, "error": f"{vm}: prompt/submit gave no path"}, status=502)
+    submitted = False
+    sess = _live_surface_session(_surface_key("frontier", vm, _active_session()))
+    if sess is not None:
+        try:
+            sess.write((str(doc.get("pointer") or ("Handle the operator prompt at "
+                        + str(doc["path"]) + "/prompt.md — read it via a pull, then respond.")) + "\r").encode("utf-8"))
+            submitted = True
+        except Exception:
+            submitted = False
+    n = len(doc.get("files") or [])
+    note = (("sent → frontier (A) @" + vm) if submitted
+            else ("posted → " + vm + " board " + str(doc.get("board_id") or "") + " (no frontier seat here)"))
+    note += " · toolserver " + str(doc.get("id") or "") + (" · " + str(n) + " file(s)" if n else "")
+    return web.json_response({"ok": True, "note": note, "submitted": submitted,
+                              "path": str(doc["path"]), "central": True,
+                              "prompt_id": doc.get("id"), "board_id": doc.get("board_id")})
+
+
+async def _mct_native_seat():
+    """The native seat (codex|claude-code) the ledger should address: the live
+    frontier tmux session mapped through NATIVE_SEATS, else '' (no seat)."""
+    try:
+        from mct_gateway import NATIVE_SEATS as _seats
+    except ImportError:
+        return ""
+    sess = await _live_frontier_session()
+    if not sess:
+        return ""
+    for provider, tmux_name in _seats.items():
+        if sess == tmux_name:
+            return provider
+    return ""
+
+
 async def mct_prompt(request):
     """POST /api/mct/prompt {text, files:[{name,type,dataUrl}]} - save a composed
     prompt + attached media into the active session workspace's prompt-inbox, for the
@@ -2709,31 +4058,12 @@ async def mct_prompt(request):
     the HARNESS's frontier PTY for that VM, which is the live seat here."""
     vm = await _sidecar_vm(request)
     if vm:
-        resp = await _wb_request(request, vm)
-        if resp is None:
-            return web.json_response(
-                {"ok": False, "error": f"{vm}: workbench console unreachable — "
-                                       f"install/start it: install-vm-console {vm}"},
-                status=502)
-        try:
-            doc = json.loads(resp.body)
-        except Exception:
-            doc = None
-        if (resp.status == 200 and isinstance(doc, dict) and doc.get("path")
-                and not doc.get("submitted")):
-            key = "frontier:" + _active_session() + "@" + vm
-            s2 = SESSIONS.get(FV_SESSIONS.get(key) or "")
-            if s2 is not None and getattr(s2, "alive", False):
-                pointer = ("Handle the operator prompt at " + str(doc["path"])
-                           + "/prompt.md — read it via a pull, then respond.")
-                try:
-                    s2.write((pointer + "\r").encode("utf-8"))
-                    doc["submitted"] = True
-                    doc["note"] = "sent → frontier (A) @" + vm
-                except Exception:
-                    pass
-            return web.json_response(doc, status=resp.status)
-        return resp
+        # Operator 2026-09-02 ("just have it sent to the toolserver"): a non-host
+        # locus's prompt + files go to the toolserver's central prompt inbox
+        # (prompt/submit) — stored on ae where every seat can read them, with a
+        # [prompt] board item on that locus (the lane comms.ping uses). If this
+        # station holds the locus's frontier seat, the pointer is typed into it.
+        return await _central_prompt(request, vm)
     import base64, re as _re
     try:
         body = await request.json()
@@ -2743,6 +4073,36 @@ async def mct_prompt(request):
         return web.json_response({"error": "bad body"}, status=400)
     if not text and not files:
         return web.json_response({"error": "empty prompt"}, status=400)
+    # t319 (2026-09-16): while abstract-claude serve LEADS the host frontier,
+    # the operator's prompt must not be fanned out to the tmux MCT seat behind
+    # their back (the seat answered a question the serve chat was already
+    # handling). Mirror of fleetview-term.js sendPrompt's t296 guard. An
+    # explicit {"seat": "tmux"} still reaches the terminal seat on purpose.
+    if KEEPER_SURFACE == "serve" and (body.get("seat") or "").strip().lower() != "tmux":
+        return web.json_response(
+            {"error": "frontier is the serve console — type in the chat pane "
+                      "(send {\"seat\": \"tmux\"} to address the terminal seat explicitly)",
+             "keeper_surface": "serve", "refused": True}, status=409)
+    # mct v2 (2026-09-15): with the durable ledger present, the composed prompt
+    # becomes an immutable object set and the Broker types ONE pointer line
+    # into the live native seat (durable, sha-verified, idempotent, visible in
+    # /api/mct/live). No prompt-inbox file, no client-typed pointer. The
+    # inbox path below stays as the fallback when no ledger/seat exists.
+    broker = request.app.get("mct_broker")
+    if broker is not None:
+        seat = await _mct_native_seat()
+        if seat:
+            try:
+                import hashlib as _hl
+                digest = _hl.sha256((text + "\0" + "\0".join(str(f.get("name") or "") + ":" + str(f.get("dataUrl") or "")[-64:] for f in files[:20])).encode("utf-8")).hexdigest()[:24]
+                rid = "prompt-" + time.strftime("%Y%m%d%H%M%S") + "-" + digest
+                turn = await asyncio.to_thread(broker.store.submit, seat, rid, text, [f for f in files[:20] if isinstance(f, dict)])
+                audit(request, "mct-prompt", f"ledger turn {turn['id']} → {seat}", ok=True)
+                return web.json_response({"ok": True, "submitted": True, "central": False,
+                                          "note": "queued → " + seat + " as MCT context " + str(turn["context"]) + " (pointer delivered by the broker)",
+                                          "turn": turn["id"], "context": turn["context"], "seat": seat})
+            except ValueError as e:
+                return web.json_response({"error": str(e)}, status=400)
     ts = time.strftime("%Y%m%d-%H%M%S")
     dst = _active_ws() / "prompt-inbox" / ts
     saved = []
@@ -2759,34 +4119,57 @@ async def mct_prompt(request):
             saved.append(name)
     except (OSError, ValueError) as e:
         return web.json_response({"error": str(e)}, status=500)
-    # Actually reach the agent: type a ONE-LINE pointer into the running frontier
-    # terminal (the MCT REPL), so B points A at the saved prompt/media — file-pointing
-    # keeps A's context lean. Falls back to "saved only" if no frontier is running.
-    submitted = False
-    try:
-        sess = _frontier_live_session()
-        if sess is not None:
-            pointer = ("Handle the operator prompt at " + str(dst / "prompt.md")
-                       + (" (with " + str(len(saved)) + " attached file(s) in " + str(dst)
-                          + ": " + ", ".join(saved) + ")" if saved else "")
-                       + " — read it via a pull, then respond.")
-            sess.write((pointer + "\r").encode("utf-8"))
-            submitted = True
-    except Exception:
-        submitted = False
-    note = (("sent \u2192 frontier (A)" if submitted else "saved \u2192 prompt-inbox/" + ts + " (no frontier running)")
+    # Reach the agent by pointing it at the saved prompt/media (file-pointing keeps
+    # A's context lean). The pointer is delivered to the live seat by the FRONTEND
+    # (PromptPanel -> window.__fvSend(pointer, "frontier", {submit:true})), NOT typed
+    # here. Two reasons the old server-side write was wrong:
+    #   1. TARGET: _frontier_live_session() returned whichever frontier backend's PTY
+    #      came first in FV_SESSIONS (mct AND claude-code both keep a live session once
+    #      switched, since a switch DETACHES rather than kills), so it typed into
+    #      claude-code regardless of which backend is actually displayed in the station.
+    #   2. SUBMIT: a single-write "\r" does not submit in the claude-code Ink TUI (it
+    #      reads text+Enter arriving in one write as a paste and just inserts a newline).
+    # The frontend bridge targets the ACTIVE frontier backend (its ws carries
+    # &backend=<chosen>) and submits with a SEPARATE, delayed Enter. We SAVE the prompt
+    # + files and return the pointer for the UI to inject.
+    pointer = ("Handle the operator prompt at " + str(dst / "prompt.md")
+               + (" (with " + str(len(saved)) + " attached file(s) in " + str(dst)
+                  + ": " + ", ".join(saved) + ")" if saved else "")
+               + " — read it via a pull, then respond.")
+    note = ("saved \u2192 prompt-inbox/" + ts
             + (" \u00b7 " + str(len(saved)) + " file(s)" if saved else ""))
-    return web.json_response({"ok": True, "note": note, "submitted": submitted, "path": str(dst)})
+    return web.json_response({"ok": True, "note": note, "submitted": False,
+                              "pointer": pointer, "path": str(dst)})
 
 
 async def mct_todo_get(request):
     """GET /api/mct/todo - the current session's todo.v1 board. With an
     active VM the board is THAT VM's own (via its workbench); the
     /api/vm/keeper/todo alias always stays the host keeper's board."""
+    vm = await _sidecar_vm(request)
+    loc = _central_locus(vm)
+    if loc:
+        return await _central_todo_get(request, loc)
     resp = await _sidecar_proxy(request)
     if resp is not None:
         return resp
+    # host keeper (board-sot 2026-09-18): the central DB `todos` slice is the
+    # source of truth, the local file is the FAILSAFE. Serve the central board
+    # when it is reachable AND at least as complete as the file; otherwise serve
+    # the file. SAFETY INVARIANT: never show FEWER items than the file has — so a
+    # DB that is unreachable, errors, or is momentarily shorter than the file
+    # (e.g. before the reverse sync has back-filled it) silently keeps the file.
+    kloc = _keeper_locus()
+    try:
+        central = await _central_todo_state(request.app, kloc)
+    except Exception:
+        central = None
     state, err = _mct_todo_read()
+    if central is not None and (state is None
+                                or len(central["items"]) >= len(state["items"])):
+        return web.json_response({"ok": True, "state": central, "central": True,
+                                  "locus": kloc,
+                                  "path": _central_todo_path(kloc)})
     if state is None:
         return web.json_response({"ok": False, "error": err}, status=502)
     return web.json_response({"ok": True, "state": state, "path": str(_mct_todo_path())})
@@ -2802,6 +4185,10 @@ async def mct_todo_post(request):
     status (the canonical proposal contract). Mutations journal CANONICAL
     events ({event, id, type, detail}) that the drawer's history tab renders
     natively (added/status/text/note/comment/removed)."""
+    vm = await _sidecar_vm(request)
+    loc = _central_locus(vm)
+    if loc:
+        return await _central_todo_post(request, loc)
     resp = await _sidecar_proxy(request)
     if resp is not None:
         return resp
@@ -2934,8 +4321,29 @@ async def mct_todo_post(request):
         _todo_hist(ev)
     if triage is not None:
         asyncio.create_task(_todo_triage(*triage))
-    return web.json_response({"ok": True, "state": state,
-                              "path": str(_mct_todo_path())})
+    # host keeper dual write (board-sot 2026-09-18): the local file is the
+    # failsafe and was just written atomically above; mirror the SAME op into
+    # the central DB `todos` slice under the one canonical locus. A DB failure
+    # never fails the request — the file already holds the change — it only
+    # surfaces as a `warning`. Reuses _central_todo_post (it re-reads the cached
+    # request body, so it sees the original UI-dialect op and its full add /
+    # update / del / resolve / comment mapping, incl. note-encoded comments).
+    warning = None
+    try:
+        mresp = await _central_todo_post(request, _keeper_locus())
+        if getattr(mresp, "status", 200) != 200:
+            try:
+                mj = json.loads((mresp.body or b"{}").decode("utf-8", "replace"))
+            except Exception:
+                mj = {}
+            warning = ("central mirror not applied (" + str(mresp.status) + "): "
+                       + str(mj.get("error", ""))[:160])
+    except Exception as e:
+        warning = "central mirror failed (change saved to the local file): " + str(e)[:160]
+    payload = {"ok": True, "state": state, "path": str(_mct_todo_path())}
+    if warning:
+        payload["warning"] = warning
+    return web.json_response(payload)
 
 
 async def mct_todo_history(request):
@@ -2965,14 +4373,213 @@ _TODO_ASSIST_PROMPTS = {
 }
 
 
+_HUGPY_CHAT_ONESHOT = r'''import json, sys
+from hugpy_agent.config import load_config
+from hugpy_agent.gateway import Gateway
+d = json.load(sys.stdin)
+gw = Gateway.from_config(load_config(overrides=d.get("overrides") or {}))
+res = gw.chat(d["messages"], max_tokens=int(d.get("max_tokens") or 500))
+if not res.ok:
+    raise RuntimeError(res.error or "B call failed")
+text = getattr(res, "text", None) or getattr(res, "content", None) or ""
+if not isinstance(text, str) or not text.strip():
+    raise RuntimeError("B returned no text; operator messages remain queued")
+print(json.dumps({"text": text.strip()}))
+'''
+
+
+def _hugpy_chat(messages, max_tokens=500, overrides=None):
+    """ONE gateway chat turn through hugpy_agent (B's brain). In-process when
+    the server's own interpreter has the package; otherwise a one-shot exec
+    under the interpreter that does (_hugpy_python — the packaged backend runs
+    the system python while hugpy_agent lives in the seats venv / miniconda).
+    Board t4 (operator 2026-09-10): every ✨ tidy / readability click died with
+    "No module named hugpy_agent" on exactly such installs. Sync — call it from
+    an executor thread."""
+    try:
+        from hugpy_agent.config import load_config
+        from hugpy_agent.gateway import Gateway
+    except ImportError:
+        py = _hugpy_python()
+        if not py:
+            raise RuntimeError("hugpy_agent is not importable by any known python "
+                               "(install hugpy-agent, or run the backend under its interpreter)")
+        r = subprocess.run([py, "-c", _HUGPY_CHAT_ONESHOT],
+                           input=json.dumps({"messages": messages, "max_tokens": max_tokens,
+                                             "overrides": dict(_b_overrides(), **(overrides or {}))}),
+                           capture_output=True, text=True, timeout=180)
+        if r.returncode != 0:
+            tail = [ln for ln in (r.stderr or "").strip().splitlines() if ln.strip()][-1:] or ["exit %d" % r.returncode]
+            raise RuntimeError("hugpy_agent one-shot failed: " + tail[0][:300])
+        for ln in reversed((r.stdout or "").strip().splitlines()):
+            try:
+                return _hugpy_chat_check((json.loads(ln).get("text") or "").strip())
+            except ValueError:
+                continue
+        raise RuntimeError("hugpy_agent one-shot returned no JSON")
+    gw = Gateway.from_config(load_config(overrides=dict(_b_overrides(), **(overrides or {}))))
+    res = gw.chat(messages, max_tokens=max_tokens)
+    if getattr(res, "ok", True) is False:
+        raise RuntimeError(str(getattr(res, "error", "B call failed")))
+    return _hugpy_chat_check(getattr(res, "text", None) or getattr(res, "content", None) or "")
+
+
+def _hugpy_chat_check(text):
+    """Only a nonempty model answer may become a B digest or proposal."""
+    if not isinstance(text, str) or not text.strip():
+        raise RuntimeError("B returned no text; operator messages remain queued")
+    text = text.strip()
+    if text.startswith("[error:"):
+        raise RuntimeError(text.strip("[]").strip())
+    if text.startswith("ChatResult(") and "native_tool_calls=" in text:
+        raise RuntimeError("B returned a result object instead of an answer; messages remain queued")
+    return text
+
+
+def _mct_b_collate(messages):
+    """Compile queued operator messages into ONE prompt for frontier A.
+
+    Default is VERBATIM: the operator's words reach A exactly as typed, and
+    multiple queued messages are joined unchanged. This deliberately replaces
+    B's old model-rewrite, which paraphrased operator prompts and "flagged
+    ambiguities" (mangling them) and — because it re-ran on every 1s poll tick
+    with no backoff — fanned a short burst of messages into many metered model
+    calls. Set MCT_B_MODEL_COLLATE=1 to restore the old model-driven rewrite."""
+    if not _b_enabled():
+        raise RuntimeError("B is disabled; messages are saved until B is enabled")
+    texts = [(m.get("text") or "").strip() for m in messages]
+    texts = [t for t in texts if t]
+    if not texts:
+        raise RuntimeError("B returned an empty digest")
+    if os.environ.get("MCT_B_MODEL_COLLATE") != "1":
+        # Verbatim: no model call, no paraphrase, no per-tick fan-out.
+        return texts[0] if len(texts) == 1 else "\n\n---\n\n".join(texts)
+    base = os.environ.get("MCT_B_BASE")
+    if not base and _port_open(7002):
+        base = _LOCAL_HUGPY_FRONT + "/api/v1"
+    overrides = {"timeout": 60}
+    if base:
+        overrides["base"] = base
+    instruction = """You are B, the local keeper. Compile the operator messages below into ONE prompt for frontier A.
+Follow QUERY-ARBITRATION-SOP: B infers wording; C dictates disposition. Do not execute the requests.
+Preserve every concrete requirement, constraint and correction; remove repetition and superseded wording.
+When intent is ambiguous, retain the original wording and explicitly flag the ambiguity. Do not invent intent.
+Keep relevant provenance and reconcile instructions. Do not select a different lane or create extra tasks.
+Attachments and original messages remain available through the supplied pointers; do not invent their contents.
+Return only the compiled prompt, with no answer or commentary. The station adds the B-digest marker and provenance."""
+    answer = _hugpy_chat([{"role": "system", "content": instruction},
+                          {"role": "user", "content": json.dumps(messages, ensure_ascii=False)}],
+                         max_tokens=2400, overrides=overrides)
+    if not answer.strip():
+        raise RuntimeError("B returned an empty digest")
+    return answer
+
+
+def _mct_b_capture(message):
+    """C-explicit capture: idempotent board item with original context pointer."""
+    marker = "mct-capture:" + message["id"]
+    with _todo_locked():
+        for item in _mct_todo_read().get("items", []):
+            if marker in str(item.get("note", "")):
+                return item["id"]
+    compiled = _mct_b_collate([message])
+    with _todo_locked():
+        state = _mct_todo_read()
+        for item in state.get("items", []):
+            if marker in str(item.get("note", "")):
+                return item["id"]
+        state, error = todo_apply(state, {"op": "add", "by": "operator", "item": {
+            "type": "todo", "status": "open", "by": "operator", "text": compiled[:500],
+            "note": marker + "\nOriginal message and attachments: " + message["context"] + "\n" + compiled[:1400]}})
+        if error:
+            raise RuntimeError(error)
+        _mct_todo_write(state)
+        return state["items"][-1]["id"]
+
+
 def _todo_assist_call(mode, text):
-    from hugpy_agent.config import load_config
-    from hugpy_agent.gateway import Gateway
     sysmsg = _TODO_ASSIST_PROMPTS.get(mode, _TODO_ASSIST_PROMPTS["reword"])
-    gw = Gateway.from_config(load_config(overrides=_b_overrides()))
-    res = gw.chat([{"role": "system", "content": sysmsg},
-                   {"role": "user", "content": text}], max_tokens=500)
-    return (getattr(res, "text", None) or getattr(res, "content", None) or str(res) or "").strip()
+    return _hugpy_chat([{"role": "system", "content": sysmsg},
+                        {"role": "user", "content": text}], max_tokens=500)
+
+
+async def _run_timeout(args, timeout):
+    """_run with a hard timeout: the child is killed when it overruns (rc -1)."""
+    proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE,
+                                                stderr=asyncio.subprocess.PIPE)
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(), timeout)
+    except asyncio.TimeoutError:
+        with contextlib.suppress(ProcessLookupError):
+            proc.kill()
+        with contextlib.suppress(Exception):
+            await proc.wait()
+        return -1, "", "timeout"
+    return proc.returncode, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
+
+
+async def _tmux_type_line(sess, line, timeout=8):
+    """Type ONE line + Enter into a tmux session's active pane, bounded.
+    `tmux send-keys -l <long line>` has been seen to block indefinitely when
+    the pane's pty input is not being drained (2026-09-10: two stuck senders
+    hung their request handlers) — so each step is time-limited and a stuck
+    sender is killed rather than left waiting. Returns True when both the
+    text and the Enter went through."""
+    tk = ["tmux", "-L", KEEPER_TMUX_SOCK, "send-keys", "-t", "=" + sess + ":"]
+    rc, _o, _e = await _run_timeout(tk + ["-l", line], timeout)
+    if rc != 0:
+        return False
+    await asyncio.sleep(0.6)
+    rc, _o, _e = await _run_timeout(tk + ["Enter"], timeout)
+    return rc == 0
+
+
+async def _frontier_pane_type(line):
+    """Type ONE line + Enter into the live frontier seat's pane: the claude-code
+    seat when one is live, else the mct pointer-exchange REPL session. Claude
+    Code queues input that arrives mid-turn, so nothing in flight is disturbed.
+    Returns the tmux session typed into, '' when no live seat."""
+    sess = await _live_frontier_session()
+    if not sess:
+        cand = _tmux_session_for("frontier", "mct") or "keeper-mct"
+        rc, _o, _e = await _run("tmux", "-L", KEEPER_TMUX_SOCK, "has-session", "-t", "=" + cand)
+        sess = cand if rc == 0 else ""
+    if not sess:
+        return ""
+    return sess if await _tmux_type_line(sess, line) else ""
+
+
+async def mct_todo_ping(request):
+    """POST /api/mct/todo/ping {id, text?} — board t2 (operator 2026-09-10): the
+    📨 button on a board row pings the keeper about THAT item. Types one line
+    into the live frontier seat naming the item, its status/priority and text
+    (plus an optional operator note), and journals it. Not a board mutation."""
+    resp = await _sidecar_proxy(request)
+    if resp is not None:
+        return resp
+    try:
+        body = await request.json()
+        tid = str(body.get("id") or "").strip()
+        if not tid:
+            raise ValueError
+    except Exception:
+        return web.json_response({"error": 'body must be {"id"}'}, status=400)
+    state, err = _mct_todo_read()
+    if state is None:
+        return web.json_response({"ok": False, "error": err}, status=502)
+    it = next((i for i in (state.get("items") or []) if i.get("id") == tid), None)
+    if not it:
+        return web.json_response({"ok": False, "error": f"no board item {tid}"}, status=404)
+    extra = " ".join(str(body.get("text") or "").split())[:200]
+    line = (f"📨 board {tid} [{it.get('status') or 'open'}/{it.get('priority') or 'low'}] from the operator: "
+            + " ".join(str(it.get("text") or "").split())[:300]
+            + (f" — {extra}" if extra else "")
+            + " — please tend to it and update the item on the board (POST /api/mct/todo op=set / comment).")
+    sess = await _frontier_pane_type(line)
+    if not sess:
+        return web.json_response({"ok": False, "error": "no live frontier seat to ping"}, status=502)
+    _audit_line("todo-ping", f"{tid} → {sess}")
+    return web.json_response({"ok": True, "id": tid, "session": sess})
 
 
 async def mct_todo_assist(request):
@@ -3017,16 +4624,12 @@ GLOSSARY (docs/NOMENCLATURE.md):
 
 
 def _prompt_revise_call(text):
-    from hugpy_agent.config import load_config
-    from hugpy_agent.gateway import Gateway
     try:
         glossary = (STATIC / "docs" / "NOMENCLATURE.md").read_text(encoding="utf-8")
     except OSError:
         glossary = "(glossary missing)"
-    gw = Gateway.from_config(load_config(overrides=_b_overrides()))
-    res = gw.chat([{"role": "system", "content": _PROMPT_REVISE_SYS + glossary},
-                   {"role": "user", "content": text}], max_tokens=1200)
-    raw = (getattr(res, "text", None) or getattr(res, "content", None) or str(res) or "").strip()
+    raw = _hugpy_chat([{"role": "system", "content": _PROMPT_REVISE_SYS + glossary},
+                       {"role": "user", "content": text}], max_tokens=1200)
     m = re.search(r"```[a-zA-Z]*\s*\n(.*?)```", raw, re.DOTALL)
     body = m.group(1) if m else raw
     i, j = body.find("{"), body.rfind("}")
@@ -3058,7 +4661,10 @@ async def mct_prompt_revise(request):
 # edits survive), docs symlinked in so ./docs/ always matches the installed
 # console. The local surface cd's here, so opencode/qwen pick AGENTS.md up as
 # their standing instructions.
-LOCAL_KEEPER_AGENTS = """\
+# 1.0.85: the 1.0.84 text is kept VERBATIM as _LOCAL_KEEPER_AGENTS_V1 so an
+# untouched v1 file is recognised (and upgraded); the live charge below carries
+# a version marker on its first line for the same purpose from now on.
+_LOCAL_KEEPER_AGENTS_V1 = """\
 # Local Keeper — fleet console host workspace
 
 You are B, the Local Keeper, running host-side in the hugpy Station's
@@ -3082,10 +4688,13 @@ ambiguous; never say "instance" — say locus.
 - BEFORE actioning any item, read and follow ./docs/TODO-BOARD-SOP.md. The SOP
   is the contract: adhere to it whenever you actionize a to-do.
 
-## Design & flow
-- Design (wireframe) and flow (flow.v1) documents are exchanged through the
-  console's ⬚ design and ⋔ flow drawers; pasted blocks land in keeper
-  terminals. Formats and etiquette live in ./docs/UI-GUIDE.md.
+## Design & flow (◳ canvas)
+- Design (wireframe.v1) and flow (flow.v1) documents live in the toolserver
+  `canvas` table, one per (locus, kind): read with `canvas/get`
+  (MCP tool `canvas_get`) and write with `canvas/put` (`canvas_put`, whole
+  document, validated; add `notify=true` for a deliberate hand-off). The
+  console's ◳ canvas tab shows the same row live. Do NOT write ~/wireframe.json
+  or ~/flow.json — nothing reads them any more. Formats: ./docs/UI-GUIDE.md.
 
 ## Mid-turn query arbitration
 - When C sends a message while A's turn is in flight, dispose of it per
@@ -3102,23 +4711,300 @@ ambiguous; never say "instance" — say locus.
 """
 
 
-def _local_keeper_ws() -> "Path | None":
-    """Ensure FV_STATE_HOME/local-keeper exists with AGENTS.md + ./docs."""
+# 1.0.85: the live charge (v2). First line = the version marker _local_keeper_ws()
+# keys on. Nomenclature-correct (the host is "⌂ host"), names the toolserver MCP
+# bridge + the station HTTP API as B's tools, points at docs/STATION-TOOLS.md.
+LOCAL_KEEPER_AGENTS = """\
+<!-- hugpy-station local-keeper charge v2 -->
+# Local keeper (B) — standing charge for the ⌂ host workspace
+
+You are **B, the local keeper**: the free, on-hardware model seated in the
+hugpy Station's **local seat** on the ⌂ host locus. The operator (**C**) talks
+to you directly here. The frontier keeper (**A**) is a separate, metered seat —
+you never answer in its voice; you do its legwork (search, reading, bulk
+output) so its tokens go to judgement, and you return pointers, not dumps.
+
+## Vocabulary (fixed by the operator — ./docs/NOMENCLATURE.md)
+- **locus** = a machine (`kind`: `lxd` guest, `ssh` host, `host` = this one, shown **⌂ host**). Never say "instance".
+- **seat** = one terminal surface on a locus: **A** (frontier), **B/local** (you), **shell**.
+- **backend** = the program a seat runs (A: `claude-code`/`mct`; B: `opencode`/`qwen-code`; shell: `exec`/`ssh`); **model** = the LLM it calls.
+- **keeper** = an AGENT, never a machine: frontier keeper (A), local keeper (B). Qualify it.
+- **C** = the operator. **station** = the product (hugpy Station) only — never a machine or a locus.
+- Sign every board write `<locus>-keeper` (the host's keeper signs `host-keeper`); never bare `keeper`.
+
+## Your tools
+
+### 1. The toolserver MCP bridge (native tools)
+`abstract-claude mcp` bridges https://toolserver.hugpy.ai into your seat: every
+tool `/<prefix>/<name>` is the native tool `<prefix>_<name>`. The full reference
+with every signature is **./docs/STATION-TOOLS.md** — read it first. Families:
+
+- **Boards** — `todo_list {status,type,limit,locus}`, `todo_add {text,type,priority,note,by,locus}`,
+  `todo_update {id,status|priority|text|note}`, `todo_done {id}`, `todo_remove {id}`.
+  `locus` = WHOSE board the item is on (`''` = global). Read ./docs/TODO-BOARD-SOP.md BEFORE acting on any item.
+- **Comms** — `comms_ping {to,text,from_,ref}`, `comms_inbox {to,since}`. The protocol: a ping lands
+  as a `[ping]` high-priority request on the TARGET locus's board; that locus's station leg turns it
+  into ✉ mail and types ONE 📨 nudge into its frontier pane. To answer one: read
+  `comms_inbox to=<your locus>`, reply ON the board (`todo_update` note / `todo_done`) and
+  `comms_ping` back, signed `<locus>-keeper`. This station's own locus is `STATION_LOCUS`
+  (in `/api/toolserver/config` and the `locus` field of `/api/frontier/state`).
+- **Canvas** — `canvas_get {locus, kind: design|flow}`, `canvas_put {locus,kind,state,by,note,notify}`:
+  whole documents (wireframe.v1 / flow.v1), one row per (locus, kind); `notify=true` only for a deliberate hand-off.
+- **Central DB (READ-ONLY)** — `db_tables`, `db_schema`, `db_columns {table_name}`,
+  `db_query {query,values}` (SELECT/WITH only, writes are rejected; a literal `%` must be written `%%`),
+  `db_fetch {table_name,column_names,search_map,limit}`. The 14 tables: todos, loci, exchanges, handoffs,
+  handoff_state, prompts, board, canvas, assessments, seat_state, compute_actions, call_metrics,
+  call_metrics_by_task, load_metrics.
+- **Loci** — `loci_list {kind,status}`, `loci_register {locus,kind,goal,endpoint,pointer}`, `loci_pointers`.
+- **Seats & sessions** — `handoff_request {ssh,dir,user,seat,brief}`, `session_pull {brief,name,fork}`,
+  `exchange_list {locus,limit,since}`, `assess_state {locus}`, `seat_state {locus,seat}`.
+- **Prompt inbox** — `prompt_list {locus,status}`, `prompt_get {id,with_files}`, `prompt_done {id,status}`.
+- **Execute ON the toolserver host (ae), NOT on this locus** — `fs_*`, `sys_run_cmd`, `ui_*`, `media_*`,
+  `image_*`, `web_*`: the paths you pass them are ae paths. For THIS machine use your own shell.
+
+### 2. The station HTTP API (loopback)
+Base `http://127.0.0.1:${PORT:-8899}` (the desktop shell exports PORT=8899; a headless
+leg uses its unit's PORT). Useful routes:
+- `GET /api/vms` — every locus (LXD rows + ssh hosts); `GET /api/seat?vm=<locus>` — what that locus's seats launch with.
+- `GET /api/frontier/state` — the rolling state + init prompt of this locus (its `locus` field names it).
+- `GET|POST /api/vm/<locus>/todo` — a board (todo.v1); `GET /api/vm/keeper/messages` — the ⌂ host ✉ inbox.
+- `POST /api/fleet/message {"to":"<locus>","text":"...","from":"<you>"}` — send mail; an ssh locus gets a board ping.
+- `GET|POST /api/b/model` — your own model (`{"model":""}` = the package default).
+- `/ts/<prefix>/<name>` — same-origin proxy to the toolserver for the allow-listed prefixes
+  (assess, handoff, exchange, todo, loci, board, session, db, comms, canvas, seat, prompt).
+- `GET /api/toolserver/config` — the toolserver URL, whether a token is set, this station's loci sync.
+
+## How to read the docs (./docs is the shipped set, always current)
+1. **./docs/STATION-TOOLS.md** — tools, DB, comms, API, files on disk, troubleshooting. FIRST.
+2. ./docs/TODO-BOARD-SOP.md — the board contract (before actioning any item).
+3. ./docs/NOMENCLATURE.md — the words.
+4. ./docs/QUERY-ARBITRATION-SOP.md — mid-turn queries: four lanes; B infers wording, C dictates disposition.
+5. ./docs/KEEPER-DEV-GUIDE.md — keeper development.
+6. ./docs/UI-GUIDE.md — the console UI and the design/flow document formats.
+
+## Honesty rules (non-negotiable)
+- **Verify after write.** Read back what you changed (the file, the board item, the canvas rev) before you report it.
+- **Receipts.** Every "done" carries its evidence: the command and its output, the id, the rev, the path.
+- **Never mark done without evidence.** `todo_done` only after the verification step; otherwise `doing` + a note saying what is left.
+- **Never print secrets.** Tokens (HUGPY_OPERATOR_TOKEN, API keys, oauth), key files and .env bodies
+  never enter a transcript, a board note or a canvas — say "token set", never its value.
+- **Report failures as failures**, with the error text — never as something you could not verify.
+"""
+LOCAL_KEEPER_CHARGE_VERSION = 2
+_LOCAL_KEEPER_MARKER_RE = re.compile(r"^<!--\s*hugpy-station local-keeper charge v(\d+)\s*-->\s*$")
+# 1.0.85: md5 (utf-8) of EVERY charge body ever shipped without a marker — the
+# four LOCAL_KEEPER_AGENTS texts in the monorepo's git history. A station
+# installed before 1.0.84 still carries one of the older three (this desktop
+# had the 8994a27d "clawd-code" text), and only the exact 1.0.84 body is
+# _LOCAL_KEEPER_AGENTS_V1 — so the upgrade must recognise all of them, or B
+# (and qwen-code, which reads nothing but QWEN.md → AGENTS.md) keeps a charge
+# with no tools section forever. Anything NOT in this set and without our
+# marker is operator-customized and is never touched.
+_LOCAL_KEEPER_SHIPPED_MD5 = {
+    "3a725a1402d29f3e0924a2e7314531a3",   # d71b1be3 · 1.0.84 (== _LOCAL_KEEPER_AGENTS_V1)
+    "5c53846e7ff72fd9b5fbe579589063fb",   # 30a9a10b
+    "c4580dd09b1d55335014ad761a2f6bc9",   # 8994a27d · "clawd-code" era
+    "98b85e8ce5d9e3737d897917bc637f11",   # f6e23988 · first charge
+}
+
+
+def _local_keeper_charge_stale(text):
+    """1.0.85: True when an AGENTS.md is OURS and older than the shipped charge —
+    the exact v1 text, any historical shipped body (_LOCAL_KEEPER_SHIPPED_MD5),
+    or our marker line with a lower version. Anything else is
+    operator-customized and must be left alone."""
+    if text == _LOCAL_KEEPER_AGENTS_V1:
+        return True
+    if hashlib.md5(text.encode("utf-8")).hexdigest() in _LOCAL_KEEPER_SHIPPED_MD5:
+        return True
+    m = _LOCAL_KEEPER_MARKER_RE.match((text.splitlines() or [""])[0])
+    return bool(m) and int(m.group(1)) < LOCAL_KEEPER_CHARGE_VERSION
+
+
+def _write_json_atomic(path, doc):
+    """1.0.85: tmp + os.replace so a seat never reads a half-written config.
+    The path is resolved first: a dotfiles-managed ~/.config/opencode/opencode.json
+    or ~/.qwen/settings.json is commonly a symlink, and os.replace over the LINK
+    would swap it for a regular file and silently detach the operator's copy."""
+    path = Path(path).resolve()
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _fit_local_seat_tools(lk):
+    """1.0.85: fit the local seat's backends (opencode, qwen-code) with the
+    toolserver MCP bridge + the standing charge, the way _SEAT_TRUST_B64 fits
+    every claude-code seat. Idempotent, best-effort (OSError/ValueError are
+    swallowed per backend), atomic, and every other key in a seat's config
+    survives. NO literal token is ever written: a seat spawned by the station
+    inherits HUGPY_OPERATOR_TOKEN (toolserver.env, loaded at startup) and the
+    config references it by NAME ({env:...} for opencode, $VAR for qwen-code).
+    An existing `toolserver` entry is only COMPLETED (missing keys filled in)
+    when it is our own bridge (command abstract-claude) — an operator's
+    "enabled": false, custom TOOLSERVER_URL, timeout or any extra key survives
+    every backend start / seat launch; a custom server is never touched. One
+    audit line, only when something changed."""
+    changed = []
+    # TS_UPSTREAM is defined further down the module — resolved here at call
+    # time (both callers run after import), never at import.
+    url = (os.environ.get("STATION_CONSOLE_TOOLSERVER") or globals().get("TS_UPSTREAM")
+           or "https://toolserver.hugpy.ai")
+    home = Path.home()
+    # a. opencode — global config (~/.config/opencode/opencode.jsonc wins when it
+    #    parses as JSON; comments/trailing commas → leave it alone, fit .json).
+    #    `instructions` carries the charge + the tools doc because the launcher
+    #    (hugpy-agent console --frontend opencode) chdirs away from the ws, so a
+    #    project AGENTS.md there is NOT picked up.
+    try:
+        ocdir = home / ".config" / "opencode"
+        ocdir.mkdir(parents=True, exist_ok=True)
+        cfg, doc = ocdir / "opencode.jsonc", None
+        if cfg.is_file():
+            try:
+                doc = json.loads(cfg.read_text(encoding="utf-8"))
+            except ValueError:
+                doc = None
+        if not isinstance(doc, dict):
+            cfg = ocdir / "opencode.json"
+            doc = json.loads(cfg.read_text(encoding="utf-8")) if cfg.is_file() else {}
+        if isinstance(doc, dict):
+            before = json.dumps(doc, sort_keys=True)
+            mcp = doc.get("mcp") if isinstance(doc.get("mcp"), dict) else {}
+            cur = mcp.get("toolserver") if isinstance(mcp.get("toolserver"), dict) else {}
+            cmd = cur.get("command")
+            cmd0 = (cmd[0] if isinstance(cmd, list) and cmd else
+                    (cmd.split() or [""])[0] if isinstance(cmd, str) else "")
+            if not cur:
+                mcp["toolserver"] = {"type": "local", "command": ["abstract-claude", "mcp"],
+                                     "environment": {"TOOLSERVER_URL": url,
+                                                     "TOOLSERVER_TOKEN": "{env:HUGPY_OPERATOR_TOKEN}"},
+                                     "enabled": True}
+            elif cmd0 == "abstract-claude":
+                # ours — merge, never assign: an operator's enabled:false / own
+                # URL / timeout / extra keys are theirs to keep.
+                cur.setdefault("type", "local")
+                cur.setdefault("command", ["abstract-claude", "mcp"])
+                cur.setdefault("enabled", True)
+                env = cur.get("environment") if isinstance(cur.get("environment"), dict) else {}
+                env.setdefault("TOOLSERVER_URL", url)
+                env.setdefault("TOOLSERVER_TOKEN", "{env:HUGPY_OPERATOR_TOKEN}")
+                cur["environment"] = env
+                mcp["toolserver"] = cur
+            doc["mcp"] = mcp
+            ins = doc.get("instructions")
+            ins = list(ins) if isinstance(ins, list) else ([ins] if isinstance(ins, str) and ins else [])
+            # MCP exposes the tool schemas natively; avoid injecting the full
+            # reference document into every OpenCode prompt.
+            for p in (str(lk / "AGENTS.md"),):
+                if p not in ins:
+                    ins.append(p)
+            doc["instructions"] = ins
+            if json.dumps(doc, sort_keys=True) != before:
+                _write_json_atomic(cfg, doc)
+                changed.append("opencode:" + cfg.name)
+        link = ocdir / "AGENTS.md"       # opencode also reads this global charge
+        if not link.exists() and not link.is_symlink():
+            link.symlink_to(lk / "AGENTS.md")
+            changed.append("opencode:AGENTS.md->local-keeper")
+    except (OSError, ValueError) as e:
+        logging.getLogger("station.local-seat").warning("opencode fit skipped: %s", e)
+    # b. qwen-code — ~/.qwen/settings.json (Gemini-CLI style mcpServers); only
+    #    the toolserver key is added to an existing file, a minimal file is
+    #    created when there is none. QWEN.md in the ws is the charge (cwd = ws).
+    try:
+        qcfg = home / ".qwen" / "settings.json"
+        doc = json.loads(qcfg.read_text(encoding="utf-8")) if qcfg.is_file() else {}
+        if isinstance(doc, dict):
+            before = json.dumps(doc, sort_keys=True)
+            ms = doc.get("mcpServers") if isinstance(doc.get("mcpServers"), dict) else {}
+            cur = ms.get("toolserver") if isinstance(ms.get("toolserver"), dict) else {}
+            if not cur:
+                ms["toolserver"] = {"command": "abstract-claude", "args": ["mcp"],
+                                    "env": {"TOOLSERVER_URL": url,
+                                            "TOOLSERVER_TOKEN": "$HUGPY_OPERATOR_TOKEN"}}
+            elif cur.get("command") == "abstract-claude":
+                # ours — merge (see the opencode branch above)
+                cur.setdefault("args", ["mcp"])
+                env = cur.get("env") if isinstance(cur.get("env"), dict) else {}
+                env.setdefault("TOOLSERVER_URL", url)
+                env.setdefault("TOOLSERVER_TOKEN", "$HUGPY_OPERATOR_TOKEN")
+                cur["env"] = env
+                ms["toolserver"] = cur
+            doc["mcpServers"] = ms
+            if json.dumps(doc, sort_keys=True) != before:
+                qcfg.parent.mkdir(parents=True, exist_ok=True)
+                _write_json_atomic(qcfg, doc)
+                changed.append("qwen-code:settings.json")
+    except (OSError, ValueError) as e:
+        logging.getLogger("station.local-seat").warning("qwen-code fit skipped: %s", e)
+    if changed:
+        _audit_line("local-seat-fit", "; ".join(changed) + f" · url={url} · token by env name, never literal")
+    return changed
+
+
+def _local_keeper_ws(fit=True) -> "Path | None":
+    """Ensure FV_STATE_HOME/local-keeper exists with AGENTS.md (+ QWEN.md → it)
+    + ./docs, and — 1.0.85 — that the local seat's backends are fitted with the
+    toolserver bridge (fit=False: the workspace only; startup fits separately)."""
     lk = FV_STATE_HOME / "local-keeper"
     try:
         lk.mkdir(parents=True, exist_ok=True)
         agents = lk / "AGENTS.md"
-        if not agents.exists():
-            agents.write_text(LOCAL_KEEPER_AGENTS)
+        # 1.0.85: write when absent OR when what is there is OUR older charge (the
+        # exact v1 text, or our marker with a lower version) — an operator-edited
+        # file is never overwritten.
+        try:
+            cur = agents.read_text(encoding="utf-8") if agents.exists() else None
+        except OSError:
+            cur = None
+        if cur is None or _local_keeper_charge_stale(cur):
+            agents.write_text(LOCAL_KEEPER_AGENTS, encoding="utf-8")
+        # 1.0.85: qwen-code reads QWEN.md from its cwd (the local seat cd's here):
+        # the same charge under the name it looks for. A plain-file QWEN.md is
+        # replaced by the link only when it is ours (verbatim or any shipped
+        # body); an operator's OWN symlink (→ some custom charge) is kept — only
+        # a dangling link, or one that already reaches lk/AGENTS.md by another
+        # spelling, is re-pointed at the relative "AGENTS.md".
+        qwen = lk / "QWEN.md"
+        if qwen.is_symlink():
+            tgt = qwen.resolve(strict=False)
+            if (not tgt.exists() or tgt == agents.resolve()) and os.readlink(str(qwen)) != "AGENTS.md":
+                qwen.unlink(); qwen.symlink_to("AGENTS.md")
+        elif qwen.exists():
+            try:
+                qtxt = qwen.read_text(encoding="utf-8")
+            except OSError:
+                qtxt = None
+            if qtxt is not None and (qtxt in (agents.read_text(encoding="utf-8"), LOCAL_KEEPER_AGENTS)
+                                     or _local_keeper_charge_stale(qtxt)):
+                qwen.unlink(); qwen.symlink_to("AGENTS.md")
+        else:
+            qwen.symlink_to("AGENTS.md")
         docs = lk / "docs"
         want = ROOT / "static" / "docs"
         if docs.is_symlink() and docs.resolve() != want.resolve():
             docs.unlink()          # stale link (e.g. pre-upgrade install path)
         if not docs.exists():
             docs.symlink_to(want)
+        if fit:
+            _fit_local_seat_tools(lk)   # 1.0.85: after AGENTS/docs are in place
         return lk
     except OSError:
         return None
+
+
+async def _start_local_seat_fit(app):
+    if os.environ.get("STATION_DEV_QUIET") == "1":   # dev copy: never act on live seats
+        return
+    """1.0.85: at backend startup lay the local keeper's workspace down and fit
+    the local seat's backends with the toolserver bridge — never fatal."""
+    try:
+        lk = _local_keeper_ws(fit=False)
+        if lk is not None:
+            _fit_local_seat_tools(lk)
+    except Exception as e:  # noqa: BLE001 — a seat fit must never break startup
+        logging.getLogger("station.local-seat").warning("local seat fit at startup: %s", e)
 
 
 async def a_clear(request):
@@ -3475,6 +5361,14 @@ class TermSession:
             self.proc.send_signal(signal.SIGTERM)
         except ProcessLookupError:
             pass
+        # The pty child runs in its own session with NO controlling tty (the
+        # slave was inherited, never opened), so closing the master below never
+        # HUPs it — and an interactive `bash -i` fallback ignores SIGTERM. Hang
+        # up the whole process group explicitly (board t9).
+        try:
+            os.killpg(os.getpgid(self.proc.pid), signal.SIGHUP)
+        except (ProcessLookupError, PermissionError, OSError):
+            pass
         try:
             os.close(self.master)
         except OSError:
@@ -3646,14 +5540,11 @@ async def _ssh_vm_reroute(request):
     m = re.match(r"^/api/vm/([^/]+)/(.+)$", request.path)
     if not m or not _ssh_host(m.group(1)):
         return None
-    resp = await _wb_request(request, m.group(1),
-                             path="/api/vm/keeper/" + m.group(2))
-    if resp is not None:
-        return resp
-    return web.json_response(
-        {"ok": False, "error": f"{m.group(1)}: workbench console unreachable — "
-                               f"install/start it: install-ssh-console {m.group(1)}"},
-        status=502)
+    if m.group(2) == "todo":
+        return await _central_todo_route(request, m.group(1))
+    if m.group(2) in ("design", "flow"):
+        return await _central_canvas_route(request, m.group(1), m.group(2))
+    return _retired(m.group(2), m.group(1))
 
 
 async def api_proxy(request):
@@ -3831,6 +5722,612 @@ async def term_proxy(request):
                  "start it with: sudo systemctl start web-console.service</pre>")
 
 
+# ── /ac: same-origin proxy to the abstract-claude console (:9111) ────────────
+# Surfaces `abstract-claude serve` (THE keeper surface) as a station pane.
+# d411 (2026-09-17): a DUMB pass-through — it strips the /ac prefix on the way
+# upstream and rewrites NOTHING. serve owns the prefix natively (AC_UI_BASE=/ac
+# and a dist baked for /ac), so its own calls resolve under /ac while a call the
+# console aims at the ORIGIN ROOT (keeper-live.js stationApi -> /api/b/chat)
+# still reaches THIS app. Sits behind the console login like every route;
+# AC itself is loopback-only with no auth of its own.
+AC_UPSTREAM = os.environ.get("STATION_CONSOLE_AC", "http://127.0.0.1:9111")
+# /ac requests are proxied WITHOUT a total deadline: a chat turn streams for as
+# long as claude works (minutes to an hour). Connect is still bounded.
+_AC_PROXY_TIMEOUT = aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=None)
+
+# ── t-serve (2026-09-16, vm_mgr): abstract-claude serve IS the keeper surface ──
+# Determination: on this locus the primary keeper surface is `abstract-claude
+# serve` — USER unit abstract-claude-serve@station (127.0.0.1:9124, AC_ROOT =
+# <state>/abstract-claude, the SAME root the station's own seats use), rendered
+# at /ac/ through ac_proxy above. The tmux keeper seats (keeper-claude /
+# keeper-codex) are NOT removed and NOT hidden: they stay selectable as explicit
+# "terminal seat (tmux)" choices and every tmux code path below is untouched.
+# STATION_KEEPER_SURFACE=tmux restores the old default. NOTHING added here ever
+# kills a tmux session — the serve-mode relaunch/wipe restart a USER unit, and
+# seats live in their own scopes.
+KEEPER_SURFACE = (os.environ.get("STATION_KEEPER_SURFACE") or "serve").strip().lower()
+AC_SERVE_UNIT = (os.environ.get("STATION_AC_SERVE_UNIT") or "abstract-claude-serve@station.service").strip()
+# NAMING (2026-09-18): operator-facing surface names are "Serve" (the
+# abstract-claude serve console) and "Terminal" (the interactive-TUI seat -
+# a full-screen CLI painted through xterm.js over a WebSocket-fed PTY). tmux is
+# only the persistence/multiplexing substrate under the Terminal seat, NOT the
+# category and NOT the freeze cause (that is xterm.js RenderService). The wire
+# tokens stay "tmux" (KEEPER_SURFACE value, seat:"tmux" API, STATION_KEEPER_SURFACE,
+# fv-keeper-surface) for contract compatibility.
+AC_SERVE_LABEL = "Serve console"
+TMUX_SEAT_LABELS = {"mct": "Terminal \u00b7 MCT pointer exchange",
+                    "claude-code": "Terminal \u00b7 Claude Code",
+                    "codex": "Terminal \u00b7 ChatGPT Codex",
+                    "hugpy": "Terminal \u00b7 Hugpy agent"}
+
+# ── per-locus serve consoles (1.0.101, 2026-09-17, vm_mgr; operator: "the hugpy
+# locus must have abstract-claude serve integrated") ──────────────────────────
+# A locus other than this host can own an abstract-claude serve of its own
+# (hugpy: the hugpy user's unit abstract-claude-serve-station on 127.0.0.1:9125,
+# the SAME 0.1.44 build + UI as the keeper's). The console frames it same-origin
+# at /ac/@<locus>/ through ac_proxy (the fetch shim and the dist's absolute
+# "/ac/..." references are rewritten to that base on the way through), and
+# /api/term/backends?vm=<locus> reports THAT serve as the locus's keeper
+# surface, so FleetView's frontier view shows the locus's own console instead
+# of a tmux seat. Config: STATION_CONSOLE_AC_LOCI ("hugpy=http://127.0.0.1:9125
+# [|unit][,name=url...]") overridden by <state>/ac-loci.json
+# ({"hugpy": {"url": ..., "unit": ..., "label": ...}}; re-read on change, no
+# restart). The host seat ("" / @keeper) keeps AC_UPSTREAM; a locus without an
+# entry keeps its tmux seat exactly as before.
+AC_LOCI_PATH = FV_STATE_HOME / "ac-loci.json"
+_AC_LOCI_CACHE = {"mtime": None, "doc": {}}
+
+
+def _ac_loci_env():
+    out = {}
+    for part in (os.environ.get("STATION_CONSOLE_AC_LOCI") or "").split(","):
+        part = part.strip()
+        if not part or "=" not in part:
+            continue
+        name, _, rest = part.partition("=")
+        url, _, unit = rest.partition("|")
+        if name.strip() and url.strip():
+            out[name.strip()] = {"url": url.strip(), "unit": unit.strip()}
+    return out
+
+
+def _ac_loci():
+    """{locus: {url, unit, label}} — env entries, overridden by ac-loci.json."""
+    doc = dict(_ac_loci_env())
+    try:
+        st = AC_LOCI_PATH.stat()
+        if _AC_LOCI_CACHE["mtime"] != st.st_mtime:
+            _AC_LOCI_CACHE["doc"] = _read_json(AC_LOCI_PATH, {}) or {}
+            _AC_LOCI_CACHE["mtime"] = st.st_mtime
+        for k, v in (_AC_LOCI_CACHE["doc"] or {}).items():
+            if isinstance(v, str):
+                v = {"url": v}
+            if isinstance(v, dict) and v.get("url"):
+                doc[str(k)] = dict(v)
+    except OSError:
+        _AC_LOCI_CACHE.update(mtime=None, doc={})
+    return doc
+
+
+def _ac_locus_key(vm):
+    vm = (vm or "").strip()
+    return "" if vm in ("", "@keeper", "keeper", "host") else vm
+
+
+def _ac_target(vm=""):
+    """(upstream url, unit, console base path, locus key) for a locus's serve.
+    url '' = that locus has no serve configured (keeps its tmux seat)."""
+    key = _ac_locus_key(vm)
+    if not key:
+        return AC_UPSTREAM, AC_SERVE_UNIT, "/ac/", ""
+    ent = _ac_loci().get(key)
+    if not ent:
+        return "", "", "", key
+    return ((ent.get("url") or "").rstrip("/"),
+            ent.get("unit") or "abstract-claude-serve-station.service",
+            f"/ac/@{key}/", key)
+
+
+async def _ac_get(path, timeout=8, base=None):
+    """GET a JSON doc from a serve upstream (default: the keeper's); None on any failure."""
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as s:
+            async with s.get((base or AC_UPSTREAM).rstrip("/") + path) as r:
+                if r.status != 200:
+                    return None
+                return await r.json()
+    except Exception:                                    # noqa: BLE001
+        return None
+
+
+async def _ac_post(path, payload=None, timeout=8, base=None):
+    """POST a JSON body to a serve upstream (default: the keeper's); the decoded
+    JSON reply, or None on any failure. The JSON-body twin of _ac_get (p509)."""
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as s:
+            async with s.post((base or AC_UPSTREAM).rstrip("/") + path, json=(payload or {})) as r:
+                if r.status != 200:
+                    return None
+                return await r.json()
+    except Exception:                                    # noqa: BLE001
+        return None
+
+
+async def _ac_serve_state(vm=""):
+    """Does the locus's serve answer /api/state? Returns the surface descriptor
+    the console uses to decide whether serve leads or the tmux seat does.
+    vm '' / @keeper = this host's keeper serve; another locus = its own serve
+    from _ac_target (1.0.101), framed at path (/ac/@<locus>/)."""
+    url, unit, path, key = _ac_target(vm)
+    ent = _ac_loci().get(key) if key else None
+    base = {"url": url, "path": path, "unit": unit, "locus": key or "@keeper",
+            "label": (ent or {}).get("label") or AC_SERVE_LABEL}
+    if key and not url:
+        return dict(base, ok=False, error="no abstract-claude serve configured for locus "
+                    + key + " (ac-loci.json / STATION_CONSOLE_AC_LOCI)")
+    doc = await _ac_get("/api/state", timeout=2.5, base=url)
+    if not isinstance(doc, dict):
+        return dict(base, ok=False, error="no /api/state from " + url)
+    cfg = doc.get("config") or {}
+    return dict(base, ok=True, root=doc.get("root") or cfg.get("root") or "",
+                model=cfg.get("default_model") or "",
+                fallback_model=cfg.get("quota_fallback_model") or "",
+                fresh_session_mode=cfg.get("fresh_session_mode") or "")
+
+
+async def _ac_serve_restart(reason="", vm=""):
+    """The serve-mode 'relaunch': restart the abstract-claude-serve USER unit.
+    Deliberately NOT a tmux kill — no seat, and certainly not keeper-claude, is
+    touched. Waits for /api/state to answer again before reporting ok.
+    1.0.101: vm = another locus restarts THAT locus's unit as its seat user
+    (ssh / lxd grounding via _locus_run)."""
+    url, unit, _path, key = _ac_target(vm)
+    if key and not url:
+        return {"ok": False, "surface": "serve", "unit": "", "locus": key,
+                "error": "no abstract-claude serve configured for locus " + key}
+    if key:
+        rc, out, err = await _locus_run(key, "systemctl --user restart " + shlex.quote(unit), timeout=60)
+        if rc != 0:
+            return {"ok": False, "surface": "serve", "unit": unit, "locus": key,
+                    "error": "systemctl --user restart failed: " + ((out or "") + (err or ""))[:200]}
+    else:
+        proc = await asyncio.create_subprocess_exec(
+            "systemctl", "--user", "restart", unit,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+        out, _ = await proc.communicate()
+        if proc.returncode != 0:
+            return {"ok": False, "surface": "serve", "unit": unit,
+                    "error": "systemctl --user restart failed: " + (out or b"").decode()[:200]}
+    for _ in range(24):
+        await asyncio.sleep(0.5)
+        if (await _ac_serve_state(vm)).get("ok"):
+            return {"ok": True, "surface": "serve", "unit": unit, "locus": key or "@keeper",
+                    "reason": reason, "killed": None,
+                    "note": "abstract-claude serve restarted; no tmux session was touched"}
+    return {"ok": False, "surface": "serve", "unit": unit, "locus": key or "@keeper",
+            "error": "serve did not answer /api/state after restart"}
+
+
+async def _keeper_surface_now(vm=""):
+    """('serve'|'tmux', ac_state). t320 (2026-09-16): serve leads whenever it is
+    the CONFIGURED surface — a restart/wipe blip must not flip the console to
+    the tmux terminal (which spawned a fresh keeper-claude seat and split the
+    operator's prompts). The probe result rides ac["ok"]; the /ac proxy shows a
+    self-retrying "restarting" page while serve is down.
+    1.0.101: vm = another locus → ITS serve (ac-loci.json) leads when one is
+    configured; a locus without one keeps its tmux seat."""
+    ac = await _ac_serve_state(vm)
+    if _ac_locus_key(vm):
+        return ("serve" if (ac.get("url") and KEEPER_SURFACE == "serve") else "tmux"), ac
+    return ("serve" if KEEPER_SURFACE == "serve" else "tmux"), ac
+
+
+async def _ac_serve_cache_doc():
+    """The /api/frontier/cache shape, built from the keeper serve's OWN usage DB
+    (/api/usage/report + /api/usage/cache) instead of a tmux seat transcript.
+    Same keys the SeatMeter already renders, so the token meter keeps working
+    when serve is the surface. Best-effort: None when serve is unreachable."""
+    rep = await _ac_get("/api/usage/report?last=50")
+    if not isinstance(rep, dict):
+        return None
+    cache = await _ac_get("/api/usage/cache") or {}
+    totals = rep.get("totals") or {}
+    recent = rep.get("recent") or []
+    newest = recent[0] if recent else {}
+    doc = {"ok": True, "backend": "serve", "seat": "abstract-claude serve",
+           "seat_live": True, "surface": "serve", "upstream": AC_UPSTREAM,
+           "unit": AC_SERVE_UNIT, "busy": False,
+           "session_id": newest.get("session_id") or "",
+           "model": newest.get("model") or "",
+           "context_tokens": 0, "cached_tokens": 0, "cache_read": 0,
+           "cache_creation": 0, "output_tokens": 0,
+           "requests_total": totals.get("runs") or 0, "requests_last_hour": 0,
+           "ttl_s": None, "remaining_s": 0, "age_s": None,
+           "totals": {"total_tokens": totals.get("total_tokens") or 0,
+                      "cache_read": totals.get("cache_read_tokens") or 0,
+                      "cache_creation": totals.get("cache_creation_tokens") or 0,
+                      "output": totals.get("output_tokens") or 0,
+                      "cost_usd": totals.get("total_cost_usd") or 0}}
+
+    from datetime import datetime as _dtcls
+
+    def _ts(v):
+        try:
+            return _dtcls.fromisoformat(str(v)).timestamp()
+        except Exception:                                # noqa: BLE001
+            return None
+    now = time.time()
+    doc["requests_last_hour"] = sum(
+        1 for r in recent if (_ts(r.get("ts")) or 0) >= now - 3600)
+    if newest:
+        cr = newest.get("cache_read_tokens") or 0
+        cc = newest.get("cache_creation_tokens") or 0
+        doc["cache_read"], doc["cache_creation"] = cr, cc
+        doc["cached_tokens"] = cr + cc
+        doc["output_tokens"] = newest.get("output_tokens") or 0
+        doc["context_tokens"] = (newest.get("input_tokens") or 0) + cr + cc
+        t = _ts(newest.get("ts"))
+        if t:
+            doc["age_s"] = int(max(0, now - t))
+    for s in (cache.get("sessions") or []):
+        if s.get("session_id") == doc["session_id"]:
+            doc["ttl_s"] = s.get("ttl_s")
+            doc["expires_at"] = s.get("expires_at")
+            doc["remaining_s"] = int(max(0, s.get("remaining_s") or 0))
+            break
+    return doc
+
+
+# d411 (2026-09-17): the /ac fetch shim is GONE — no HTML/JS rewriting for the
+# station console. It wrapped window.fetch and prefixed EVERY root-relative URL
+# with /ac, so it could not tell serve's own API from the station's:
+# keeper-live.js stationApi() deliberately targets the ORIGIN ROOT to reach the
+# STATION's /api/b/chat, and the shim rewrote that to /ac/api/b/chat -> serve
+# has no such route -> 404 and a dead Local (B) pane. No rewrite is needed: the
+# served dist is already baked for /ac (resources/bin/abstract-claude-serve-run)
+# and serve strips the prefix natively (AC_UI_BASE=/ac -> abstract_claude
+# server.py _strip_base). ac_proxy below is now a DUMB same-origin pass-through.
+
+
+def _ac_rebase(text, base):
+    """1.0.101: the serve dist is baked for /ac (webui-station); under a locus
+    base (/ac/@hugpy) every absolute "/ac/..." reference must follow.
+
+    d411: load-bearing ONLY for the per-locus consoles (/ac/@<locus>), whose
+    remote serve runs as a different user on a different host and so cannot be
+    re-pointed with AC_UI_BASE from here. A no-op for the plain /ac console."""
+    if base == "/ac":
+        return text
+    return (text.replace('"/ac/', '"' + base + '/').replace("'/ac/", "'" + base + "/")
+                .replace('"/ac"', '"' + base + '"'))
+
+
+def _ac_rebase_body(body, base):
+    """Per-locus only: rewrite baked "/ac/..." refs to "/ac/@<locus>/...".
+    Returns the body byte-for-byte for the plain /ac console (base == "/ac")
+    and for anything that is not utf-8."""
+    if base == "/ac":
+        return body
+    try:
+        return _ac_rebase(body.decode("utf-8"), base).encode("utf-8")
+    except UnicodeDecodeError:
+        return body
+
+
+# 1.0.97 (t337): the /ac chat turn can run for many minutes with no upstream
+# bytes in between tool calls; never cap the whole request, only the connect
+# and the gap between reads.
+_AC_PROXY_TIMEOUT = aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=3600)
+
+
+async def ac_proxy(request):
+    tail = request.match_info.get("tail", "")
+    upstream, unit, base = AC_UPSTREAM, AC_SERVE_UNIT, "/ac"
+    # 1.0.101: /ac/@<locus>/... frames that locus's OWN serve (ac-loci.json)
+    m = re.match(r"@([A-Za-z0-9_.-]+)(?:/(.*))?$", tail)
+    if m:
+        url, unit2, path, key = _ac_target(m.group(1))
+        if not url:
+            return web.json_response({"error": "no abstract-claude serve configured for locus " + key,
+                                      "hint": "add it to " + str(AC_LOCI_PATH) + " or STATION_CONSOLE_AC_LOCI"}, status=404)
+        if m.group(2) is None:                      # /ac/@hugpy -> /ac/@hugpy/ (relative asset paths)
+            raise web.HTTPFound(path)
+        upstream, unit, base, tail = url, unit2, path.rstrip("/"), (m.group(2) or "")
+    qs = ("?" + request.query_string) if request.query_string else ""
+    target = f"{upstream}/{tail}{qs}"
+    sess = request.app.get("proxy_sess")
+    if sess is None:
+        return web.json_response({"error": "proxy session not started"}, status=502)
+    fwd = {k: v for k, v in request.headers.items() if k.lower() not in _PROXY_HOP}
+    try:
+        async with sess.request(request.method, target, headers=fwd,
+                                data=await request.read(),
+                                allow_redirects=False,
+                                timeout=_AC_PROXY_TIMEOUT) as r:
+            out = {k: v for k, v in r.headers.items()
+                   if k.lower() not in _PROXY_HOP
+                   | {"content-encoding", "content-length"}}
+            ctype = r.headers.get("Content-Type", "")
+            if "text/html" in ctype:
+                # d411: NO shim injection. For the plain /ac console this is a
+                # byte-for-byte pass-through; only a per-locus base rebases.
+                return web.Response(status=r.status, headers=out,
+                                    body=_ac_rebase_body(await r.read(), base))
+            if base != "/ac" and (tail.split("?")[0].endswith(".js") or "javascript" in ctype):
+                # a locus console: the bundle's baked "/ac/api" etc. must follow the base
+                return web.Response(status=r.status, headers=out,
+                                    body=_ac_rebase_body(await r.read(), base))
+            # 1.0.97 (t337): stream every non-HTML body through AS IT ARRIVES.
+            # The chat reply is SSE (serve _chat_stream); `await r.read()` held
+            # it until the turn ended, so the console showed no live progress,
+            # and past aiohttp's default 5-min total timeout the request died
+            # with a 500 and the reply only appeared after a page refresh.
+            out["X-Accel-Buffering"] = "no"          # nginx: do not re-buffer
+            out.setdefault("Cache-Control", "no-store")
+            resp = web.StreamResponse(status=r.status, headers=out)
+            await resp.prepare(request)
+            try:
+                async for chunk in r.content.iter_any():
+                    await resp.write(chunk)
+                await resp.write_eof()
+            except (ConnectionResetError, asyncio.CancelledError):
+                pass                                 # browser went away mid-stream
+            return resp
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        # t320: a self-retrying holding page — serve restarts (seat wipe,
+        # relaunch, upgrade) take a few seconds; the pane must wait here,
+        # never fall back to a tmux seat.
+        return web.Response(
+            status=502, content_type="text/html",
+            headers={"Cache-Control": "no-store", "Retry-After": "3"},
+            text="<!doctype html><meta charset=utf-8><meta http-equiv=refresh content=3>"
+                 "<body style=\"background:#0d1117;color:#e6e9ef;font:14px system-ui;"
+                 "display:flex;align-items:center;justify-content:center;height:100vh;margin:0\">"
+                 "<div><b>keeper chat restarting…</b><br><span style=\"color:#8b949e\">"
+                 "abstract-claude serve at " + upstream + " is not answering yet "
+                 "(unit " + unit + "); retrying every 3 s.</span></div></body>")
+
+
+# ── /ts: gated same-origin proxy to the toolserver (focus/handoff/board/db) ──
+# Lets the SPA (FocusChip, handoff panels, the 🗄 db drawer) and local scripts
+# reach the toolserver without CORS. Deliberately an ALLOW-LIST of tool prefixes
+# — this is NOT a general toolserver pass-through (no fs/sys/ui/media: those
+# execute on the toolserver host). 1.0.85: db/ (the central Postgres — the
+# read-only SELECT/WITH gate is enforced upstream by db/query), comms/ (pings +
+# inbox), canvas/ (design/flow documents), seat/ and prompt/ join the list so
+# the UI and scripts reach them through the station.
+TS_UPSTREAM = os.environ.get("STATION_CONSOLE_TOOLSERVER",
+                             "https://toolserver.hugpy.ai")
+_TS_ALLOWED = ("assess/", "handoff/", "exchange/", "todo/", "loci/", "board/", "session/",
+               "db/", "comms/", "canvas/", "seat/", "prompt/")   # 1.0.85: + db/comms/canvas/seat/prompt
+
+
+async def ts_proxy(request):
+    tail = request.match_info.get("tail", "")
+    if not tail.startswith(_TS_ALLOWED):
+        return web.json_response({"error": "path not allowed via /ts"}, status=403)
+    qs = ("?" + request.query_string) if request.query_string else ""
+    target = f"{TS_UPSTREAM.rstrip('/')}/{tail}{qs}"
+    sess = request.app.get("proxy_sess")
+    if sess is None:
+        return web.json_response({"error": "proxy session not started"}, status=502)
+    fwd = {k: v for k, v in request.headers.items() if k.lower() not in _PROXY_HOP}
+    # 1.0.85: the STATION carries the toolserver credential (toolserver.env →
+    # HUGPY_OPERATOR_TOKEN, see _ts_headers) — the SPA never has it, so every
+    # /ts call used to reach the toolserver anonymous and come back 401
+    # "unauthorized" (why the FocusChip was silently hidden). Attach it ONLY
+    # when the caller sent no credential of its own: an explicit
+    # X-Operator-Token / Authorization wins, so a local script keeps its own
+    # identity. Case-blind — a browser fetch sends lower-case header names.
+    if not any(k.lower() in ("x-operator-token", "authorization") for k in fwd):
+        tok = _ts_headers().get("X-Operator-Token")
+        if tok:
+            fwd["X-Operator-Token"] = tok
+    try:
+        async with sess.request(request.method, target, headers=fwd,
+                                data=await request.read(),
+                                allow_redirects=False) as r:
+            out = {k: v for k, v in r.headers.items()
+                   if k.lower() not in _PROXY_HOP | {"content-encoding",
+                                                     "content-length"}}
+            return web.Response(status=r.status, body=await r.read(), headers=out)
+    except aiohttp.ClientError as e:
+        return web.json_response({"error": f"toolserver unreachable: {e}"},
+                                 status=502)
+
+
+# ── SESSION-PULL-PATCH 2026-09-02: session pull + resume-capable seats ───────────────────────────
+_PULL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,40}$")
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+HANDOFF_SPAWN_FEATURES = ["resume", "fork", "name", "ssh-hosts", "probe"]
+
+
+def _station_id():
+    return f"{getpass.getuser()}@{socket.gethostname().split('.')[0]}"
+
+
+def _local_ips():
+    ips = {"127.0.0.1", "localhost", socket.gethostname(), socket.gethostname().split(".")[0]}
+    try:
+        for fam, _t, _p, _c, sa in socket.getaddrinfo(socket.gethostname(), None):
+            ips.add(sa[0])
+    except OSError:
+        pass
+    try:
+        out = subprocess.run(["hostname", "-I"], capture_output=True, text=True, timeout=3).stdout
+        ips.update(out.split())
+    except Exception:
+        pass
+    return ips
+
+
+def _is_self_target(ssh_t):
+    """user@host[:port] names THIS station's own service user on this machine —
+    the seat can run locally, no ssh hop (and no key requirement)."""
+    user, _, hostport = ssh_t.rpartition("@")
+    host = hostport.partition(":")[0]
+    return bool(user) and user == getpass.getuser() and host in _local_ips()
+
+
+def _ssh_host_for_target(user, host, port=22):
+    """A registered ssh-host (local file or toolserver-distributed) that reaches
+    user@host:port — a seat spawned there uses its key/port instead of a bare
+    `ssh user@host` (which only works where the service user's default key is
+    already authorized)."""
+    try:
+        port = int(port or 22)
+    except (TypeError, ValueError):
+        port = 22
+    for n, h in _ssh_hosts().items():
+        if (h.get("host") == host and (h.get("user") or "root") == user
+                and int(h.get("port") or 22) == port):
+            return n, h
+    return "", None
+
+
+# ── 1.0.63: toolserver credential (the station carries it; see TOOLSERVER_ENV_PATH)
+async def api_toolserver_config_get(request):
+    tok = os.environ.get("HUGPY_OPERATOR_TOKEN", "")
+    return web.json_response({
+        "ok": True, "path": str(TOOLSERVER_ENV_PATH), "file": TOOLSERVER_ENV_PATH.is_file(),
+        "url": TS_UPSTREAM, "token_set": bool(tok),
+        "token_preview": (tok[:4] + "…" + tok[-2:]) if tok else "",
+        "loaded_from_file": _TOOLSERVER_ENV_LOADED,
+        "loci_sync": {"ts": _TS_LOCI["ts"], "error": _TS_LOCI["error"],
+                      "distributed": sorted(_TS_LOCI["hosts"])}})
+
+
+async def api_toolserver_config_post(request):
+    """POST {token, url?} — write toolserver.env (0600), apply live, resync loci."""
+    global TS_UPSTREAM
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+    tok = str(body.get("token") or "").strip()
+    url = str(body.get("url") or "").strip()
+    if not re.match(r"^[A-Za-z0-9_.:-]{16,200}$", tok):
+        return web.json_response({"ok": False, "error": "token looks wrong (16-200 url-safe chars)"},
+                                 status=400)
+    if url and not re.match(r"^https?://[A-Za-z0-9.:\[\]-]+(/[A-Za-z0-9._/-]*)?$", url):
+        return web.json_response({"ok": False, "error": "url must be http(s)://host[:port][/path]"},
+                                 status=400)
+    _write_toolserver_env(tok, url)
+    if url:
+        TS_UPSTREAM = url
+    _TS_LOCI.update(error="", ts=0)
+    await _loci_sync_once(request.app)
+    audit(request, "toolserver-config", f"url={url or TS_UPSTREAM} token={tok[:4]}…")
+    return await api_toolserver_config_get(request)
+
+
+async def handoff_spawn(request):
+    """GET  /api/handoff/spawn → {ok, features, station, socket} — capability
+    probe: the toolserver's session/pull asks for 'resume' here before it POSTs.
+    POST /api/handoff/spawn {id, seat, ssh, dir, user, brief, resume?, fork?, name?}
+    — materialize a toolserver handoff as a REAL seat: a detached tmux session on
+    the keeper socket. Without `resume` it runs `claude <brief>` at {ssh, dir,
+    user} (the jump-in seat). With `resume` (a Claude Code session uuid) it runs
+    `claude --resume <id>` (+ --fork-session unless fork=false) there — the
+    SESSION PULL: the same transcript, full context, now seated in this station.
+    `name` picks the tmux session (default handoff-h<id>). An ssh target that
+    matches a registered ssh-host (local or toolserver-distributed) is reached
+    with that host's key/port. Called by the toolserver (HANDOFF_SPAWN_URL) with
+    X-Console-Token, or by an operator session; auth_mw has gated this route."""
+    if request.method == "GET":
+        return web.json_response({"ok": True, "features": HANDOFF_SPAWN_FEATURES,
+                                  "station": _station_id(), "socket": KEEPER_TMUX_SOCK})
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+    hid = re.sub(r"[^A-Za-z0-9_-]", "", str(body.get("id") or "x"))
+    name = (str(body.get("name") or "").strip().lower()) or f"handoff-h{hid}"
+    if not _PULL_NAME_RE.match(name):
+        return web.json_response({"ok": False, "error": "bad seat name"}, status=400)
+    seat = (body.get("seat") or "claude").strip().lower()
+    ssh_t = (body.get("ssh") or "").strip()
+    dirp = (body.get("dir") or "").strip() or "~"
+    brief = (body.get("brief") or "").strip()
+    resume = str(body.get("resume") or "").strip().lower()
+    if resume and not _UUID_RE.match(resume):
+        return web.json_response({"ok": False, "error": "bad resume session id"}, status=400)
+    fork = body.get("fork", True)
+    if not isinstance(fork, bool):
+        fork = str(fork).strip().lower() in ("1", "true", "yes", "on")
+    if ssh_t and not re.match(r"^[A-Za-z0-9._@:-]+$", ssh_t):
+        return web.json_response({"ok": False, "error": "bad ssh target"}, status=400)
+    inner = (f"cd {shlex.quote(dirp)} 2>/dev/null; "
+             # 1.0.63: pre-seed folder trust (same snippet the frontier seat uses) so a
+             # freshly spawned seat never stalls at Claude Code's trust dialog
+             f'printf %s {_SEAT_TRUST_B64} | base64 -d | python3 - "$HOME/.claude.json" "$(pwd)" {shlex.quote(TS_UPSTREAM)} >/dev/null 2>&1 || true; '
+             "claude")
+    if resume:
+        inner += " --resume " + shlex.quote(resume) + (" --fork-session" if fork else "")
+    elif brief:
+        inner += " " + shlex.quote(brief)
+    via = "local"
+    if ssh_t and _is_self_target(ssh_t):
+        via = "local-self"          # the session runs as THIS station's own user@host
+        cmd = inner
+    elif ssh_t:
+        user, _, hostport = ssh_t.rpartition("@")
+        host, _, port = hostport.partition(":")
+        hname, h = _ssh_host_for_target(user or "root", host, port or 22)
+        if h:
+            argv_ssh = ["ssh", "-tt"] + _ssh_opts(h, True) + [_ssh_target(h), inner]
+            via = "ssh-host:" + hname
+        else:
+            argv_ssh = ["ssh", "-tt"] + (["-p", port] if port.isdigit() else []) + \
+                       [(user + "@" if user else "") + host, inner]
+            via = "ssh"
+        cmd = " ".join(shlex.quote(a) for a in argv_ssh)
+    else:
+        cmd = inner
+    argv = _scope_prefix() + ["tmux", "-L", KEEPER_TMUX_SOCK, "new-session", "-d", "-s", name,
+                              "bash", "-lc", cmd]
+    proc = await asyncio.create_subprocess_exec(
+        *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
+    out, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return web.json_response(
+            {"ok": False, "error": (out or b"").decode()[:300] or
+             f"tmux exited {proc.returncode} (duplicate session?)"}, status=502)
+    handle = f"tmux -L {KEEPER_TMUX_SOCK} attach -t {name}"
+    audit(request, "handoff-spawn",
+          f"{name} seat={seat} via={via} target={ssh_t or 'local'}:{dirp}"
+          + (f" resume={resume[:8]} fork={fork}" if resume else ""))
+    return web.json_response({"ok": True, "handle": handle, "session": name,
+                              "socket": KEEPER_TMUX_SOCK, "resumed": resume, "fork": fork,
+                              "via": via, "station": _station_id(),
+                              "attach": f"/wsterm?surface=shell&vm=@keeper&tmux={name}"})
+
+
+async def api_sessions_pulled(request):
+    """GET /api/sessions/pulled — claude sessions pulled into the fleet (the
+    toolserver's loci feed) + whether each one's tmux seat is live on THIS
+    station's keeper socket, plus any live jump-in/pull seats the feed does not
+    know. Each live row carries the /wsterm attach URL."""
+    live = set()
+    rc, out, _err = await _run("tmux", "-L", KEEPER_TMUX_SOCK, "list-sessions", "-F", "#S")
+    if rc == 0:
+        live = {ln.strip() for ln in out.splitlines() if ln.strip()}
+    rows = []
+    for sdoc in _TS_LOCI["sessions"]:
+        name = str(sdoc.get("tmux") or "")
+        is_live = bool(name and name in live)
+        rows.append(dict(sdoc, live=is_live, kind="pull",
+                         attach=(f"/wsterm?surface=shell&vm=@keeper&tmux={name}" if is_live else "")))
+    known = {r.get("tmux") for r in rows}
+    for n in sorted(live):
+        if n.startswith(("handoff-", "pull-")) and n not in known:
+            rows.append({"locus": n, "tmux": n, "live": True, "kind": "seat", "goal": "",
+                         "session_id": "", "attach": f"/wsterm?surface=shell&vm=@keeper&tmux={n}"})
+    return web.json_response({"ok": True, "sessions": rows, "station": _station_id(),
+                              "loci_ts": _TS_LOCI["ts"], "loci_error": _TS_LOCI["error"],
+                              "toolserver": TS_UPSTREAM})
+
+
 async def _start_bugreport_api(app):
     api_script = ROOT / "bugreport-api.py"
     if not api_script.exists():
@@ -3909,10 +6406,44 @@ MODEL_VM = os.environ.get("STATION_CONSOLE_MODEL_VM", "")
 # hasCompletedOnboarding alone is NOT enough (trust is per-project). Mark the
 # seat's workspace ($(pwd)) trusted in the shared .claude.json. base64 so it
 # survives the tmux/ssh quoting layers with no shell metachars to escape.
-_SEAT_TRUST_B64 = "aW1wb3J0IGpzb24sc3lzCnAsd3M9c3lzLmFyZ3ZbMV0sc3lzLmFyZ3ZbMl0KdHJ5OgogICAgZD1qc29uLmxvYWQob3BlbihwKSkKZXhjZXB0IEV4Y2VwdGlvbjoKICAgIGQ9e30KZC5zZXRkZWZhdWx0KCdoYXNDb21wbGV0ZWRPbmJvYXJkaW5nJyxUcnVlKQpkLnNldGRlZmF1bHQoJ3Byb2plY3RzJyx7fSkuc2V0ZGVmYXVsdCh3cyx7fSlbJ2hhc1RydXN0RGlhbG9nQWNjZXB0ZWQnXT1UcnVlCmpzb24uZHVtcChkLG9wZW4ocCwndycpKQo="
+# 1.0.83 (operator 2026-09-04: "launch literally needs to create a new .claude"):
+# every claude-code seat/keeper launch goes through `abstract-claude launch`, which
+# materializes a BRAND-NEW config dir per launch (~/.claude-sessions/<stamp>-<pid>-
+# <label>, CLAUDE_CONFIG_DIR) seeded from the A settings template
+# ($AC_SETTINGS_JSON), the login identity + freshest credentials from the seat
+# user's ~/.claude, folder trust for the workspace and the toolserver MCP bridge.
+# The seat prelude self-upgrades abstract-claude to this floor so the fresh-dir
+# behaviour is guaranteed on every locus, then falls back to the legacy
+# persistent ~/.claude-seat/<label> only if abstract-claude cannot be had.
+AC_MIN_VERSION = "0.1.50"
+_AC_ENSURE = (
+    'export PATH="$HOME/.local/bin:$PATH"; '
+    'ac_ok=0; if command -v abstract-claude >/dev/null 2>&1; then '
+    'ac_v="$(abstract-claude -V 2>/dev/null | grep -oE \'[0-9]+(\\.[0-9]+)+\' | tail -1)"; '
+    'python3 -c \'import sys;t=lambda v:tuple(int(x) for x in v.split("."));'
+    'sys.exit(0 if t(sys.argv[1])>=t(sys.argv[2]) else 1)\' "${ac_v:-0}" ' + AC_MIN_VERSION + ' '
+    '>/dev/null 2>&1 && ac_ok=1; fi; '
+    'if [ "$ac_ok" != 1 ]; then '
+    'echo "  abstract-claude: ensuring >= ' + AC_MIN_VERSION + ' (fresh per-launch .claude)"; '
+    # upgrade with the interpreter that OWNS the `abstract-claude` command (a seat
+    # venv shim, pipx, --user, conda) — `pip --user` alone leaves a venv shim stale.
+    'ac_py=""; ac_exe="$(command -v abstract-claude 2>/dev/null)"; '
+    '[ -n "$ac_exe" ] && ac_py="$(sed -n \'1s/^#! *//p\' "$ac_exe" 2>/dev/null)"; '
+    '{ { [ -n "$ac_py" ] && [ -x "$ac_py" ] && "$ac_py" -m pip install -q -U "abstract-claude>=' + AC_MIN_VERSION + '" >/dev/null 2>&1; } '
+    '|| python3 -m pip install --user -q -U "abstract-claude>=' + AC_MIN_VERSION + '" >/dev/null 2>&1 '
+    '|| pipx upgrade abstract-claude >/dev/null 2>&1 || pipx install abstract-claude >/dev/null 2>&1; } || true; '
+    'hash -r 2>/dev/null; '
+    # re-CHECK the version (not mere presence): an old abstract-claude that the
+    # upgrade could not replace must not be trusted with the fresh-dir launch.
+    'if command -v abstract-claude >/dev/null 2>&1; then '
+    'ac_v="$(abstract-claude -V 2>/dev/null | grep -oE \'[0-9]+(\\.[0-9]+)+\' | tail -1)"; '
+    'python3 -c \'import sys;t=lambda v:tuple(int(x) for x in v.split("."));'
+    'sys.exit(0 if t(sys.argv[1])>=t(sys.argv[2]) else 1)\' "${ac_v:-0}" ' + AC_MIN_VERSION + ' '
+    '>/dev/null 2>&1 && ac_ok=1; fi; fi; ')
+_SEAT_TRUST_B64 = "aW1wb3J0IGpzb24sc3lzLG9zLHJlCnAsd3M9c3lzLmFyZ3ZbMV0sc3lzLmFyZ3ZbMl0KdXJsPXN5cy5hcmd2WzNdIGlmIGxlbihzeXMuYXJndik+MyBlbHNlICIiCnRyeToKICAgIGQ9anNvbi5sb2FkKG9wZW4ocCkpCmV4Y2VwdCBFeGNlcHRpb246CiAgICBkPXt9CmQuc2V0ZGVmYXVsdCgnaGFzQ29tcGxldGVkT25ib2FyZGluZycsVHJ1ZSkKZC5zZXRkZWZhdWx0KCdieXBhc3NQZXJtaXNzaW9uc01vZGVBY2NlcHRlZCcsVHJ1ZSkKZC5zZXRkZWZhdWx0KCdwcm9qZWN0cycse30pLnNldGRlZmF1bHQod3Mse30pWydoYXNUcnVzdERpYWxvZ0FjY2VwdGVkJ109VHJ1ZQojIHRvb2xzZXJ2ZXIgTUNQIGJyaWRnZSAoMS4wLjcwKTogZXZlcnkgY2xhdWRlLWNvZGUgc2VhdCBnZXRzIGl0LCBmcm9tIHRoZSBzZWF0IHVzZXIncyBPV04KIyBjcmVkZW50aWFsIGZpbGVzIChkZWItcHJvdmlzaW9uZWQpIC0gdGhlIHRva2VuIG5ldmVyIHJpZGVzIHRoZSBsYXVuY2ggY29tbWFuZCBsaW5lLgp0b2s9IiIKaG9tZT1vcy5wYXRoLmV4cGFuZHVzZXIoIn4iKQpmb3IgZiBpbiAob3MucGF0aC5qb2luKGhvbWUsIi5jb25maWciLCJodWdweSIsIm9wZXJhdG9yLmVudiIpLCBvcy5wYXRoLmpvaW4oaG9tZSwiLmNvbmZpZyIsImh1Z3B5LXN0YXRpb24iLCJ0b29sc2VydmVyLmVudiIpKToKICAgIHRyeToKICAgICAgICBmb3IgbG4gaW4gb3BlbihmKToKICAgICAgICAgICAgbT1yZS5tYXRjaChyIl4oVE9PTFNFUlZFUl9UT0tFTnxIVUdQWV9PUEVSQVRPUl9UT0tFTnxUT09MU0VSVkVSX09QRVJBVE9SX1RPS0VOKT0oLispJCIsbG4uc3RyaXAoKSkKICAgICAgICAgICAgaWYgbSBhbmQgbS5ncm91cCgyKS5zdHJpcCgpOiB0b2s9bS5ncm91cCgyKS5zdHJpcCgpLnN0cmlwKCciJyk7IGJyZWFrCiAgICBleGNlcHQgT1NFcnJvcjoKICAgICAgICBwYXNzCiAgICBpZiB0b2s6IGJyZWFrCmlmIHRvazoKICAgIG1zPWQuc2V0ZGVmYXVsdCgnbWNwU2VydmVycycse30pCiAgICBjdXI9bXMuZ2V0KCd0b29sc2VydmVyJykgb3Ige30KICAgIGlmIG5vdCBjdXIgb3IgY3VyLmdldCgnY29tbWFuZCcpPT0nYWJzdHJhY3QtY2xhdWRlJzoKICAgICAgICBtc1sndG9vbHNlcnZlciddPXsndHlwZSc6J3N0ZGlvJywnY29tbWFuZCc6J2Fic3RyYWN0LWNsYXVkZScsJ2FyZ3MnOlsnbWNwJ10sCiAgICAgICAgICAgICAgICAgICAgICAgICAgJ2Vudic6eydUT09MU0VSVkVSX1VSTCc6dXJsIG9yIChjdXIuZ2V0KCdlbnYnKSBvciB7fSkuZ2V0KCdUT09MU0VSVkVSX1VSTCcpIG9yICdodHRwczovL3Rvb2xzZXJ2ZXIuaHVncHkuYWknLCdUT09MU0VSVkVSX1RPS0VOJzp0b2t9fQpqc29uLmR1bXAoZCxvcGVuKHAsJ3cnKSkK"
 
 
-def _claude_seat_cmd(label: str) -> str:
+def _claude_seat_cmd(label: str, model_key: str = "claude-code") -> str:
     """The interactive Claude seat, launched EXACTLY like the MCT's A
     (hugpy_agent claude_adapter — operator, 2026-08-20: the two must not
     differ): a FRESH per-seat config dir on every spawn (wiped cache), the A
@@ -3933,7 +6464,12 @@ def _claude_seat_cmd(label: str) -> str:
     tab shows."""
     tmpl = shlex.quote(_claude_seat_settings_json())
     sysp = shlex.quote(_claude_seat_system_prompt())
-    model = _frontier_models()["claude-code"]
+    # mct v2: the native seat launched FOR the mct mode runs the operator's
+    # "mct" model (frontier-models.json); the plain claude-code mode keeps its own.
+    models = _frontier_models()
+    model = models.get(model_key) if model_key in models else None
+    if model is None:
+        model = models["claude-code"]
     mflag = (" --model " + shlex.quote(model)) if model else ""
     fs = "MEDIATED (file tools denied; route via B)" if _frontier_fs_mediated() else "DIRECT"
     banner = (
@@ -3943,7 +6479,7 @@ def _claude_seat_cmd(label: str) -> str:
         'echo "  model     : ' + (model or "Claude Code default") + '"; '
         'echo "  fs switch : ' + fs + '"; '
         'echo "  directive : ' + str(len(_frontier_directive_text()[0])) + ' chars via --append-system-prompt (see 🛡 steward → frontier directive)"; '
-        'echo "  config    : $c  (credentials + .claude.json symlinked from the seat user\'s own — login once)"; ')
+        'echo "  config    : FRESH per launch — abstract-claude launch → ~/.claude-sessions/<stamp>-<pid>-' + label + ' (login/identity carried from ~/.claude; legacy $c only if abstract-claude is unavailable)"; ')
     nologin = (
         'if [ ! -s "$HOME/.claude/.credentials.json" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then '
         'echo ""; echo "  ⚠ NO CLAUDE LOGIN for $(id -un)@$(hostname) — creating one now."; '
@@ -3963,7 +6499,27 @@ def _claude_seat_cmd(label: str) -> str:
     # .claude.json, which a fresh dir lacks. Now: credentials AND .claude.json
     # are symlinked to the seat user's real ones (login once, everywhere);
     # only settings.json is rewritten from the template at each launch.
-    return ('c="$HOME/.claude-seat/' + label + '"; '
+    # 1.0.83: FRESH per launch via `abstract-claude launch` (see AC_MIN_VERSION);
+    # the 1.0.41b symlinked persistent seat dir below is now the FALLBACK only.
+    # t321 (2026-09-16): every seat names its OWN Claude session id on the
+    # command line. mct_gateway's NativeAdapter honours --session-id first and
+    # (since t321) never falls through to "newest transcript" when one is
+    # named — that fallthrough had pinned the adapter to the keeper SERVE
+    # chat's transcript, which lives in the same ~/.claude/projects dir.
+    fresh = ('__sid="$(python3 -c "import uuid;print(uuid.uuid4())" 2>/dev/null || cat /proc/sys/kernel/random/uuid)"; '
+             'export MCT_SEAT_SID="$__sid"; '
+             'if [ "$ac_ok" = 1 ]; then '
+             f'rm -f {shlex.quote(str(FRONTIER_HANDOFF_PATH))} 2>/dev/null; '
+             f'AC_SETTINGS_JSON={tmpl} AC_SESSION_LABEL={shlex.quote(label)} '
+             f'exec abstract-claude launch -- --dangerously-skip-permissions{mflag} '
+             '--session-id "$__sid" --append-system-prompt "$__SYSP"; fi; '
+             'echo "  ⚠ abstract-claude unavailable — LEGACY persistent seat dir $HOME/.claude-seat/' + label + '"; ')
+    # t240: the real model rides the seat env too, so sidecars (seat-report)
+    # and the seat's own tools can read it instead of a baked default.
+    model_env = (f'export AC_MODEL={shlex.quote(model)} SEAT_MODEL={shlex.quote(model)} MCT_SEAT=claude-code; ' if model
+                 else 'export MCT_SEAT=claude-code; ')
+    return (f'__SYSP={sysp}; ' + model_env + _AC_ENSURE + banner + noclaude + nologin + fresh +
+            'c="$HOME/.claude-seat/' + label + '"; '
             'mkdir -p "$c" "$HOME/.claude"; '
             # Claude Code rewrites these files atomically (tmp + rename), which
             # turns the symlink into a plain file holding the NEWEST token /
@@ -3979,12 +6535,21 @@ def _claude_seat_cmd(label: str) -> str:
             'ln -sf "$j" "$c/.claude.json"; '
             # seed folder-trust for the workspace (see _SEAT_TRUST_B64) so a
             # fresh locus's first claude-code seat does not die at the trust dialog
-            f'printf %s {_SEAT_TRUST_B64} | base64 -d | python3 - "$j" "$(pwd)" >/dev/null 2>&1 || true; '
+            f'printf %s {_SEAT_TRUST_B64} | base64 -d | python3 - "$j" "$(pwd)" {shlex.quote(TS_UPSTREAM)} >/dev/null 2>&1 || true; '
             f'printf %s {tmpl} > "$c/settings.json"; '
-            'export PATH="$HOME/.local/bin:$PATH"; '
-            + banner + noclaude + nologin +
-            f'CLAUDE_CONFIG_DIR="$c" claude --dangerously-skip-permissions{mflag} '
-            f'--append-system-prompt {sysp}')
+            # 1.0.65: the session init prompt was folded into {sysp} above; this
+            # launch consumes it — the file goes so it never rides a later session.
+            f'rm -f {shlex.quote(str(FRONTIER_HANDOFF_PATH))} 2>/dev/null; '
+            # mct v2: even the LEGACY (no abstract-claude launch) path attaches
+            # the toolserver MCP explicitly — operator: "the keeper processes
+            # need to be launched with the toolserver MCP". Same server entry
+            # `abstract-claude launch` writes (abstract-claude mcp + token).
+            '__MCP=""; __tok="${TOOLSERVER_TOKEN:-${HUGPY_OPERATOR_TOKEN:-${STATION_CONSOLE_TOOLSERVER_TOKEN:-}}}"; '
+            'if [ -n "$__tok" ] && command -v abstract-claude >/dev/null 2>&1; then '
+            '__MCP=$(printf \'{"mcpServers":{"toolserver":{"type":"stdio","command":"abstract-claude","args":["mcp"],"env":{"TOOLSERVER_URL":"%s","TOOLSERVER_TOKEN":"%s"}}}}\' '
+            '"${TOOLSERVER_URL:-${STATION_CONSOLE_TOOLSERVER:-https://toolserver.hugpy.ai}}" "$__tok"); fi; '
+            f'CLAUDE_CONFIG_DIR="$c" claude --dangerously-skip-permissions{mflag} --session-id "$__sid" '
+            '${__MCP:+--mcp-config "$__MCP"} --append-system-prompt "$__SYSP"')
 
 
 # --- ⇅ SSH HOSTS (1.0.41b, operator): an EXISTING machine, added by ssh, is a
@@ -3992,6 +6557,25 @@ def _claude_seat_cmd(label: str) -> str:
 # (shell, frontier mct/claude-code, local, seat probe, sudo) runs over ssh the
 # way a VM's runs over `lxc exec`. Stored host-side, never in the browser. ----
 SSH_HOSTS_PATH = FV_STATE_HOME / "ssh-hosts.json"
+# ◌ hidden loci (1.0.80, operator 2026-09-03: "remove test-vm / ubuntu-hugpy
+# as loci"): a per-station list of locus names the tab strip / dropdown must
+# NOT show. Non-destructive — the LXD guest or ssh host is untouched and still
+# listed (flagged hidden) in the 🖥 stations drawer, where it can be unhidden.
+# The destructive alternatives (🗑 delete VM, ✕ remove ssh host) stay as they are.
+HIDDEN_LOCI_PATH = FV_STATE_HOME / "hidden-loci.json"
+
+
+def _hidden_loci():
+    try:
+        v = json.loads(HIDDEN_LOCI_PATH.read_text())
+        return {str(x) for x in v} if isinstance(v, list) else set()
+    except (OSError, ValueError):
+        return set()
+
+
+def _hidden_loci_save(names):
+    HIDDEN_LOCI_PATH.parent.mkdir(parents=True, exist_ok=True)
+    HIDDEN_LOCI_PATH.write_text(json.dumps(sorted(names)) + "\n")
 
 # --- Claude OAuth for the whole fleet (operator, 2026-08-21) ----------------
 # `claude setup-token` gives a LONG-LIVED token read from CLAUDE_CODE_OAUTH_TOKEN;
@@ -4051,9 +6635,36 @@ def _export_fleet_oauth_token() -> bool:
                 continue
             if tok:
                 break
+    if not tok:
+        # Fleet chain step 3 (operator 2026-09-02, "everything uses the same
+        # oauth"): no local store → ask the toolserver, the fleet's only holder,
+        # with this station's operator token — the same call the shells' hook
+        # (/etc/profile.d/hugpy-claude-auth.sh) and abstract-claude make.
+        tok = _fetch_toolserver_oauth_token()
     if tok and not os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
         os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = tok
     return bool(tok)
+
+
+def _fetch_toolserver_oauth_token(timeout=5):
+    import urllib.request
+    op = (os.environ.get("STATION_CONSOLE_TOOLSERVER_TOKEN")
+          or os.environ.get("HUGPY_OPERATOR_TOKEN") or "").strip()
+    if not op:
+        return ""
+    bases = [b for b in (TS_UPSTREAM, "http://127.0.0.1:7004", "https://toolserver.hugpy.ai") if b]
+    for base in dict.fromkeys(bases):
+        req = urllib.request.Request(base.rstrip("/") + "/claude/oauth_token", data=b"{}", method="POST",
+                                     headers={"X-Operator-Token": op, "Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                doc = json.loads(r.read().decode("utf-8"))
+        except Exception:
+            continue
+        t = ((doc.get("result") or {}).get("CLAUDE_CODE_OAUTH_TOKEN") or "").strip() if isinstance(doc, dict) else ""
+        if t.startswith("sk-ant-oat") and len(t) >= 80:
+            return t
+    return ""
 
 
 _export_fleet_oauth_token()
@@ -4062,9 +6673,421 @@ _SSH_HOST_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9.:_-]{0,253}$")
 _SSH_USER_RE = re.compile(r"^[a-z_][a-z0-9_.-]{0,31}$")
 
 
-def _ssh_hosts():
+# ── SESSION-PULL-PATCH 2026-09-02: toolserver-distributed loci ──────────────────────────────────
+# The toolserver DB is the CENTRAL point (operator 2026-09-02): a station's
+# ssh-host list is its LOCAL file merged with the toolserver's loci/pointers
+# feed — machines registered by agents (loci/register), by session/pull, or by
+# another station's operator. Local entries win on a name clash; names that
+# are LXD guests on this host are skipped (no ambiguity in _locus_run).
+_TS_LOCI = {"hosts": {}, "sessions": [], "ts": 0, "error": "", "lxd": set(),
+            "self": ""}   # 1.0.85: this station's own locus name (hidden from hosts)
+_TS_LOCI_POLL = int(os.environ.get("STATION_CONSOLE_LOCI_POLL", "20") or 20)
+
+
+def _ts_headers():
+    tok = (os.environ.get("STATION_CONSOLE_TOOLSERVER_TOKEN")
+           or os.environ.get("HUGPY_OPERATOR_TOKEN") or "").strip()
+    h = {"Accept": "application/json", "Content-Type": "application/json"}
+    if tok:
+        h["X-Operator-Token"] = tok
+    return h
+
+
+async def _ts_call(app, path, body=None, timeout=8):
+    """POST a toolserver tool ({'result': ...} unwrapped; {'error'} raised)."""
+    sess = app.get("proxy_sess")
+    if sess is None:
+        sess = app["proxy_sess"] = aiohttp.ClientSession()
+    url = TS_UPSTREAM.rstrip("/") + "/" + path.lstrip("/")
+    async with sess.post(url, json=(body or {}), headers=_ts_headers(),
+                         timeout=aiohttp.ClientTimeout(total=timeout)) as r:
+        data = await r.json(content_type=None)
+    if isinstance(data, dict) and "error" in data and "result" not in data:
+        raise RuntimeError(str(data["error"])[:200])
+    return data.get("result", data) if isinstance(data, dict) else data
+
+
+async def _loci_sync_once(app):
+    try:
+        feed = await _ts_call(app, "loci/pointers", {})
+        # LXD guests ONLY — known_names() also returns the ssh loci (its
+        # 2026-09-03 lxc-failure fallback), which made every other sync skip
+        # the whole feed as "guests" and blink the loci in and out.
+        try:
+            lxd = {s["name"] for s in await discover()}
+        except Exception:
+            lxd = _TS_LOCI["lxd"]
+        hosts = {}
+        # 1.0.85: one machine, one locus (NOMENCLATURE rule): the desktop's own
+        # locus is registered with an endpoint so peers see it, but it must not
+        # appear in its own dropdown as an ssh host. Only its NAME is kept
+        # (_TS_LOCI["self"]) so _station_locus() still resolves without
+        # STATION_LOCUS set. "Self" is the explicit STATION_LOCUS name (so a
+        # drifted endpoint IP — DHCP, second NIC, WAN — cannot make this
+        # station reappear in its own dropdown) OR <this user>@<one of this
+        # host's ips> on the plain ssh port — a guest reached by a port-forward
+        # on our own IP (op@192.168.1.113:2222) is a different machine.
+        me, my_ips, self_locus = getpass.getuser(), _local_ips_cached(), ""
+        env_locus = (os.environ.get("STATION_LOCUS") or "").strip().lower()
+        for n, h in (feed.get("ssh_hosts") or {}).items():
+            if not _SSH_NAME_RE.match(n) or n in lxd or not isinstance(h, dict):
+                continue
+            host = str(h.get("host") or ""); user = str(h.get("user") or "root")
+            if not _SSH_HOST_RE.match(host) or not _SSH_USER_RE.match(user):
+                continue
+            try:
+                port = int(h.get("port") or 22)
+            except (TypeError, ValueError):
+                port = 22
+            is_self = (n == env_locus) or (user == me and host in my_ips and port == 22)
+            if is_self:                            # 1.0.85: this station itself
+                self_locus = env_locus or self_locus or n
+                continue
+            key = str(h.get("key") or "")
+            hosts[n] = {"host": host, "user": user, "port": port,
+                        "key": key if key and os.path.isfile(os.path.expanduser(key)) else "",
+                        "added": "", "source": "toolserver", "goal": str(h.get("goal") or "")}
+        _TS_LOCI.update(hosts=hosts, sessions=list(feed.get("sessions") or []),
+                        ts=int(time.time()), error="", lxd=lxd, self=self_locus)   # 1.0.85: self
+    except Exception as e:
+        _TS_LOCI["error"] = str(e)[:200]
+    try:
+        await _deliver_pings(app)
+        await _nudge_frontier(app, _station_locus() or "")
+    except Exception as e:  # noqa: BLE001
+        _rlog.warning("ping delivery: %s", e)
+
+
+# ── 1.0.69: comms delivery — board pings reach THIS station's seat ─────────────
+# Plan §3: the toolserver board is the durable channel; the station's loci-sync
+# is the delivery leg. Every sync: comms/inbox for this station's locus → new
+# pings become keeper-mail rows (✉ badge) AND, when the frontier claude-code seat
+# is idle at its prompt, one nudge line is typed into it so the keeper actually
+# looks. Never while the seat is working. Delivered ids are remembered.
+_PINGS_SEEN_PATH = FV_STATE_HOME / "comms-delivered.json"
+_NUDGE_PENDING_PATH = FV_STATE_HOME / "comms-nudge-pending.json"
+
+
+def _pings_seen():
+    doc = _read_json(_PINGS_SEEN_PATH, {}) or {}
+    return set(doc.get("ids") or [])
+
+
+def _pings_seen_write(ids):
+    try:
+        _PINGS_SEEN_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _PINGS_SEEN_PATH.write_text(json.dumps({"ids": sorted(ids)[-2000:]}), encoding="utf-8")
+    except OSError:
+        pass
+
+
+async def _live_frontier_session():
+    """The tmux session (on the keeper socket) holding a live Claude seat: the
+    canonical keeper-claude when it exists, else ANY session on that socket whose
+    active pane runs claude — a keeper launched outside this station (hugpy on
+    ae, 2026-09-03: abstract-claude) must still get its board nudge. '' = none."""
+    want = _tmux_session_for("frontier", "claude-code") or "keeper-claude"
+    rc, _o, _e = await _run("tmux", "-L", KEEPER_TMUX_SOCK, "has-session", "-t", "=" + want)
+    if rc == 0:
+        return want
+    rc, out, _e = await _run("tmux", "-L", KEEPER_TMUX_SOCK, "list-panes", "-a", "-F",
+                             "#{session_name}\t#{pane_active}\t#{pane_current_command}")
+    if rc != 0:
+        return ""
+    for ln in (out or "").splitlines():
+        parts = ln.split("\t")
+        if len(parts) == 3 and parts[1] == "1" and parts[2] in ("claude", "node"):
+            return parts[0]
+    return ""
+
+
+async def _deliver_pings(app):
+    locus = _station_locus()
+    if not locus:
+        return
+    doc = await _ts_call(app, "comms/inbox", {"to": locus}, timeout=10)
+    pings = [p for p in (doc.get("pings") or []) if isinstance(p, dict) and p.get("id")]
+    if not pings:
+        return
+    seen = _pings_seen()
+    new = [p for p in pings if str(p["id"]) not in seen]
+    if not new:
+        return
+    rows = _keeper_mail_rows()
+    for p in new:
+        frm = re.sub(r"^\[ping\](?:\[msg\])?\s*(?:from\s+)?", "", str(p.get("note") or "")).split(" ")[0] or "board"
+        rows.append(_mail_row(frm[:24], "keeper", f"[board {p['id']}] {str(p.get('text') or '')[:2000]}", unread=True))
+    _keeper_mail_write(rows)
+    # mail is delivered; remember the ids so a sync never re-appends them.
+    seen.update(str(p["id"]) for p in new)
+    _pings_seen_write(seen)
+    # A conversational [ping][msg] (fleet ✉ compose) is now in the ✉ inbox above and
+    # needs no board footprint — CLOSE it so it never sits in the WORK queue. A real
+    # request-ping has no [msg] marker and stays open as its durable backstop.
+    for p in new:
+        if "[msg]" in str(p.get("note") or "").lower():
+            try:
+                await _ts_call(app, "todo/done", {"id": p["id"]}, timeout=10)
+            except Exception as e:  # noqa: BLE001 — toolserver down: leave it open
+                _rlog.warning("close msg ping %s: %s", p.get("id"), e)
+    # the nudge is SEPARATE and RETRIED: a busy seat (mid-turn), a missing pane or a
+    # non-empty input line only defers it to the next sync — the keeper must
+    # eventually see one 📨 line (2026-09-03: hugpy's keeper was mid-turn when its
+    # first pings arrived and would never have been told).
+    pend = _nudge_pending()
+    pend.extend(p for p in new if str(p["id"]) not in {str(q["id"]) for q in pend})
+    _nudge_pending_write(pend)
+    await _nudge_frontier(app, locus)
+
+
+def _nudge_pending():
+    doc = _read_json(_NUDGE_PENDING_PATH, {}) or {}
+    return [p for p in (doc.get("pings") or []) if isinstance(p, dict) and p.get("id")]
+
+
+def _nudge_pending_write(pings, last_sent=None):
+    if last_sent is None:
+        last_sent = (_read_json(_NUDGE_PENDING_PATH, {}) or {}).get("last_sent") or 0
+    try:
+        _NUDGE_PENDING_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _NUDGE_PENDING_PATH.write_text(json.dumps({"pings": pings[-50:], "last_sent": last_sent}),
+                                       encoding="utf-8")
+    except OSError:
+        pass
+
+
+try:
+    import keeper_nudge as _knudge
+except ImportError:                                  # pragma: no cover — packaging error
+    _knudge = None
+
+# 1.0.125 (operator): the 📨 nudge goes to the keeper's session IN SERVE, always;
+# the legacy tmux pane is only the fallback when serve is unreachable/unhealthy.
+NUDGE_SERVE_ROLE = (os.environ.get("STATION_NUDGE_SERVE_ROLE") or "keeper").strip().lower()
+NUDGE_MIN_INTERVAL = max(0, int(os.environ.get("STATION_NUDGE_MIN_INTERVAL") or "300"))
+
+
+async def _nudge_serve(app, line):
+    """Hand the nudge to serve's standing keeper session: POST
+    /api/session/<role>/message (wait=false, lossless). Serve runs it at once
+    when idle and queues it for the turn boundary when busy — never interrupts."""
+    sess = app.get("proxy_sess")
+    if sess is None:
+        sess = app["proxy_sess"] = aiohttp.ClientSession()
+    base = AC_UPSTREAM.rstrip("/")
+    to = aiohttp.ClientTimeout(total=8)
+    async with sess.get(base + "/api/session/roster", timeout=to) as r:
+        if r.status != 200:
+            return False, "serve roster HTTP %d" % r.status
+        doc = await r.json(content_type=None)
+    role = next((e for e in (doc or {}).get("roles") or [] if isinstance(e, dict)
+                 and e.get("role") == NUDGE_SERVE_ROLE), None)
+    if not role or not role.get("session_id"):
+        return False, "no live %s session in serve" % NUDGE_SERVE_ROLE
+    sid = str(role["session_id"])
+    if sid.startswith("cs-"):
+        # 1.0.126: a CONSOLE session (claude/gpt/hugpy via console_service) is fed
+        # through its own submit — POST /api/console/chat runs it now when idle and
+        # queues it (console queue panel) when busy. serve's /api/session/<role>/message
+        # relay only resumes NATIVE claude sessions: on a cs- id it accepted (202)
+        # and then failed with "--resume requires a valid session ID" (1.0.125).
+        async with sess.post(base + "/api/console/chat", json={"session_id": sid, "prompt": line},
+                             timeout=to) as r:
+            res = await r.json(content_type=None) if r.content_type and "json" in r.content_type else {}
+            if r.status == 200 and (res or {}).get("message_ids"):
+                return True, "serve:%s %s (%s)" % (NUDGE_SERVE_ROLE, sid, "queued" if res.get("queued") else "sent")
+            return False, "serve console chat HTTP %d %s" % (r.status, str((res or {}).get("error") or "")[:120])
+    body = {"text": line, "from": "station", "by": "station-relay", "wait": False, "via_b": False}
+    async with sess.post(base + "/api/session/%s/message" % NUDGE_SERVE_ROLE, json=body, timeout=to) as r:
+        res = await r.json(content_type=None) if r.content_type and "json" in r.content_type else {}
+        if not (r.status in (200, 202) or (r.status == 409 and (res or {}).get("queued"))):
+            return False, "serve message HTTP %d %s" % (r.status, str((res or {}).get("error") or "")[:120])
+    how = "queued" if r.status == 409 else ("accepted" if r.status == 202 else "delivered")
+    rid = str((res or {}).get("id") or "")
+    if r.status == 202 and rid:
+        # wait=false hides the outcome: read serve's relay log for this id so an
+        # accepted-then-failed hand-off falls back instead of being lost
+        await asyncio.sleep(4)
+        try:
+            async with sess.get(base + "/api/session/relay?limit=30", timeout=to) as rr:
+                ents = (await rr.json(content_type=None) or {}).get("entries") or []
+            ent = next((e for e in ents if str(e.get("id")) == rid), None)
+            if ent and ent.get("b_status") == "error" and not ent.get("queued"):
+                return False, "serve relay failed: %s" % str(ent.get("reason") or "")[:140]
+        except Exception:                                # noqa: BLE001 — no log = still running
+            pass
+    return True, "serve:%s %s (%s)" % (NUDGE_SERVE_ROLE, sid, how)
+
+
+async def _nudge_tmux(app, line):
+    """The legacy path, unchanged: type the line into the tmux keeper pane, only
+    when the seat is idle at an EMPTY prompt."""
+    sess = await _live_frontier_session()
+    if not sess:
+        return False, "no live claude pane on the keeper socket"
+    try:
+        rc, out, _ = await _locus_run_fast("", _CACHE_PROBE, 15)
+        cd = json.loads((out or "").strip().splitlines()[-1]) if rc == 0 else {}
+    except Exception:
+        cd = {}
+    # 1.0.85: a FRESH seat (no transcript / no request yet) is idle, not "failed"
+    if not cd.get("ok") and cd.get("error") not in ("no transcript", "no requests yet"):
+        return False, f"seat probe failed ({sess})"
+    if cd.get("busy"):
+        return False, f"seat busy ({sess})"
+    # target-PANE form: "=name:" = that exact session, its active pane
+    rc, pane, _ = await _run("tmux", "-L", KEEPER_TMUX_SOCK, "capture-pane", "-p", "-t", "=" + sess + ":", "-S", "-6")
+    last_prompt = [ln for ln in (pane or "").splitlines() if ln.lstrip().startswith("❯")]
+    if rc != 0:
+        return False, f"capture-pane rc={rc} ({sess})"
+    if not last_prompt or last_prompt[-1].strip() != "❯" or "esc to interrupt" in pane:
+        return False, f"prompt not empty/idle ({sess})"
+    tk = ["tmux", "-L", KEEPER_TMUX_SOCK, "send-keys", "-t", "=" + sess + ":"]
+    await _run(*tk, "Escape"); await asyncio.sleep(0.3)
+    await _run(*tk, "C-u"); await asyncio.sleep(0.3)
+    await _run(*tk, "-l", line); await asyncio.sleep(1.0)
+    await _run(*tk, "Enter")
+    return True, f"tmux:{sess}"
+
+
+async def _nudge_frontier(app, locus):
+    """ONE 📨 line for everything pending — at most every NUDGE_MIN_INTERVAL,
+    only items STILL OPEN at send time (re-read from the board), deduped by
+    (source, signature) across stations; serve first, tmux only as fallback."""
+    pend = _nudge_pending()
+    if not pend or _knudge is None:
+        return
+    try:
+        res = await _ts_call(app, "todo/list", {"status": "open", "locus": locus, "limit": 500}, timeout=10)
+        open_ids = {str(r.get("id")) for r in (res or []) if isinstance(r, dict)}
+    except Exception:                                    # noqa: BLE001 — cannot verify: send nothing
+        open_ids = None
+    doc = _read_json(_NUDGE_PENDING_PATH, {}) or {}
+    pl = _knudge.plan(pend, open_ids, time.time(), float(doc.get("last_sent") or 0), NUDGE_MIN_INTERVAL)
+    if pl["dropped"]:
+        _nudge_pending_write([p for p in pend if str(p["id"]) not in set(pl["dropped"])],
+                             last_sent=doc.get("last_sent"))
+        _audit_line("comms-nudge-drop", "closed since arrival: " + ", ".join(pl["dropped"][:20]))
+    if not pl["send"]:
+        return
+    line = _knudge.summarize(pl["items"], locus)
+    out = await _knudge.deliver(line, lambda ln: _nudge_serve(app, ln), lambda ln: _nudge_tmux(app, ln))
+    if out["target"] == "none":
+        if app["_rt"].get("comms_nudge_skip_reason") != out["detail"]:
+            app["_rt"]["comms_nudge_skip_reason"] = out["detail"]
+            _audit_line("comms-nudge-skip", f"{len(pl['items'])} pending; {out['detail']}")
+        return
+    app["_rt"]["comms_nudge_skip_reason"] = ""
+    _nudge_pending_write([], last_sent=time.time())
+    _audit_line("comms-nudge", f"{len(pl['items'])} ping(s) → {out['target']} [{out['detail']}]; "
+                               f"latest {pl['items'][-1]['id']}")
+
+
+# ── live change bus (1.0.77): ONE subscription to the toolserver's SSE stream
+# (Postgres LISTEN/NOTIFY on every per-locus table), fanned out to every open
+# browser tab over GET /api/events. Drawers reload on a matching event instead
+# of polling; the stream is a hint, never the data.
+_evlog = logging.getLogger("station.events")
+
+
+async def _events_relay_loop(app):
+    app.setdefault("event_subs", set())
+    backoff = 1
+    while True:
+        try:
+            sess = app.get("proxy_sess")
+            if sess is None:
+                sess = app["proxy_sess"] = aiohttp.ClientSession()
+            url = TS_UPSTREAM.rstrip("/") + "/events/stream"
+            async with sess.get(url, headers=_ts_headers(),
+                                timeout=aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=90)) as r:
+                if r.status != 200:
+                    raise RuntimeError(f"events/stream HTTP {r.status}")
+                backoff = 1
+                app["_rt"]["events_connected"] = time.time()
+                async for raw in r.content:
+                    line = raw.decode("utf-8", "replace").strip()
+                    if not line.startswith("data:"):
+                        continue
+                    try:
+                        doc = json.loads(line[5:].strip())
+                    except ValueError:
+                        continue
+                    app["_rt"]["events_last"] = doc
+                    for q in list(app["event_subs"]):
+                        try:
+                            q.put_nowait(doc)
+                        except asyncio.QueueFull:
+                            pass
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            app["_rt"]["events_connected"] = 0
+            _evlog.warning("events relay: %s (retry in %ss)", e, backoff)
+        await asyncio.sleep(backoff)
+        backoff = min(30, backoff * 2)
+
+
+async def _start_events_relay(app):
+    app["events_relay"] = asyncio.create_task(_events_relay_loop(app))
+
+
+async def _stop_events_relay(app):
+    t = app.get("events_relay")
+    if t:
+        t.cancel()
+
+
+async def api_events(request):
+    """GET /api/events — Server-Sent Events: one `change` event per DB change
+    {table, op, locus, id, ts}; `: keepalive` every 15 s."""
+    resp = web.StreamResponse(headers={"Content-Type": "text/event-stream",
+                                       "Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    await resp.prepare(request)
+    q = asyncio.Queue(maxsize=500)
+    subs = request.app.setdefault("event_subs", set())
+    subs.add(q)
+    try:
+        await resp.write(b": connected\n\n")
+        while True:
+            try:
+                doc = await asyncio.wait_for(q.get(), 15)
+                await resp.write(("event: change\ndata: " + json.dumps(doc) + "\n\n").encode())
+            except asyncio.TimeoutError:
+                await resp.write(b": keepalive\n\n")
+    except (ConnectionResetError, asyncio.CancelledError, RuntimeError):
+        pass
+    finally:
+        subs.discard(q)
+    return resp
+
+
+async def _loci_sync_loop(app):
+    while True:
+        await _loci_sync_once(app)
+        await asyncio.sleep(_TS_LOCI_POLL)
+
+
+async def _start_loci_sync(app):
+    app["loci_sync"] = asyncio.create_task(_loci_sync_loop(app))
+
+
+async def _stop_loci_sync(app):
+    t = app.get("loci_sync")
+    if t:
+        t.cancel()
+
+
+def _ssh_hosts_local():
     doc = _read_json(SSH_HOSTS_PATH, {}) or {}
     return {k: v for k, v in doc.items() if isinstance(v, dict) and _SSH_NAME_RE.match(k)}
+
+
+def _ssh_hosts():
+    """Local ssh-hosts.json merged over the toolserver-distributed loci."""
+    merged = dict(_TS_LOCI["hosts"])
+    merged.update(_ssh_hosts_local())
+    return merged
 
 
 def _ssh_host(name):
@@ -4078,6 +7101,20 @@ def _ssh_opts(h, interactive=False):
         key = str(fk) if fk.is_file() else ""
     o = ["-o", "StrictHostKeyChecking=accept-new", "-o", "LogLevel=ERROR",
          "-o", "ConnectTimeout=8", "-p", str(int(h.get("port") or 22))]
+    # 1.0.75: MULTIPLEX every ssh to a locus over one master connection. The
+    # drawers poll an ssh-host locus every 5-10 s and each poll was a fresh
+    # login (~0.8 s, 650 logins/90 min into hugpy@ae from the op desktop on
+    # 2026-09-02, 25 sessions open at once) — that contention is what froze
+    # the seat's own PTY. ControlPersist keeps the master 120 s past the last
+    # use, so a burst of probes costs one login. Socket dir is private (0700).
+    try:
+        mux = FV_STATE_HOME / "ssh-mux"
+        mux.mkdir(parents=True, exist_ok=True)
+        os.chmod(mux, 0o700)
+        o += ["-o", "ControlMaster=auto", "-o", "ControlPath=" + str(mux / "%C"),
+              "-o", "ControlPersist=120"]
+    except OSError:
+        pass
     if not interactive:
         o += ["-o", "BatchMode=yes"]
     if key:
@@ -4134,14 +7171,1110 @@ async def _locus_run_fast(vm, script, timeout=10):
     return await _locus_run(vm, script, timeout)
 
 
+async def _locus_spawn(vm, script):
+    """The STREAMING twin of _locus_run: start a long-running bash script in a
+    locus with stdout/stderr piped, instead of waiting for it to finish. Same
+    grounding — '' host, ssh host, lxd guest. Used by the journal follow."""
+    pipe = asyncio.subprocess.PIPE
+    if not vm:
+        return await asyncio.create_subprocess_exec(
+            "bash", "-lc", script, stdout=pipe, stderr=pipe)
+    h = _ssh_host(vm)
+    if h:
+        return await asyncio.create_subprocess_exec(
+            *_ssh_argv(h), "bash", "-lc", script, stdout=pipe, stderr=pipe)
+    return await asyncio.create_subprocess_exec(
+        "lxc", "exec", vm, "--", "sudo", "-u", "ubuntu", "-H", "bash", "-lc", script,
+        stdout=pipe, stderr=pipe)
+
+
+# ── 📜 locus journal (operator 2026-09-15: "the log, it should be a journalctl
+# -f of the station's keeper user"). The 📜 log tab used to render THIS
+# backend's own python log ring (/api/steward/log*, still served for the
+# steward and still reachable behind the panel's `console ring` toggle). It now
+# follows the JOURNAL of the locus's STATION KEEPER USER — the user that
+# locus's station-web unit runs as — so the panel shows what actually happens
+# in the locus home: the station unit, the seat scopes, every unit that user
+# owns. Grounding is the usual one: '' = this host, an ssh host, an lxd guest.
+JOURNAL_TAIL = int(os.environ.get("STATION_JOURNAL_TAIL", "200"))    # backfill lines (journalctl -n)
+JOURNAL_RING = int(os.environ.get("STATION_JOURNAL_RING", "2000"))   # per-locus ring a reconnect backfills from
+
+# Resolve the station keeper user ON the locus — the user ITS station-web unit
+# runs as. Order matters, because a box can carry BOTH (ae does): the SYSTEM
+# instance named after the login user (hugpy-station-web@hugpy, :8899) wins,
+# else that user's own USER unit (`systemctl --user … hugpy-station-web`, the
+# vm_mgr keeper seat on :8898), else any system instance on the box (whose
+# journal we may not be allowed to read — journald then says so, on stderr,
+# and the panel shows that line). k=v lines out.
+_JOURNAL_PROBE_SH = r"""
+me=$(id -un); u=$me; unit=""; mode=""; sysunit=""
+for s in $(systemctl list-units --no-pager --no-legend --all --type=service 'hugpy-station-web@*' 2>/dev/null \
+           | sed 's/^[^A-Za-z0-9]*//' | awk '{print $1}'); do
+  i=${s#hugpy-station-web@}; i=${i%.service}
+  [ -n "$i" ] || continue
+  [ -z "$sysunit" ] && sysunit=$s
+  if [ "$i" = "$me" ]; then sysunit=$s; break; fi
+done
+inst=${sysunit#hugpy-station-web@}; inst=${inst%.service}
+useru=$(systemctl --user list-units --no-pager --no-legend --all --type=service 'hugpy-station-web*' 2>/dev/null \
+        | sed 's/^[^A-Za-z0-9]*//' | awk 'NR==1{print $1}')
+if [ -n "$sysunit" ] && [ "$inst" = "$me" ]; then
+  unit=$sysunit; mode=system; u=$inst
+elif [ -n "$useru" ]; then
+  unit=$useru; mode=user; u=$me
+elif [ -n "$sysunit" ]; then
+  unit=$sysunit; mode=system; u=$inst
+else
+  unit=hugpy-station-web.service; mode=user; u=$me
+fi
+if [ "$mode" = system ]; then uid=$(id -u "$u" 2>/dev/null || id -u); else uid=$(id -u); fi
+echo "user=$u"; echo "uid=$uid"; echo "mode=$mode"; echo "unit=$unit"; echo "host=$(hostname)"
+"""
+
+_JOURNAL_SRC = {}          # locus → (resolved_at, source dict) — a probe is an ssh hop, so cache it
+
+
+def _journal_argv(src, follow=True, tail=None, since=""):
+    """journalctl for a resolved source. `--user` when the station runs as a
+    USER unit — that user's own journal, which is also where its seat scopes
+    land. Otherwise the UID's records OR'd (`+`) with the station unit: that is
+    exactly what `-u <unit>` expands to, written out, because systemd logs the
+    unit's own start/fail lines as root and an AND would hide every one."""
+    a = ["journalctl", "-o", "short-iso", "--no-pager"]
+    if (src or {}).get("mode") == "user":
+        a.append("--user")
+    if since:
+        a += ["--since", since]
+    else:
+        a += ["-n", str(max(1, int(tail or JOURNAL_TAIL)))]
+    if follow:
+        a.append("-f")
+    if (src or {}).get("mode") != "user":
+        unit = src.get("unit") or "hugpy-station-web.service"
+        a += ["_UID=" + str(src.get("uid") or 0), "+", "_SYSTEMD_UNIT=" + unit, "+", "UNIT=" + unit]
+    return a
+
+
+async def _journal_source(vm, refresh=False):
+    """Who the station keeper user IS on this locus + the exact journalctl that
+    follows them: {user, uid, mode, unit, host, locus, cmd, label, ok, error}."""
+    vm = vm or ""
+    hit = _JOURNAL_SRC.get(vm)
+    if hit and not refresh and time.time() - hit[0] < 300:
+        return hit[1]
+    rc, out, err = await _locus_run(vm, _JOURNAL_PROBE_SH, timeout=25)
+    kv = {}
+    for ln in (out or "").splitlines():
+        k, eq, v = ln.strip().partition("=")
+        if k and eq:
+            kv[k] = v.strip()
+    src = {"vm": vm, "user": kv.get("user", ""), "uid": kv.get("uid", ""),
+           "mode": kv.get("mode", ""), "unit": kv.get("unit", ""),
+           "host": kv.get("host", "") or (vm or "localhost")}
+    src["locus"] = vm or (_station_locus() or src["host"])
+    src["ok"] = bool(src["user"])
+    src["error"] = "" if src["ok"] else (
+        ((err or out or "").strip() or f"probe failed (rc={rc})")[:300])
+    src["cmd"] = " ".join(shlex.quote(a) for a in _journal_argv(src)) if src["ok"] else ""
+    src["label"] = (f"journalctl -f · {src['user']}@{src['locus']}"
+                    if src["ok"] else "journal unavailable")
+    _JOURNAL_SRC[vm] = (time.time(), src)
+    return src
+
+
+async def _reap_proc(p):
+    with contextlib.suppress(Exception):
+        await p.wait()
+
+
+class _JournalFeed:
+    """One `journalctl -f` per locus, shared by every open panel: a bounded ring
+    (so a reconnecting panel backfills instantly) plus one queue per subscriber.
+    The pipe restarts with backoff whenever it drops (ssh reset, journald
+    rotation, a locus rebooting) and is torn down when the last panel closes —
+    nothing follows a locus nobody is watching."""
+
+    def __init__(self, vm):
+        self.vm = vm or ""
+        self.ring = collections.deque(maxlen=JOURNAL_RING)
+        self.subs = set()
+        self.seq = 0
+        self.src = None
+        self.task = None
+        self.proc = None
+
+    def emit(self, line, kind="line"):
+        self.seq += 1
+        doc = {"seq": self.seq, "ts": round(time.time(), 3), "kind": kind,
+               "line": str(line)[:4000]}
+        self.ring.append(doc)
+        for q in list(self.subs):
+            try:
+                q.put_nowait(doc)
+            except asyncio.QueueFull:
+                pass
+        return doc
+
+    async def _drain_err(self, stream):
+        # journald's refusal lands HERE ("…users in groups 'adm', 'systemd-journal'
+        # can see all messages"): show the exact reason, never an empty panel.
+        while True:
+            ln = await stream.readline()
+            if not ln:
+                return
+            t = ln.decode(errors="replace").rstrip()
+            if t:
+                self.emit(t, "error")
+
+    async def _pump(self):
+        backoff = 2
+        while self.subs:
+            src = await _journal_source(
+                self.vm, refresh=bool(self.src is not None and not self.src.get("ok")))
+            self.src = src
+            if not src.get("ok"):
+                self.emit(src.get("error") or "journal source unresolved", "error")
+                await asyncio.sleep(30)
+                continue
+            self.emit(src["cmd"], "meta")
+            try:
+                self.proc = await _locus_spawn(self.vm, src["cmd"])
+            except OSError as e:
+                self.emit(f"cannot start journalctl: {e}", "error")
+            else:
+                errt = asyncio.create_task(self._drain_err(self.proc.stderr))
+                try:
+                    while True:
+                        try:
+                            raw = await self.proc.stdout.readline()
+                        except ValueError:      # one line past the stream limit
+                            continue
+                        if not raw:
+                            break
+                        backoff = 2
+                        self.emit(raw.decode(errors="replace").rstrip("\n"))
+                finally:
+                    errt.cancel()
+                    p, self.proc = self.proc, None
+                    if p is not None:
+                        with contextlib.suppress(Exception):
+                            p.kill()
+                        asyncio.ensure_future(_reap_proc(p))
+            if not self.subs:
+                break
+            self.emit(f"journal stream ended — reconnecting in {backoff}s", "meta")
+            await asyncio.sleep(backoff)
+            backoff = min(60, backoff * 2)
+
+    def subscribe(self):
+        q = asyncio.Queue(maxsize=2000)
+        self.subs.add(q)
+        if self.task is None or self.task.done():
+            self.task = asyncio.create_task(self._pump())
+        return q
+
+    def unsubscribe(self, q):
+        self.subs.discard(q)
+        if self.subs:
+            return
+        t, self.task = self.task, None
+        if t is not None:
+            t.cancel()
+        p, self.proc = self.proc, None
+        if p is not None:
+            with contextlib.suppress(Exception):
+                p.kill()
+            asyncio.ensure_future(_reap_proc(p))
+
+
+_JOURNAL_FEEDS = {}
+
+
+def _journal_feed(vm):
+    f = _JOURNAL_FEEDS.get(vm or "")
+    if f is None:
+        f = _JOURNAL_FEEDS[vm or ""] = _JournalFeed(vm)
+    return f
+
+
+def _journal_vm(request):
+    vm = (request.query.get("vm") or "").strip()
+    return "" if vm == "@keeper" else vm          # the host seat IS the local locus
+
+
+async def api_locus_journal(request):
+    """GET /api/locus/journal?vm=<locus>&refresh=1 — the RESOLVED source for a
+    locus: {user, uid, mode, unit, host, locus, cmd, label} (+ error when the
+    probe cannot find the station user). The lines come over the SSE below."""
+    src = await _journal_source(_journal_vm(request),
+                                refresh=request.query.get("refresh") in ("1", "true"))
+    feed = _JOURNAL_FEEDS.get(_journal_vm(request))
+    return web.json_response({"ok": bool(src.get("ok")), "source": src,
+                              "tail": JOURNAL_TAIL, "ring": JOURNAL_RING,
+                              "held": len(feed.ring) if feed else 0})
+
+
+async def api_locus_journal_stream(request):
+    """GET /api/locus/journal/stream?vm=<locus>&after=SEQ — Server-Sent Events:
+    a `meta` event carrying the resolved source, then the ring newer than SEQ
+    (the follow's own `-n` is the backfill), then one `line` per journal line as
+    it lands; `: keepalive` every 15 s. EventSource reconnects on its own and
+    `after` resumes without a gap or a duplicate."""
+    vm = _journal_vm(request)
+    try:
+        after = int(request.query.get("after") or 0)
+    except ValueError:
+        after = 0
+    resp = web.StreamResponse(headers={"Content-Type": "text/event-stream",
+                                       "Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    await resp.prepare(request)
+    feed = _journal_feed(vm)
+    q = feed.subscribe()
+    try:
+        await resp.write(b": connected\n\n")
+        src = await _journal_source(vm)
+        await resp.write(("event: meta\ndata: " + json.dumps({"source": src}) + "\n\n").encode())
+        for doc in [d for d in list(feed.ring) if d["seq"] > after]:
+            await resp.write(("event: line\ndata: " + json.dumps(doc) + "\n\n").encode())
+        while True:
+            try:
+                doc = await asyncio.wait_for(q.get(), 15)
+                await resp.write(("event: line\ndata: " + json.dumps(doc) + "\n\n").encode())
+            except asyncio.TimeoutError:
+                await resp.write(b": keepalive\n\n")
+    except (ConnectionResetError, asyncio.CancelledError, RuntimeError):
+        pass
+    finally:
+        feed.unsubscribe(q)
+    return resp
+
+
+# ── 🐞 bug scan (operator 2026-09-15: "an intermittent local agent review of
+# the logs, to identify any running problems within the locus home"). A
+# scheduler task inside the station takes the last window of the SAME journal
+# the 📜 log tab follows — plus this backend's own warnings and, on the host
+# locus, the error tails of the seat panes — and GREPS + PARSES it with the
+# deterministic pattern table in log_findings.py (1.0.124; operator 2026-09-29:
+# "the errors are grepped and parsed; when found, presented to B"). Until
+# 1.0.123 this window went to the fleet's Coder-Next slot under a review prompt
+# (~40k tokens every ~11 min per locus) — no model is called now. Findings are
+# persisted to <state>/bugscan/findings.jsonl deduped by (kind, source,
+# normalised signature), so a problem that keeps recurring is ONE row with a
+# count. A finding is EMITTED when new, when its count jumps, or when it
+# returns after an hour of silence; every scan republishes the set to B's
+# lookup surface (<workspace>/.hugpy_agent/mct/findings.json, see
+# _b_findings_publish) and a NEW high finding posts ONE board item.
+# The separate "report a bug" flow (bugreport-api sidecar, /api/vm/<vm>/bugreport)
+# is untouched — that is the VM-side scanner, this is the local keeper's review.
+BUGSCAN_ON = (os.environ.get("STATION_BUGSCAN", "1").strip().lower()
+              not in ("0", "false", "off", "no"))          # default: review this station
+BUGSCAN_INTERVAL = max(60, int(os.environ.get("STATION_BUGSCAN_INTERVAL", "600")))   # 10 min
+BUGSCAN_WINDOW = os.environ.get("STATION_BUGSCAN_WINDOW", "20 min ago")
+BUGSCAN_LINES = max(50, int(os.environ.get("STATION_BUGSCAN_LINES", "400")))
+BUGSCAN_TIMEOUT = max(30, int(os.environ.get("STATION_BUGSCAN_TIMEOUT", "240")))
+BUGSCAN_BOARD = (os.environ.get("STATION_BUGSCAN_BOARD", "1").strip().lower()
+                 not in ("0", "false", "off", "no"))       # a NEW high finding → one board item
+BUGSCAN_KEEP = max(50, int(os.environ.get("STATION_BUGSCAN_KEEP", "400")))
+
+_bslog = logging.getLogger("station.bugscan")
+
+try:
+    import log_findings as _logf
+except ImportError:                                  # pragma: no cover — packaging error
+    _logf = None
+try:                                                 # 1.0.124: findings are PUSHED to the keeper
+    import keeper_notify as _kn
+    import b_propose as _bprop
+except ImportError:                                  # pragma: no cover — packaging error
+    _kn = _bprop = None
+
+# The keeper's locus: findings + loops of EVERY station land on its board / ✉.
+# A station whose own locus differs delivers remotely (keeper_notify.RemoteSink).
+KEEPER_TARGET = (os.environ.get("STATION_KEEPER_LOCUS") or "keeper").strip().lower() or "keeper"
+B_PROPOSE_ON = (os.environ.get("STATION_B_PROPOSE", "1").strip().lower()
+                not in ("0", "false", "off", "no"))       # B proposes fixes for new findings
+B_PROPOSE_PER_SCAN = max(1, int(os.environ.get("STATION_B_PROPOSE_PER_SCAN") or "2"))  # the rest stay due
+_NOTIFY = None
+_METER = None
+_PROPOSE_BUSY = False
+_PROPOSE_TASK = None
+
+
+def _notify_book():
+    global _NOTIFY
+    if _NOTIFY is None and _kn is not None:
+        seat = os.environ.get("STATION_NOTIFY_SEAT_PANES", "0").strip().lower() in ("1", "true", "on", "yes")
+        _NOTIFY = _kn.NotifyBook(state_path=str(_bugscan_dir() / "notify.json"),
+                                 strip_only_prefixes=() if seat else ("seat:",))
+    return _NOTIFY
+
+
+def _token_meter():
+    """This station's own model spend per task (token_burn findings)."""
+    global _METER
+    if _METER is None and _kn is not None:
+        pre = "STATION_TOKEN_BUDGET_"
+        budgets = {}
+        for k, v in os.environ.items():
+            if k.startswith(pre):
+                try:
+                    budgets[k[len(pre):].lower()] = int(v)
+                except ValueError:
+                    pass
+        _METER = _kn.TokenMeter(state_path=str(FV_STATE_HOME / "token-meter.json"),
+                                budget=int(os.environ.get("STATION_TOKEN_BUDGET") or "200000"),
+                                budgets=budgets)
+    return _METER
+
+
+def _meter_tokens(task, tokens):
+    try:
+        m = _token_meter()
+        if m is not None and tokens:
+            m.add(task, int(tokens))
+    except Exception:                                    # noqa: BLE001 — metering never breaks a call
+        pass
+
+
+def _notify_origin():
+    return _station_locus() or _station_id()
+
+
+def _notify_sink(app):
+    """LocalSink on the keeper itself; RemoteSink (toolserver board on the
+    keeper's slice + comms ping ✉) everywhere else."""
+    async def post(path, body):
+        return await _ts_call(app, path, body, timeout=15)
+
+    def write_mail(frm, text):
+        _keeper_mail_write(_keeper_mail_rows() + [_mail_row(frm, "keeper", text, unread=True)])
+
+    origin = _notify_origin()
+    cls = _kn.LocalSink if origin == KEEPER_TARGET else _kn.RemoteSink
+    return cls(post, write_mail, keeper_locus=KEEPER_TARGET, origin=origin, station=_station_id())
+
+_BUGSCAN_ERR_RE = re.compile(
+    r"(?i)\b(error|traceback|exception|denied|refused|failed|fatal|429|rate.?limit|timed out)\b")
+
+_BUGSCAN_FINDINGS = None    # hash → newest row (the jsonl is an append log)
+_BUGSCAN_STATE = None       # {"loci": {locus: {on, interval, last, note}}}
+_BUGSCAN_BUSY = {}
+
+
+def _bugscan_dir():
+    d = Path(_hugpy_path("state", "bugscan"))
+    with contextlib.suppress(OSError):
+        d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _bugscan_load():
+    global _BUGSCAN_FINDINGS
+    if _BUGSCAN_FINDINGS is not None:
+        return _BUGSCAN_FINDINGS
+    rows = {}
+    try:
+        with open(_bugscan_dir() / "findings.jsonl", encoding="utf-8", errors="replace") as fh:
+            for ln in fh:
+                try:
+                    r = json.loads(ln)
+                except ValueError:
+                    continue
+                if isinstance(r, dict) and r.get("hash"):
+                    rows[r["hash"]] = r          # last row per hash wins
+    except OSError:
+        pass
+    _BUGSCAN_FINDINGS = rows
+    return rows
+
+
+def _bugscan_append(row):
+    try:
+        with open(_bugscan_dir() / "findings.jsonl", "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row) + "\n")
+    except OSError as e:
+        _bslog.warning("findings.jsonl: %s", e)
+    _bugscan_load()[row["hash"]] = row
+
+
+def _bugscan_compact():
+    """Rewrite the append log as one row per hash (newest BUGSCAN_KEEP) once it
+    has grown well past that — findings survive restarts, not forever."""
+    p = _bugscan_dir() / "findings.jsonl"
+    try:
+        if not p.is_file() or sum(1 for _ in open(p, errors="replace")) < BUGSCAN_KEEP * 4:
+            return
+        keep = sorted(_bugscan_load().values(), key=lambda r: r.get("ts") or 0)[-BUGSCAN_KEEP:]
+        tmp = p.with_suffix(".jsonl.tmp")
+        tmp.write_text("".join(json.dumps(r) + "\n" for r in keep), encoding="utf-8")
+        tmp.replace(p)
+        _BUGSCAN_FINDINGS.clear()
+        _BUGSCAN_FINDINGS.update({r["hash"]: r for r in keep})
+    except OSError as e:
+        _bslog.warning("findings compact: %s", e)
+
+
+def _bugscan_state():
+    global _BUGSCAN_STATE
+    if _BUGSCAN_STATE is None:
+        st = _read_json(_bugscan_dir() / "state.json", {})
+        _BUGSCAN_STATE = st if isinstance(st, dict) else {}
+        _BUGSCAN_STATE.setdefault("loci", {})
+    return _BUGSCAN_STATE
+
+
+def _bugscan_state_save():
+    try:
+        (_bugscan_dir() / "state.json").write_text(
+            json.dumps(_bugscan_state(), indent=2) + "\n", encoding="utf-8")
+    except OSError as e:
+        _bslog.warning("bugscan state: %s", e)
+
+
+def _bugscan_locus_state(vm):
+    """Per-locus scheduler row. A fresh install reviews THIS station out of the
+    box (STATION_BUGSCAN); a named locus stays off until the operator flips it,
+    so adding an ssh host never silently starts polling it."""
+    loci = _bugscan_state().setdefault("loci", {})
+    row = loci.get(vm or "")
+    if row is None:
+        row = loci[vm or ""] = {"on": bool(BUGSCAN_ON and not vm),
+                                "interval": BUGSCAN_INTERVAL, "last": 0, "note": ""}
+    row.setdefault("interval", BUGSCAN_INTERVAL)
+    row.setdefault("last", 0)
+    row.setdefault("note", "")
+    return row
+
+
+async def _bugscan_seat_tails(vm):
+    """Cheap: the last error-ish lines of each seat pane on the keeper socket.
+    Host locus only — a remote locus's panes are its own station's business."""
+    if vm:
+        return ""
+    rc, out, _e = await _run("tmux", "-L", KEEPER_TMUX_SOCK, "list-panes", "-a",
+                             "-F", "#{session_name}")
+    if rc != 0:
+        return ""
+    names, seen = [], set()
+    for ln in (out or "").splitlines():
+        s = ln.strip()
+        if s and s not in seen:
+            seen.add(s)
+            names.append(s)
+    chunks = []
+    for s in names[:6]:
+        rc, pane, _e = await _run("tmux", "-L", KEEPER_TMUX_SOCK, "capture-pane", "-p",
+                                  "-t", "=" + s + ":", "-S", "-40")
+        if rc != 0:
+            continue
+        hits = [l.strip() for l in (pane or "").splitlines()
+                if l.strip() and _BUGSCAN_ERR_RE.search(l)][-3:]
+        if hits:
+            chunks.append(s + ": " + " | ".join(h[:200] for h in hits))
+    return "\n".join(chunks)
+
+
+async def _bugscan_gather(vm):
+    """The window handed to B: the locus journal since BUGSCAN_WINDOW, this
+    backend's own WARNING+ ring, and the seat-pane error tails. (text, source)."""
+    src = await _journal_source(vm)
+    parts = []
+    if src.get("ok"):
+        cmd = " ".join(shlex.quote(a) for a in
+                       _journal_argv(src, follow=False, since=BUGSCAN_WINDOW))
+        rc, out, err = await _locus_run(vm, cmd + " | tail -n " + str(BUGSCAN_LINES), timeout=90)
+        body = ((out or "").strip()
+                or ((err or "").strip()[:400] if rc != 0 else "(no journal lines in the window)"))
+        parts.append(f"--- journal ({src['user']}@{src['locus']}, since {BUGSCAN_WINDOW}) ---\n{body}")
+    else:
+        parts.append("--- journal ---\n(unavailable: " + (src.get("error") or "unresolved") + ")")
+    ring = [d for d in list(_LOG_RING)[-800:]
+            if d.get("level") in ("WARNING", "ERROR", "CRITICAL")][-80:]
+    if ring:
+        parts.append("--- station console backend log (warnings+) ---\n" + "\n".join(
+            time.strftime("%H:%M:%S", time.localtime(d["ts"])) +
+            f" {d['level']} {d['name']} {d['msg']}" for d in ring))
+    tails = await _bugscan_seat_tails(vm)
+    if tails:
+        parts.append("--- seat panes (last error-ish lines) ---\n" + tails)
+    return "\n\n".join(parts), src
+
+
+def _bugscan_record(vm, locus, row, prev):
+    """A log_findings row as a findings.jsonl record — the panel's fields
+    (hash, severity, subject, evidence, suggested_action, first_ts, ts, runs,
+    board) plus the structured finding (kind, source, count, first_seen,
+    last_seen, sample_lines, signature)."""
+    rec = dict(row)
+    rec.pop("key", None)
+    rec.pop("emit_reason", None)
+    rec.update({"hash": row["key"], "locus": locus, "vm": vm or "",
+                "subject": _logf.subject(row),
+                "evidence": "\n".join(row.get("sample_lines") or [])[:1200],
+                "first_ts": int(prev.get("first_ts") or row.get("first_seen") or row.get("ts") or 0),
+                "ts": int(row.get("ts") or time.time()),
+                "runs": int(row.get("count") or 1),
+                "board": prev.get("board") or ""})
+    return rec
+
+
+async def _bugscan_run(app, vm):
+    """One review pass for a locus. Never raises into the panel: every failure
+    becomes the row's `note` and the next interval tries again."""
+    vm = vm or ""
+    row = _bugscan_locus_state(vm)
+    if _BUGSCAN_BUSY.get(vm):
+        return {"ok": False, "note": "a review is already running"}
+    _BUGSCAN_BUSY[vm] = True
+    try:
+        logs, src = await _bugscan_gather(vm)
+        locus = src.get("locus") or (vm or "this station")
+        if _logf is None:
+            raise RuntimeError("log_findings module missing (packaging)")
+        now = time.time()
+        found = _logf.scan(logs, now=now, locus=locus)
+        if not vm and _token_meter() is not None:        # this station's own costly tasks
+            found += _token_meter().findings(now, locus=locus)
+        idx = _bugscan_load()
+        emitted, new_high, pairs = [], [], []
+        for f in found:
+            prev = idx.get(f["key"]) or {}
+            prow = dict(prev, key=prev.get("hash")) if prev.get("kind") else {}
+            merged, reason = _logf.merge(prow, f, now)
+            rec = _bugscan_record(vm, locus, merged, prev)
+            if reason or rec != prev:
+                if reason:
+                    rec["emit_reason"] = reason
+                _bugscan_append(rec)
+            pairs.append((rec, reason))
+            if reason:
+                emitted.append(rec)
+                if reason == "new" and rec["severity"] == "high" and not rec.get("board"):
+                    new_high.append(rec)
+        row["last"] = int(now)
+        row["note"] = (f"{len(found)} finding(s)"
+                       + (f" · {len(emitted)} new/jumped" if emitted else "")
+                       + (f" · {len(new_high)} new high" if new_high else "")
+                       if found else "no running problems found")
+        _bugscan_state_save()
+        await _notify_findings(app, vm, pairs, now)
+        _b_findings_publish(emitted)
+        _bugscan_compact()
+        _bslog.info("bugscan %s: %s", locus, row["note"])
+        return {"ok": True, "count": len(found), "emitted": len(emitted),
+                "new_high": len(new_high), "note": row["note"]}
+    except Exception as e:                       # noqa: BLE001 — a scan never errors the panel
+        _bslog.warning("bugscan %s: %s", vm or "self", e)
+        row["note"] = f"scan failed: {str(e)[:160]}"
+        row["last"] = int(time.time())
+        _bugscan_state_save()
+        return {"ok": False, "note": row["note"]}
+    finally:
+        _BUGSCAN_BUSY.pop(vm, None)
+
+
+async def _notify_findings(app, vm, pairs, now):
+    """Push this scan's findings to the keeper (✉ + board + strip), apply the
+    keeper's dispositions, and kick B's fix proposals. Never raises."""
+    book = _notify_book()
+    if book is None:
+        return
+    try:
+        idx = _bugscan_load()
+        live = {h: r.get("last_seen") for h, r in idx.items() if (r.get("vm") or "") == (vm or "")}
+        ev = book.step(pairs, live, now)
+        sink = _notify_sink(app)
+        await _kn.fanout(ev, sink, now=now, by="station-findings", board=BUGSCAN_BOARD,
+                         fmt_mail=lambda r: _kn.fmt_mail(r, book.sig(r["sigkey"])),
+                         fmt_board=lambda r: _kn.fmt_board(r, book.sig(r["sigkey"])),
+                         fmt_resolve=_kn.fmt_resolve,
+                         priority_of=lambda r: "high" if _kn.sev_rank(r.get("severity")) >= 2 else "medium")
+        for r in ev.get("board") or []:                  # link the board id onto the findings record
+            rec = idx.get(r["key"])
+            if r.get("board_id") and rec and rec.get("board") != r["board_id"]:
+                _bugscan_append(dict(rec, board=r["board_id"]))
+        book.save()
+        if not vm:
+            await _notify_poll_dispositions(app, book, sink)
+        if ev.get("propose") or _propose_undelivered(book):
+            _propose_kick(app, book, list(ev.get("propose") or []))
+    except Exception as e:                               # noqa: BLE001 — the scan itself must finish
+        _bslog.warning("notify: %s", e)
+
+
+async def _notify_poll_dispositions(app, book, sink):
+    """The keeper closes a finding / proposal with a disposition line in its
+    note ("inert: <reason>", "reject: <reason>", "accept"; a plain close of a
+    proposal = accepted). Read the closed items once per scan."""
+    ids = {}
+    for k, r in book.rows.items():
+        if r.get("board_id") and r.get("active"):
+            ids[str(r["board_id"])] = ("finding", k)
+    for sk, sg in book.sigs.items():
+        for pr in sg.get("proposals") or []:
+            if pr.get("status") == "delivered" and pr.get("id") and pr.get("disposition") in (None, "open"):
+                ids[str(pr["id"])] = ("proposal", sk)
+    if not ids:
+        return
+    try:
+        closed = await sink.closed(list(ids))
+    except Exception:                                    # noqa: BLE001 — toolserver down: next scan
+        return
+    for bid, note in closed.items():
+        what, ref = ids[bid]
+        disp, reason = _kn.parse_disposition(note)
+        if what == "proposal":
+            book.set_disposition(ref, disp or "accepted", reason, by="keeper", proposal_id=bid)
+        elif disp == "inert":
+            book.set_disposition(ref, "inert", reason, by="keeper")
+        _todo_hist({"event": "finding-disposition", "board": bid, "what": what, "ref": ref,
+                    "disposition": disp or ("accepted" if what == "proposal" else "closed"), "reason": reason})
+
+
+async def api_findings_disposition(request):
+    """POST /api/findings/{sig}/disposition {"disposition": open|accepted|rejected|inert,
+    "reason"?, "by"?} — set a signature's disposition (sig = sig key or finding key)."""
+    book = _notify_book()
+    if book is None:
+        return web.json_response({"ok": False, "error": "keeper_notify module missing"}, status=503)
+    try:
+        body = await request.json()
+    except Exception:                                    # noqa: BLE001
+        body = {}
+    disp = str(body.get("disposition") or "").strip().lower()
+    if disp not in _kn.DISPOSITIONS:
+        return web.json_response({"ok": False, "error": "disposition must be one of " + ", ".join(_kn.DISPOSITIONS)},
+                                 status=400)
+    s = book.set_disposition(request.match_info["sig"], disp, body.get("reason") or "",
+                             by=str(body.get("by") or "keeper"))
+    if s is None:
+        return web.json_response({"ok": False, "error": "unknown signature"}, status=404)
+    audit(request, "finding-disposition", f"{request.match_info['sig']}={disp}", ok=True)
+    return web.json_response({"ok": True, "sig": book.resolve_sig(request.match_info["sig"]),
+                              **{k: v for k, v in s.items() if k not in ("hist",)}})
+
+
+async def api_findings_notify(request):
+    """GET /api/findings/notify — the notifier's view: active rows + per-signature
+    dispositions and proposal history (the rate history omitted)."""
+    book = _notify_book()
+    if book is None:
+        return web.json_response({"ok": False, "error": "keeper_notify module missing"}, status=503)
+    return web.json_response({"ok": True, "keeper": KEEPER_TARGET, "origin": _notify_origin(),
+                              "remote": _notify_origin() != KEEPER_TARGET,
+                              "rows": book.strip_rows(),
+                              "sigs": {k: {kk: vv for kk, vv in v.items() if kk != "hist"}
+                                       for k, v in book.sigs.items()},
+                              "token_burn": (_token_meter().rates() if _token_meter() else {})})
+
+
+# ── B proposes fixes (1.0.124) ────────────────────────────────────────────────
+_HA_DIR = None
+
+
+def _hugpy_agent_dir():
+    global _HA_DIR
+    if _HA_DIR is None:
+        _HA_DIR = ""
+        py = _hugpy_python()
+        if py:
+            try:
+                r = subprocess.run([py, "-c", "import hugpy_agent,os;print(os.path.dirname(hugpy_agent.__file__))"],
+                                   capture_output=True, text=True, timeout=20)
+                _HA_DIR = r.stdout.strip() if r.returncode == 0 else ""
+            except Exception:                            # noqa: BLE001
+                pass
+    return _HA_DIR
+
+
+def _propose_roots(row):
+    """Where B's context is grepped: this backend, hugpy_agent, and the unit's
+    own ExecStart script when the finding's source is a unit."""
+    roots = [str(Path(__file__).resolve().parent)]
+    if _hugpy_agent_dir():
+        roots.append(_hugpy_agent_dir())
+    src = str(row.get("source") or "")
+    if re.match(r"^[\w@.:-]+\.service$", src):
+        for scope in (["--user"], []):
+            try:
+                r = subprocess.run(["systemctl", *scope, "show", "-p", "ExecStart", "--value", src],
+                                   capture_output=True, text=True, timeout=10)
+                m = re.search(r"path=(\S+)", r.stdout or "")
+                if m and os.path.isfile(m.group(1)):
+                    roots.append(m.group(1))
+                    for tok in re.findall(r"argv\[\]=([^;]+)", r.stdout or "")[:1]:
+                        for a in tok.split():
+                            if a.startswith("/") and os.path.isfile(a) and a != m.group(1):
+                                roots.append(a)
+                    break
+            except Exception:                            # noqa: BLE001
+                continue
+    return roots
+
+
+_B_PROPOSE_SCRIPT = r"""
+import json, sys
+from hugpy_agent.config import load_config
+from hugpy_agent.gateway import Gateway
+d = json.load(sys.stdin)
+gw = Gateway.from_config(load_config())
+_orig = gw.build_payload
+def _bp(*a, **k):
+    p = _orig(*a, **k)
+    p["response_format"] = {"type": "json_object"}
+    return p
+gw.build_payload = _bp
+r = gw.chat(d["messages"], temperature=0, max_tokens=d["max_tokens"])
+print(json.dumps({"ok": bool(r.ok), "text": r.text or "", "error": r.error, "est": int(getattr(r, "est_tokens", 0) or 0)}))
+"""
+
+
+def _b_propose_call(msgs):
+    """B's model through the same hugpy_agent Gateway as _b_answer: JSON
+    response_format, temperature 0, max_tokens 600. -> (text, tokens, error)."""
+    est_in = sum(len(m.get("content") or "") for m in msgs) // 4
+    try:
+        from hugpy_agent.config import load_config
+        from hugpy_agent.gateway import Gateway
+    except ImportError:                                  # packaged python: hugpy_agent's own interpreter
+        py = _hugpy_python()
+        if not py:
+            return "", 0, "hugpy_agent not importable"
+        try:
+            r = subprocess.run([py, "-c", _B_PROPOSE_SCRIPT], capture_output=True, text=True, timeout=240,
+                               input=json.dumps({"messages": msgs, "max_tokens": _bprop.MAX_TOKENS}))
+            d = json.loads((r.stdout or "").strip().splitlines()[-1])
+        except Exception as e:                           # noqa: BLE001
+            return "", 0, ("gateway subprocess: %s" % e)[:200]
+    else:
+        try:
+            gw = Gateway.from_config(load_config())
+            orig = gw.build_payload
+
+            def _bp(*a, **k):
+                pl = orig(*a, **k)
+                pl["response_format"] = {"type": "json_object"}
+                return pl
+            gw.build_payload = _bp
+            res = gw.chat(msgs, temperature=0, max_tokens=_bprop.MAX_TOKENS)
+            d = {"ok": bool(res.ok), "text": res.text or "", "error": res.error,
+                 "est": int(getattr(res, "est_tokens", 0) or 0)}
+        except Exception as e:                           # noqa: BLE001
+            return "", 0, str(e)[:200]
+    text = d.get("text") or ""
+    tokens = int(d.get("est") or 0) or (est_in + len(text) // 4)
+    return text, tokens, (None if d.get("ok") else (d.get("error") or "gateway error"))
+
+
+def _propose_undelivered(book):
+    return [(sk, pr) for sk, sg in book.sigs.items() for pr in sg.get("proposals") or []
+            if pr.get("status") == "undelivered" and pr.get("payload")]
+
+
+def _propose_kick(app, book, rows):
+    """One B proposal pass in the background — one in flight per station."""
+    if _bprop is None or not B_PROPOSE_ON or _PROPOSE_BUSY:
+        return
+    global _PROPOSE_TASK
+    _PROPOSE_TASK = asyncio.create_task(_propose_run(app, book, rows))
+
+
+async def _propose_deliver(app, book, sink, row, sk, p, entry=None):
+    origin = _notify_origin()
+    tb, nb = _bprop.fmt_board(p, row, origin)
+    bid = await sink.board(row, tb, nb, by="B@" + origin, type="proposal", priority="medium")
+    if not bid:
+        raise RuntimeError("board add returned no id")
+    try:
+        await sink.mail(row, _bprop.fmt_mail(p, row, bid), by="B@" + origin)
+    except Exception:                                    # noqa: BLE001 — the board item is the record
+        pass
+    sg = book.sig(sk)
+    if entry is None:
+        entry = _bprop.record(sg, p, "delivered", bid=bid)
+    else:
+        entry.update(status="delivered", id=bid, disposition="open")
+        entry.pop("payload", None)
+        sg["disposition"] = "proposed"
+    row["proposal_id"] = bid
+    rec = _bugscan_load().get(row["key"])
+    if rec:
+        _bugscan_append(dict(rec, proposal=bid))
+    book.save()
+    _bslog.info("B proposal %s for %s", bid, row.get("identity"))
+    return bid
+
+
+async def _propose_run(app, book, rows):
+    global _PROPOSE_BUSY
+    _PROPOSE_BUSY = True
+    try:
+        sink = _notify_sink(app)
+        for sk, entry in _propose_undelivered(book):     # a proposal whose board post failed earlier
+            row = next((r for r in book.rows.values() if r["sigkey"] == sk), None)
+            if row is None:
+                continue
+            try:
+                await _propose_deliver(app, book, sink, row, sk, entry["payload"], entry)
+            except Exception:                            # noqa: BLE001
+                return
+        loop = asyncio.get_event_loop()
+        calls = 0
+        for row in rows:
+            if calls >= B_PROPOSE_PER_SCAN:              # first scan after install: no burst
+                break
+            sk = row["sigkey"]
+            sg = book.sig(sk)
+            why = _bprop.gate(sg, row, time.time(), sev_rank=_kn.sev_rank)
+            if why:
+                row["propose_due"] = False
+                continue
+            try:                                         # the fleet is busy: retry on the next scan
+                q = await _loops_get(app, "/api/llm/queue")
+                waiting = int(((q or {}).get("counts") or {}).get("waiting") or 0)
+            except Exception:                            # noqa: BLE001
+                waiting = 0
+            if waiting > 0:
+                _bslog.info("B proposal deferred: central queue has %d waiting", waiting)
+                break
+            ctx = await loop.run_in_executor(None, lambda: _bprop.locate_source(row, _propose_roots(row)))
+            msgs = _bprop.build_messages(row, ctx, sg)
+            calls += 1
+            text, tokens, err = await loop.run_in_executor(None, _b_propose_call, msgs)
+            _meter_tokens(_bprop.TASK, tokens)
+            row["propose_due"] = False
+            if err:
+                _bprop.record(sg, None, "error", why=err)
+                book.save()
+                continue
+            p = _bprop.parse(text)
+            if p is None:                                # junk: the finding was already delivered
+                _bprop.record(sg, None, "junk", why=(text or "")[:300])
+            elif p.get("no_new_fix"):
+                _bprop.record(sg, None, "no_new_fix", why=p.get("why"))
+                sg["note"] = "B: no new fix — " + (p.get("why") or "")[:300]
+            else:
+                dup = _bprop.novelty(p, sg.get("proposals"))
+                if dup:
+                    _bprop.record(sg, p, "duplicate", dup_of=dup.split()[-1])
+                else:
+                    try:
+                        await _propose_deliver(app, book, sink, row, sk, p)
+                    except Exception as e:               # noqa: BLE001 — keep it; deliver next scan
+                        e_ = _bprop.record(sg, p, "undelivered", why=str(e)[:200])
+                        e_["payload"] = p
+            book.save()
+    finally:
+        _PROPOSE_BUSY = False
+
+
+async def _bugscan_loop(app):
+    try:
+        await asyncio.sleep(90)          # let the station settle before the first review
+        while True:
+            now = time.time()
+            for vm, row in list(_bugscan_state().get("loci", {}).items()):
+                if not row.get("on"):
+                    continue
+                if now - float(row.get("last") or 0) < max(60, int(row.get("interval")
+                                                                   or BUGSCAN_INTERVAL)):
+                    continue
+                await _bugscan_run(app, vm)
+            await asyncio.sleep(30)
+    except asyncio.CancelledError:
+        pass
+
+
+async def _start_bugscan(app):
+    _bugscan_locus_state("")             # this station's own row exists from the first boot
+    _bugscan_state_save()
+    app["bugscan"] = asyncio.create_task(_bugscan_loop(app))
+
+
+async def _stop_bugscan(app):
+    t = app.get("bugscan")
+    if t is not None:
+        t.cancel()
+
+
+def _bugscan_rows(vm):
+    rows = [r for r in _bugscan_load().values() if (r.get("vm") or "") == (vm or "")]
+    rows.sort(key=lambda r: ({"high": 0, "medium": 1, "low": 2}.get(r.get("severity"), 3),
+                             -(r.get("ts") or 0)))
+    return rows[:100]
+
+
+# ── findings → B (1.0.124). B's lookup surface is its MCT state dir: the
+# hugpy_agent b_lookup classifier reads <workspace>/.hugpy_agent/mct/
+# findings.json next to mct.log, so "what's broken" is a LOOKUP (tokens 0,
+# model "lookup") on every path — the /b REPL, /api/b/chat's one-shot, and the
+# in-process fallback below. The file is the whole current set (bug scan rows
+# from every locus this station scans + the loop detector's active loops) plus
+# a short history of EMITTED findings (new / count jumped / returned).
+B_FINDINGS_NAME = "findings.json"
+B_FINDINGS_MAX_AGE = max(600, int(os.environ.get("STATION_B_FINDINGS_MAX_AGE", "21600")))  # 6 h
+B_FINDINGS_EMITTED_KEEP = 50
+_B_FINDINGS_ASK_RE = re.compile(
+    r"what'?s (?:broken|failing|wrong|down|up with)|what is (?:broken|failing|wrong|down)"
+    r"|anything (?:broken|failing|wrong|down)|\b(?:errors?|problems?|issues?|findings?|bugs?|bugscan"
+    r"|crash(?:es|ing|-?loops?)?|429s?|rate.?limit\w*|tracebacks?|failures?|failing|oom|5xx|health)\b",
+    re.I)
+
+
+def _b_findings_path():
+    return Path(_active_ws()) / ".hugpy_agent" / "mct" / B_FINDINGS_NAME
+
+
+def _b_loop_finding(row):
+    """A loop-detector row in the log_findings shape (kind crash_loop)."""
+    return {"key": "loop:" + str(row.get("key") or ""), "kind": "crash_loop",
+            "severity": "high" if row.get("severity") == "crit" else "medium",
+            "source": "loop:" + str(row.get("source") or ""), "locus": _keeper_locus(),
+            "count": int(row.get("count") or 0), "first_seen": row.get("first_seen"),
+            "last_seen": row.get("last_seen"), "signature": str(row.get("identity") or "")[:160],
+            "sample_lines": [str(row.get("detail") or "")[:240]] if row.get("detail") else [],
+            "suggested_action": str(row.get("action") or "")[:400]}
+
+
+def _b_findings_rows(now=None):
+    now = now or time.time()
+    out = []
+    for r in _bugscan_load().values():
+        if not r.get("kind") or now - float(r.get("last_seen") or 0) > B_FINDINGS_MAX_AGE:
+            continue                           # pre-1.0.124 model rows / stale
+        f = {k: r.get(k) for k in ("kind", "severity", "source", "locus", "count", "first_seen",
+                                   "last_seen", "sample_lines", "signature", "suggested_action",
+                                   "board")}
+        f["key"] = r["hash"]
+        out.append(f)
+    det = _loops()
+    if det is not None:
+        with contextlib.suppress(Exception):
+            out += [_b_loop_finding(r) for r in det.snapshot(now).get("active") or []]
+    sev = {"high": 0, "medium": 1, "low": 2}
+    out.sort(key=lambda f: (sev.get(f.get("severity"), 3), -float(f.get("last_seen") or 0)))
+    return out
+
+
+def _b_findings_publish(emitted=()):
+    """Rewrite B's findings.json (atomic). ``emitted`` rows are appended to its
+    short history so B can say what is NEW, not just what exists. Never raises."""
+    try:
+        p = _b_findings_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        old = _read_json(p, {}) if p.exists() else {}
+        hist = list((old or {}).get("emitted") or []) if isinstance(old, dict) else []
+        now = time.time()
+        for r in emitted or ():
+            hist.append({"at": int(now), "key": r.get("hash") or r.get("key"),
+                         "reason": r.get("emit_reason") or "new", "kind": r.get("kind"),
+                         "severity": r.get("severity"), "locus": r.get("locus"),
+                         "source": r.get("source"), "count": r.get("count"),
+                         "signature": r.get("signature")})
+        doc = {"schema": "station.findings.v1", "updated": int(now), "detector": "log_findings",
+               "station": _station_id(), "findings": _b_findings_rows(now),
+               "emitted": hist[-B_FINDINGS_EMITTED_KEEP:]}
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(doc, indent=1) + "\n", encoding="utf-8")
+        tmp.replace(p)
+    except Exception as e:                        # noqa: BLE001 — B's surface is best-effort
+        _bslog.warning("findings → B: %s", e)
+
+
+def _b_findings_ask(text):
+    return bool(_B_FINDINGS_ASK_RE.search(text or ""))
+
+
+def _b_findings_reply(rows, started):
+    """The deterministic answer to "what's broken" — no model, tokens 0."""
+    if not rows:
+        body = ("No running problems in my findings — the deterministic log scan "
+                "(journal, station warnings, seat panes; crash loops, 429s, 5xx, "
+                "tracebacks, OOM, refused, timeouts) and the loop detector have "
+                "nothing active in the last %d h." % (B_FINDINGS_MAX_AGE // 3600))
+    else:
+        shown = rows[:12]
+        body = "%d finding(s) from the deterministic log scan + loop detector%s:\n%s" % (
+            len(rows), (" (showing %d)" % len(shown)) if len(rows) > len(shown) else "",
+            "\n".join(_logf.fmt_finding(r, samples=1) if _logf else str(r) for r in shown))
+    return f"{body.rstrip()}\n{_b_meta_line(_B_LOOKUP_MODEL, 0, started)}"
+
+
+async def api_b_findings(request):
+    """GET /api/b/findings — the set B answers "what's broken" from."""
+    return web.json_response({"ok": True, "findings": _b_findings_rows(),
+                              "path": str(_b_findings_path())})
+
+
+async def api_bugscan(request):
+    """GET /api/bugscan?vm=<locus> — the intermittent local-agent review:
+    {on, interval, last, next, running, note, b, source, findings}.
+    POST {"vm", "op": "on"|"off"|"now"|"interval"|"clear", "interval"?: seconds}.
+    `now` only QUEUES the review (B takes a while) — the next poll shows it."""
+    vm = _journal_vm(request)
+    if request.method == "POST":
+        try:
+            b = await request.json()
+            assert isinstance(b, dict)
+        except Exception:
+            return web.json_response({"error": "body must be JSON"}, status=400)
+        vm = (b.get("vm") or "").strip()
+        vm = "" if vm == "@keeper" else vm
+        op = (b.get("op") or "").strip()
+        row = _bugscan_locus_state(vm)
+        if op in ("on", "off"):
+            row["on"] = (op == "on")
+        elif op == "interval":
+            try:
+                row["interval"] = max(60, int(b.get("interval") or BUGSCAN_INTERVAL))
+            except (TypeError, ValueError):
+                return web.json_response({"error": "interval must be seconds"}, status=400)
+        elif op == "now":
+            row["note"] = "review queued " + time.strftime("%H:%M")
+            asyncio.create_task(_bugscan_run(request.app, vm))
+        elif op == "clear":
+            for h in [h for h, r in _bugscan_load().items() if (r.get("vm") or "") == vm]:
+                _BUGSCAN_FINDINGS.pop(h, None)
+            with contextlib.suppress(OSError):
+                (_bugscan_dir() / "findings.jsonl").write_text(
+                    "".join(json.dumps(r) + "\n" for r in _bugscan_load().values()),
+                    encoding="utf-8")
+            row["note"] = "findings cleared"
+        else:
+            return web.json_response({"error": "op must be on|off|now|interval|clear"}, status=400)
+        _bugscan_state_save()
+        audit(request, "bugscan", f"{op} {vm or 'self'}", ok=True)
+    row = _bugscan_locus_state(vm)
+    src = await _journal_source(vm)
+    interval = max(60, int(row.get("interval") or BUGSCAN_INTERVAL))
+    return web.json_response({
+        "ok": True, "vm": vm, "locus": src.get("locus") or (vm or "this station"),
+        "on": bool(row.get("on")), "interval": interval,
+        "last": int(row.get("last") or 0),
+        "next": (int(row["last"]) + interval) if (row.get("on") and row.get("last")) else 0,
+        "running": bool(_BUGSCAN_BUSY.get(vm)), "note": row.get("note") or "",
+        # the scan is deterministic (no B call) since 1.0.124 — never "skipped"
+        "b": True, "detector": "log_findings", "window": BUGSCAN_WINDOW, "board": BUGSCAN_BOARD,
+        "source": src, "findings": _bugscan_rows(vm)})
+
+
 async def _ssh_alive(h):
     """TCP probe only — cheap enough for the dropdown's 5s poll."""
     return await _tcp_open(h["host"], int(h.get("port") or 22), 1.5)
 
 
+async def _known_names_safe():
+    """LXD station names, or an empty set when lxc is unusable here (snap
+    home-outside-/home as a service user, lxd absent) — never a 500."""
+    try:
+        return await known_names()
+    except Exception:
+        return set()
+
+
 async def all_locus_names():
     """LXD stations + ssh hosts — what the dropdown may hold."""
-    return set(await known_names()) | set(_ssh_hosts())
+    return set(await _known_names_safe()) | set(_ssh_hosts())
 
 
 def _in_vm(cmd: str, vm: str) -> str:
@@ -4167,7 +8300,7 @@ async def api_ssh_hosts(request):
         op = b.get("op"); name = (b.get("name") or "").strip().lower()
         if not _SSH_NAME_RE.match(name):
             return web.json_response({"error": "name: a-z0-9- (lowercase)"}, status=400)
-        hosts = _ssh_hosts()
+        hosts = _ssh_hosts_local()
         if op == "add":
             host = (b.get("host") or "").strip(); user = (b.get("user") or "").strip() or "root"
             try:
@@ -4179,6 +8312,8 @@ async def api_ssh_hosts(request):
                 return web.json_response({"error": "bad host/user/port"}, status=400)
             if key and not os.path.isfile(os.path.expanduser(key)):
                 return web.json_response({"error": f"key file not found on this host: {key}"}, status=400)
+            if key and os.path.expanduser(key).endswith(".pub"):
+                return web.json_response({"error": "key must be a private SSH key, not its .pub public half"}, status=400)
             if name in await known_names():
                 return web.json_response({"error": f"'{name}' is an LXD station here — pick another name"}, status=409)
             hosts[name] = {"host": host, "user": user, "port": port,
@@ -4186,6 +8321,18 @@ async def api_ssh_hosts(request):
             SSH_HOSTS_PATH.parent.mkdir(parents=True, exist_ok=True)
             SSH_HOSTS_PATH.write_text(json.dumps(hosts, indent=2) + "\n")
             audit(request, "ssh-host-add", f"{name}={user}@{host}:{port}", ok=True)
+            # SESSION-PULL-PATCH 2026-09-02: establish the locus centrally so every station sees it
+            # (key path stays local — other stations hold their own keys)
+            async def _register():
+                try:
+                    await _ts_call(request.app, "loci/register", {
+                        "locus": name, "kind": "station", "endpoint": f"{user}@{host}:{port}",
+                        "goal": f"ssh host added on {_station_id()}",
+                        "pointer": {"ssh": {"host": host, "user": user, "port": port, "key": ""}}})
+                    await _loci_sync_once(request.app)
+                except Exception:
+                    pass
+            asyncio.create_task(_register())
             # Fleet Claude OAuth token (claude-oauth-sync): a new ssh host gets
             # it like a new VM does — best effort, never blocks the add.
             if CLAUDE_OAUTH_TOKEN_PATH.is_file() and CLAUDE_OAUTH_SYNC_BIN:
@@ -4195,19 +8342,27 @@ async def api_ssh_hosts(request):
             # like a VM. Best effort, long timeout, never blocks the add.
             asyncio.create_task(_locus_run(name, _SEAT_CLI_PROVISION_SH, timeout=900))
         elif op == "delete":
-            if hosts.pop(name, None) is None:
+            distributed = name in _TS_LOCI["hosts"]
+            if hosts.pop(name, None) is None and not distributed:
                 return web.json_response({"error": "no such ssh host"}, status=404)
             SSH_HOSTS_PATH.write_text(json.dumps(hosts, indent=2) + "\n")
-            audit(request, "ssh-host-delete", name, ok=True)
+            if distributed:
+                # SESSION-PULL-PATCH 2026-09-02: retire it centrally too, else the next sync brings it back
+                try:
+                    await _ts_call(request.app, "loci/archive", {"locus": name})
+                except Exception as e:
+                    return web.json_response({"error": f"toolserver refused archive: {e}"}, status=502)
+                _TS_LOCI["hosts"].pop(name, None)
+            audit(request, "ssh-host-delete", name + (" (toolserver)" if distributed else ""), ok=True)
         elif op == "test":
-            if name not in hosts:
+            if name not in _ssh_hosts():   # SESSION-PULL-FIX1: local OR distributed
                 return web.json_response({"error": "no such ssh host"}, status=404)
             rc, out, err = await _locus_run(name, "echo user=$(id -un); echo host=$(hostname); "
                                                 "command -v claude >/dev/null 2>&1 && echo claude=1 || echo claude=0; "
                                                 "command -v hugpy-agent >/dev/null 2>&1 && echo agent=1 || echo agent=0; "
                                                 "sudo -n true 2>/dev/null && echo sudo=nopasswd || echo sudo=password-or-none")
             return web.json_response({"ok": rc == 0, "name": name, "rc": rc, "out": out.strip(), "err": err.strip()[:400],
-                                      "hint": "" if rc == 0 else "key auth failed or host unreachable — open its ⇥ terminal (password login works there), or add the key path"})
+                                      "hint": "" if rc == 0 else "key auth failed or host unreachable — select an already-authorized private key; first-time key enrollment needs console or other out-of-band access"})
         else:
             return web.json_response({"error": "op must be add|delete|test"}, status=400)
     hosts = _ssh_hosts()
@@ -4215,9 +8370,23 @@ async def api_ssh_hosts(request):
     for n, h in sorted(hosts.items()):
         rows.append({"name": n, "kind": "ssh", "host": h["host"], "user": h.get("user", "root"),
                      "port": h.get("port", 22), "key": h.get("key", ""), "added": h.get("added", ""),
+                     "source": h.get("source", "local"), "goal": h.get("goal", ""),
                      "state": "RUNNING" if await _ssh_alive(h) else "UNREACHABLE",
                      "command": _ssh_shell_cmd(h)})
-    return web.json_response({"ok": True, "hosts": rows, "path": str(SSH_HOSTS_PATH)})
+    return web.json_response({"ok": True, "hosts": rows, "path": str(SSH_HOSTS_PATH),
+                              "toolserver": {"url": TS_UPSTREAM, "ts": _TS_LOCI["ts"],
+                                             "error": _TS_LOCI["error"],
+                                             "distributed": sorted(_TS_LOCI["hosts"])}})
+
+
+def _locus_home(user):
+    """A locus user's home on THIS host (finder is host-native; these loci are
+    local users here). Falls back to /home/<user> for an unknown/remote user."""
+    import pwd
+    try:
+        return pwd.getpwnam((user or "").strip()).pw_dir
+    except (KeyError, TypeError):
+        return "/home/" + ((user or "op").strip() or "op")
 
 
 async def api_vms_merged(request):
@@ -4232,9 +8401,24 @@ async def api_vms_merged(request):
         rows = []
     for n, h in sorted(_ssh_hosts().items()):
         rows.append({"name": n, "kind": "ssh", "host": h["host"], "user": h.get("user", "root"),
+                     "home": _locus_home(h.get("user", "root")),
+                     "source": h.get("source", "local"),
                      "state": "RUNNING" if await _ssh_alive(h) else "UNREACHABLE"})
-    return web.json_response({"vms": rows})
+    hidden = _hidden_loci()
+    rows = [r for r in rows if r.get("name") not in hidden]     # ◌ hidden loci never reach the strip
+    return web.json_response({"vms": rows, "hidden": sorted(hidden)})
 
+
+# mct turn IDLE timeout, forwarded to `abstract-claude mct` so the station stays
+# in control even if the package is reinstalled to its own default. This is a
+# no-output (hung-turn) cap, NOT a wall-clock cap: a healthy streaming turn is
+# never killed. Operator-tunable via $MCT_TURN_IDLE_TIMEOUT (seconds); default
+# 1800s (30 min of silence).
+try:
+    _MCT_IDLE_TIMEOUT = int((os.environ.get("MCT_TURN_IDLE_TIMEOUT") or "").strip() or 0)
+except ValueError:
+    _MCT_IDLE_TIMEOUT = 0
+MCT_TURN_IDLE_TIMEOUT = _MCT_IDLE_TIMEOUT if _MCT_IDLE_TIMEOUT > 0 else 1800
 
 # Backend commands are stored RAW and wrapped per-request (_in_vm) with the
 # grounding VM resolved from the SPA's active VM (else the static pin above).
@@ -4242,13 +8426,11 @@ TERM_SURFACES = {
     "local":    {"default": "opencode",
                  "backends": {"opencode":  "hugpy-agent console --frontend opencode",
                               "qwen-code": "hugpy-agent console --frontend qwen-code"}},
-    # claude-code = the BASE frontier terminal (operator 2026-08-27): the
-    # direct interactive seat is the default; mct is on course to become a
-    # COMMUNICATION METHOD over it (file-pointer exchange into the claude-code
-    # PTY — /api/mct/prompt already types pointer lines there) rather than a
-    # separate program. The standalone arbiter below is the transitional form.
-    "frontier": {"default": "claude-code",
-                 # Two frontier backends, and only two (operator 2026-08-28):
+    # MCT is the default frontier backend. Claude Code, Codex, and the native
+    # Hugpy agent remain independently selectable frontier backends. Hugpy is
+    # A's direct fleet runtime, not B's local-agent wrapper.
+    "frontier": {"default": "mct",
+                 # Claude backends (ChatGPT/Codex added 2026-09-14):
                  # claude-code IS the frontier seat, and mct is the
                  # pointer-exchange method OVER it (PROMOTED from "mct2",
                  # 2026-08-27: plain-file C→B→A exchange). mct runs WITHIN the
@@ -4258,8 +8440,10 @@ TERM_SURFACES = {
                  # ~/.config/hugpy-station/mct2, /api/mct2/*); the BACKEND key is
                  # mct. The original broker MCT (mct-deprecated, `hugpy-agent
                  # mct`) and the clawd-code stub were retired from the picker.
-                 "backends": {"mct":         "abstract-claude mct {ws}",
-                              "claude-code": "claude"}},
+                 "backends": {"mct":         f"abstract-claude mct {{ws}} --timeout {MCT_TURN_IDLE_TIMEOUT}",
+                              "claude-code": "claude",
+                              "codex": "codex",
+                 "hugpy": "hugpy-agent harness"}},
     # The shell surface's transports: exec (lxc exec, the default — works
     # even where the network path doesn't) and ssh (a real sshd login as the
     # dev user; vm-new enables sshd and seeds the operator's key). These
@@ -4286,12 +8470,11 @@ FV_BACKENDS = {}   # sid -> backend key actually launched/attached for that sid
 # bin/station-stack-install) creates `keeper-mct` from the SAME naming — keep
 # the two in sync. A backend with no row here runs unpersisted.
 BACKEND_TMUX_SESSION = {
-    # mct promotion (2026-08-27): keeper-mct hosts the pointer-exchange arbiter
-    # (mct2_repl). The in-VM keeper-ensure.sh still creates keeper-mct running
-    # the OLD broker until station-stack is re-synced (station-stack-install) —
-    # on such a VM, new-session -A would attach the wrong program; re-sync
-    # before grounding the mct backend in an LXD guest.
-    "frontier": {"mct": "keeper-mct", "claude-code": "keeper-claude"},
+    # MCT is a communication method, so it deliberately has no tmux session.
+    # It reuses whichever native frontier seat is selected (Claude Code/Codex).
+    "frontier": {"claude-code": "keeper-claude",
+                 "codex": "keeper-codex",
+                 "hugpy": "keeper-hugpy"},
     "local":    {"opencode": "keeper-local-opencode",
                  "qwen-code": "keeper-local-qwen"},
 }
@@ -4322,15 +8505,212 @@ def _frontier_live_session():
     return None
 _TMUX_OPTS = ("set -g status off \\; set -g prefix None \\; set -g prefix2 None \\; "
               "set -g escape-time 0 \\; set -g mouse off \\; "
+              # t-scroll (2026-09-19): the seat TUIs (claude-code, opencode) hold
+              # the ALTERNATE screen, where tmux keeps ZERO scrollback — copy-mode
+              # opened at [0/0] and the wheel ctl ("scroll" above) was a no-op, so
+              # the operator had NO scrollback path at all. Routing that output
+              # through the MAIN screen accumulates it in history, which the
+              # existing wheel -> copy-mode path then scrolls. mouse stays OFF:
+              # browser-native selection and the right-click/chip paste need it.
+              "set -g alternate-screen off \\; set -g history-limit 20000 \\; "
               "set -g destroy-unattached off \\; set -g window-size latest \\; "
               "setw -g aggressive-resize on \\; ")
 
 
-def _tmux_persist(sess: str, cmd: str) -> str:
+_SCOPE_OK = None
+_IO_DELEGATED = None
+
+
+def _io_delegated():
+    """True when the cgroup v2 `io` controller is delegated to this user manager.
+    Without it systemd accepts IOWeight= but never applies it, so we only pass the
+    property when it can actually bite (2026-09-16: this host delegates cpu/memory/
+    pids only — the IO guard rides on ionice instead)."""
+    global _IO_DELEGATED
+    if _IO_DELEGATED is None:
+        try:
+            with open(f"/sys/fs/cgroup/user.slice/user-{os.getuid()}.slice/"
+                      f"user@{os.getuid()}.service/cgroup.controllers") as fh:
+                _IO_DELEGATED = "io" in fh.read().split()
+        except Exception:
+            _IO_DELEGATED = False
+    return _IO_DELEGATED
+
+
+# Every seat's tmux server (and therefore EVERY child a seat or its subagents
+# spawn — ugrep/bfs/rg included) starts de-prioritised: nice 10 + ionice idle
+# class. 2026-09-16: an orphaned `ugrep -rn / ` in a dead seat scope read ~854 GB
+# over 10 h and drove load to ~30, stalling a build. Deny-globs in the seat
+# settings are evadable; the scheduler class is not — it is inherited by fork.
+_NICE_PREFIX = ["/usr/bin/nice", "-n", "10", "/usr/bin/ionice", "-c", "3"]
+
+
+def _scope_prefix():
+    """1.0.63: start the seats' tmux server in its OWN systemd user scope, outside
+    this backend's cgroup — restarting the station unit used to kill every seat
+    (KillMode=control-group took the tmux server with it; ae 2026-09-02). Probed
+    once; empty when systemd-run --user is unavailable (plain tmux as before).
+    1.0.90: the scope carries CPUWeight=50 (and IOWeight=20 where the io
+    controller is delegated), and the command is always nice/ionice-wrapped."""
+    global _SCOPE_OK
+    if _SCOPE_OK is None:
+        _SCOPE_OK = False
+        if shutil.which("systemd-run") and (os.environ.get("XDG_RUNTIME_DIR")
+                                            or os.path.isdir(f"/run/user/{os.getuid()}")):
+            os.environ.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
+            try:
+                r = subprocess.run(["systemd-run", "--user", "--scope", "--quiet", "--collect",
+                                    "true"], capture_output=True, timeout=10)
+                _SCOPE_OK = r.returncode == 0
+            except Exception:
+                _SCOPE_OK = False
+    if not _SCOPE_OK:
+        return list(_NICE_PREFIX)
+    pre = ["systemd-run", "--user", "--scope", "--quiet", "--collect", "-p", "CPUWeight=50"]
+    if _io_delegated():
+        pre += ["-p", "IOWeight=20"]
+    return pre + _NICE_PREFIX
+
+
+def _shell_persist(name: str, inner: str, scope: bool = False) -> str:
+    """Run `inner` inside a persistent tmux session on the dedicated `shell`
+    socket (survives detach + a station restart — an actual terminal in the
+    locus, like the keeper seats), or run it bare when the locus has no tmux.
+    `name` is the stable reattach id. `scope` wraps the tmux server in its own
+    systemd scope (HOST only) so KillMode=control-group can't take it on a
+    station restart; VM/ssh loci already live in their own cgroup/host."""
+    pre = (" ".join(_scope_prefix()) + " ") if scope else ""
+    t = (pre + "tmux -L shell " + _TMUX_OPTS + "new-session -A -s "
+         + shlex.quote(name) + " " + shlex.quote(inner))
+    return ("command -v tmux >/dev/null 2>&1 && exec " + t
+            + " || exec bash -lc " + shlex.quote(inner))
+
+
+def _tmux_persist(sess: str, cmd: str, remote: bool = False, surface: str = "") -> str:
     """Shell command that attaches to tmux session `sess` (console socket),
     starting `cmd` in it only when the session does not exist yet."""
-    return (f"tmux -L {KEEPER_TMUX_SOCK} " + _TMUX_OPTS
+    pre = " ".join(_scope_prefix())
+    # 1.0.77: a claude-code seat gets a detached seat reporter (abstract-claude
+    # seat-report) beside it, so its locus's stations read alive/age/auth from
+    # the toolserver instead of probing over ssh. `$$` is the seat's own shell
+    # (tmux runs the command via sh -c; it lives exactly as long as the seat).
+    # mct seats report themselves (abstract-claude 0.1.23+). Silent no-op when
+    # abstract-claude is not on the seat's PATH.
+    if sess == "keeper-claude":
+        # t240: the sidecar reports abstract-claude's baked default_model unless
+        # told the REAL one — pass the model the seat command resolved.
+        mm = re.search(r" --model (\S+)", cmd)
+        real_model = (mm.group(1).strip("'\"") if mm else "") or _frontier_models().get("claude-code", "")
+        model_arg = (" --model " + shlex.quote(real_model)) if real_model else ""
+        cmd = ("(command -v abstract-claude >/dev/null 2>&1 && abstract-claude seat-report "
+               "--seat claude-code --watch-pid $$" + model_arg + " >/dev/null 2>&1 &); " + cmd)
+    # The tmux CLIENT refuses an argv larger than its 16 KB imsg buffer
+    # ("command too long", tmux 3.4) — the claude seat command (settings
+    # template + directive via --append-system-prompt) passes that, so the
+    # launch silently fell to the backend's bash prompt. mct v2 (2026-09-15):
+    # EVERY generated seat command is parked in a per-launch 0700 script and
+    # tmux runs `bash <file>`; `$$` above stays the seat's shell. Remote loci
+    # (lxc/ssh) get the script shipped inside the wrapper as base64 and
+    # materialised under their own $HOME — never a host path in a guest.
+    if remote:
+        if len(cmd) > _SEAT_LAUNCH_INLINE_MAX:
+            cmd = _seat_launch_remote(sess, cmd)
+    else:
+        # ALWAYS a file on the host: the script also exports the station's
+        # seat env (HUGPY_URL/BASE/API_KEY, toolserver, locus, state) — the
+        # pre-existing `console` tmux server's global env lacks them, which
+        # is why the local seat (hugpy-agent console) died with HTTP 401.
+        p = _seat_launch_script(sess, cmd, surface)
+        if p is not None:
+            cmd = "bash " + shlex.quote(str(p))
+    return ((pre + " " if pre else "") + f"tmux -L {KEEPER_TMUX_SOCK} " + _TMUX_OPTS
             + "new-session -A -s " + shlex.quote(sess) + " " + shlex.quote(cmd))
+
+
+# The station-process env a seat needs, exported at the top of every host
+# launch script (tmux's server env is whatever the FIRST session brought).
+_SEAT_ENV_KEYS = ("HUGPY_URL", "HUGPY_BASE", "HUGPY_API_KEY", "HUGPY_OPERATOR_TOKEN",
+                  "TOOLSERVER_URL", "TOOLSERVER_TOKEN", "TOOLSERVER_OPERATOR_TOKEN",
+                  "STATION_CONSOLE_TOOLSERVER", "STATION_CONSOLE_TOOLSERVER_TOKEN",
+                  "EXCHANGE_LOCUS", "HUGPY_STATION_STATE")
+_LOCAL_HUGPY_FRONT = "http://127.0.0.1:7002"   # gunicorn front; nginx 500s on >~10 KB bodies
+
+
+def _port_open(port, host="127.0.0.1", timeout=0.3):
+    import socket
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def _seat_env_block(surface=""):
+    env = {k: os.environ[k] for k in _SEAT_ENV_KEYS if os.environ.get(k)}
+    env.setdefault("HUGPY_STATION_STATE", str(FV_STATE_HOME))
+    if not env.get("TOOLSERVER_URL") and env.get("STATION_CONSOLE_TOOLSERVER"):
+        env["TOOLSERVER_URL"] = env["STATION_CONSOLE_TOOLSERVER"]
+    if not env.get("TOOLSERVER_TOKEN") and env.get("STATION_CONSOLE_TOOLSERVER_TOKEN"):
+        env["TOOLSERVER_TOKEN"] = env["STATION_CONSOLE_TOOLSERVER_TOKEN"]
+    if not env.get("EXCHANGE_LOCUS"):
+        try:
+            env["EXCHANGE_LOCUS"] = _station_locus() or ""
+        except Exception:
+            pass
+    if surface == "local" and _port_open(7002):
+        env["HUGPY_BASE"] = _LOCAL_HUGPY_FRONT      # opencode's ~84 KB requests need the local front
+    lines = ["# seat env from the station process (not tmux's inherited global env)"]
+    lines += [f"export {k}={shlex.quote(v)}" for k, v in env.items() if v]
+    return "\n".join(lines) + "\n"
+
+
+# Anything longer than this rides in a launch file, never in the tmux argv.
+# (tmux's hard limit is ~16 KB; the seat prelude alone is several KB.)
+_SEAT_LAUNCH_INLINE_MAX = 2000
+_SEAT_LAUNCH_KEEP_S = 24 * 3600
+
+
+def _seat_launch_script(sess, cmd, surface=""):
+    """Park a generated seat command in a per-launch script under
+    <state>/seat-launch (0700, service user), pruning stale ones, with the
+    station's seat env exported at the top. Returns the path, or None when
+    the state dir is unwritable (caller passes inline)."""
+    cmd = _seat_env_block(surface) + cmd
+    try:
+        d = FV_STATE_HOME / "seat-launch"
+        d.mkdir(parents=True, exist_ok=True)
+        os.chmod(d, 0o700)
+        now = time.time()
+        for old in d.glob(sess + "-*.sh"):
+            try:
+                if now - old.stat().st_mtime > _SEAT_LAUNCH_KEEP_S:
+                    old.unlink()
+            except OSError:
+                pass
+        p = d / f"{sess}-{int(now)}-{os.getpid()}.sh"
+        tmp = p.with_suffix(".sh.tmp")
+        tmp.write_text("#!/bin/bash\n# generated by hugpy-station for tmux session " + sess
+                       + " — safe to delete once the seat is up\n" + cmd + "\n", encoding="utf-8")
+        os.chmod(tmp, 0o700)
+        os.replace(tmp, p)
+        return p
+    except OSError as e:
+        print(f"seat-launch script for {sess} not written ({e}); passing inline", file=sys.stderr)
+        return None
+
+
+def _seat_launch_remote(sess, cmd):
+    """The remote form: a short shell that writes the script (base64 payload,
+    ~1.4x the command) to the locus user's own ~/.config/hugpy-station/seat-launch
+    and execs it. The outer lxc/ssh argv can carry ~128 KB, tmux inside the
+    guest only ever sees `bash <file>`."""
+    import base64 as _b64
+    payload = _b64.b64encode(("#!/bin/bash\n" + cmd + "\n").encode("utf-8")).decode("ascii")
+    stamp = f"{int(time.time())}-{os.getpid()}"
+    return ('d="$HOME/.config/hugpy-station/seat-launch"; mkdir -p "$d"; chmod 700 "$d"; '
+            f'f="$d/{sess}-{stamp}.sh"; printf %s {payload} | base64 -d > "$f.tmp" && chmod 700 "$f.tmp" && mv -f "$f.tmp" "$f"; '
+            f'find "$d" -name {shlex.quote(sess + "-*.sh")} -mmin +1440 -delete 2>/dev/null; '
+            'exec bash "$f"')
 
 
 def _surface_key(surface: str, ground_vm: str, session: str = "", backend: str = "") -> str:
@@ -4420,9 +8800,35 @@ async def term_backends(request):
             # model backends run in the grounding VM — probe there.
             avail = (vm_avail[argv0] if vm_avail is not None and s != "shell"
                      else bool(shutil.which(argv0)))
+            # MCT is a communication mode over the selected native frontier
+            # terminal, so its availability follows that native terminal.
+            if s == "frontier" and key == "mct":
+                native_cmds = [spec["backends"].get(n, "") for n in ("claude-code", "codex")]
+                native_argvs = [shlex.split(c)[0] for c in native_cmds if c]
+                avail = any((vm_avail[a] if vm_avail is not None else bool(shutil.which(a)))
+                            for a in native_argvs)
             out[s]["backends"][key] = {"available": avail}
     out["frontier_enabled"] = _frontier_enabled()
     out["b_enabled"] = _b_enabled()
+    # t-serve: which keeper surface LEADS. "serve" = abstract-claude serve at
+    # /ac/ (the default, whenever it answers /api/state); the tmux backends stay
+    # listed and selectable as explicit, non-default "terminal seat (tmux)"
+    # choices — backend_labels is what the picker should show for them.
+    # 1.0.101: ?vm=<locus> reports THAT locus's serve (ac-loci.json) as its
+    # keeper surface; the host seat and unknown names keep this host's serve.
+    surface_now, ac = await _keeper_surface_now(ground_vm if (req_vm and req_vm == ground_vm) else "")
+    out["keeper_surface"] = surface_now
+    out["ac_serve"] = ac
+    if "frontier" in out:
+        out["frontier"]["keeper_surface"] = surface_now
+        out["frontier"]["serve"] = ac
+        labels = dict(TMUX_SEAT_LABELS)
+        # t296: the picker lists the serve console as its FIRST frontier entry.
+        # It is a surface, not a TERM_SURFACES backend (nothing spawns it as a
+        # PTY command), so it appears only as a label + the frontier.serve block
+        # above — never in frontier.backends.
+        labels["serve"] = ac.get("label") or "Serve console"
+        out["frontier"]["backend_labels"] = labels
     if ground_vm:
         out["grounded_in"] = ground_vm
     return web.json_response(out)
@@ -4452,6 +8858,14 @@ async def ws_hostterm(request):
     if surface not in TERM_SURFACES:
         surface = "frontier"
     spec = TERM_SURFACES[surface]
+    if backend not in spec.get("backends", {}):
+        backend = spec.get("default", "")
+    # MCT is a communication method over the selected frontier model. Its
+    # native terminal remains the same persistent seat (Claude Code or Codex).
+    native = (request.query.get("native") or "claude-code").strip().lower()
+    if native not in ("claude-code", "codex"):
+        native = "claude-code"
+    launch_backend = native if surface == "frontier" and backend == "mct" else backend
     # The SPA's active VM: every model surface follows it (grounding rule —
     # each VM's A/B/local are ITS OWN, living and grounding in that VM).
     # "@keeper" is the shell surface's host-keeper seat; unknown names blank.
@@ -4479,7 +8893,7 @@ async def ws_hostterm(request):
     if surface != "shell" and ground_vm:
         surf_key += "@" + ground_vm
     if surface != "shell":
-        surf_key += "#" + (backend or spec.get("default", ""))
+        surf_key += "#" + (launch_backend or spec.get("default", ""))
     # shell instances (t5): ?inst=N (N>=2) is its OWN PTY record; inst 1 keeps
     # the bare key so existing sessions/URLs are unchanged.
     try:
@@ -4495,16 +8909,25 @@ async def ws_hostterm(request):
         # name) does it remain the host keeper seat (vm_mgr, deliberate).
         term_cmd = ""
         vm = req_vm
-        if vm == "@keeper":
+        sh_inner = ""; sh_kind = ""; sh_ssh = ""   # persist: the shell to run IN the locus
+        tmux_name = (request.query.get("tmux") or "").strip().lower()
+        if tmux_name and _PULL_NAME_RE.match(tmux_name):
+            # SESSION-PULL-PATCH 2026-09-02: a pulled / jump-in seat — ATTACH to its tmux session on
+            # the keeper socket (the seat itself lives on, detached, when the
+            # pane closes). Host-side by definition: the seat was spawned here.
+            term_cmd = (f"tmux -L {KEEPER_TMUX_SOCK} " + _TMUX_OPTS
+                        + "attach -t " + shlex.quote("=" + tmux_name))
+            surf_key = "shell-tmux:" + tmux_name
+        elif vm == "@keeper":
             # 1.0.41b (operator): the SHELL surface is a shell — a plain login
             # shell on THIS host as the service user (the host's own seat).
             # Claude on the host is the frontier surface's claude-code backend
             # (host-grounded), not something the shell tab silently starts.
-            term_cmd = "bash -l"
+            sh_inner = "exec bash -l"; sh_kind = "host"
             surf_key = "shell:@keeper"
         elif vm and _ssh_host(vm):
             # ⇅ ssh host: the shell IS ssh (interactive — password login allowed)
-            term_cmd = _ssh_shell_cmd(_ssh_host(vm))
+            sh_inner = "exec bash -l"; sh_kind = "ssh"; sh_ssh = _ssh_shell_cmd(_ssh_host(vm))
             surf_key = "shell-ssh:" + vm
         elif vm and vm in await known_names():
             if backend == "ssh":
@@ -4520,37 +8943,79 @@ async def ws_hostterm(request):
                     fleet_key = FV_STATE_HOME / "fleet_ssh_key"
                     ident = (f"-o IdentitiesOnly=yes -i {shlex.quote(str(fleet_key))} "
                              if fleet_key.is_file() else "")
-                    term_cmd = ("ssh -o StrictHostKeyChecking=no "
-                                "-o UserKnownHostsFile=/dev/null "
-                                f"-o LogLevel=ERROR {ident}ubuntu@{ip}")
+                    sh_ssh = ("ssh -t -o StrictHostKeyChecking=no "
+                              "-o UserKnownHostsFile=/dev/null "
+                              f"-o LogLevel=ERROR {ident}ubuntu@{ip}")
+                    sh_inner = "exec bash -l"; sh_kind = "ssh"
                     surf_key = "shell-ssh:" + vm
-            if not term_cmd:
-                inner = ("command -v station >/dev/null 2>&1 && exec station shell"
-                         "; exec bash -l")
-                term_cmd = (f"lxc exec {vm} -- sudo -u ubuntu -H bash -lc "
-                            + shlex.quote(inner))
+            if not sh_kind:
+                sh_inner = ("command -v station >/dev/null 2>&1 && exec station shell"
+                            "; exec bash -l")
+                sh_kind = "lxc"
                 surf_key = "shell:" + vm
         if inst > 1:
             surf_key += "#" + str(inst)
+        # PERSIST (2026-09-18): back the shell with tmux IN THE LOCUS on a
+        # dedicated `shell` socket so it survives detach AND a station restart
+        # — an actual terminal in the locus, like the keeper seats. Bare-shell
+        # fallback when the locus lacks tmux. The pulled `shell-tmux:` case is
+        # already a tmux attach; left as-is. One shared session per (locus,
+        # inst): reopening reattaches; extra shells come from inst (2..32).
+        if not term_cmd and sh_inner:
+            shname = "sh-" + (re.sub(r"[^A-Za-z0-9]+", "-",
+                              surf_key.split(":", 1)[-1]).strip("-") or "x")
+            persist = _shell_persist(shname, sh_inner, scope=(sh_kind == "host"))
+            if sh_kind == "host":
+                term_cmd = "bash -lc " + shlex.quote(persist)
+            elif sh_kind == "lxc":
+                term_cmd = (f"lxc exec {shlex.quote(vm)} -- sudo -u ubuntu -H bash -lc "
+                            + shlex.quote(persist))
+            elif sh_kind == "ssh":
+                term_cmd = sh_ssh + " bash -lc " + shlex.quote(shlex.quote(persist))
     else:
-        term_cmd = (spec["backends"].get(backend)
+        term_cmd = (spec["backends"].get(launch_backend)
                     or spec["backends"].get(spec["default"], ""))
         # $FLEETVIEW_TERM_CMD is the launcher's historic HOST knob — it only
         # applies to host-grounded frontier launches, never inside a VM.
         if (surface == "frontier" and not ground_vm
                 and backend in ("", spec["default"])):
-            term_cmd = os.environ.get("FLEETVIEW_TERM_CMD", "").strip() or term_cmd
+            # 1.0.85: the pre-1.0.85 launcher exported the legacy default
+            # "hugpy-agent mct" (the DEPRECATED broker) unconditionally, which
+            # replaced claude-code on every host seat while the UI still said
+            # claude-code. That value is ignored here; an explicit operator
+            # override ("claude" or any other command) is still honoured.
+            _fv = os.environ.get("FLEETVIEW_TERM_CMD", "").strip()
+            if _fv == "hugpy-agent mct":
+                _fv = ""
+            term_cmd = _fv or term_cmd
         if term_cmd == "claude":   # Claude Code = the fresh templated A seat
             # bash -lc so the seat prelude runs under bash wherever it lands.
-            inner = "bash -lc " + shlex.quote(_claude_seat_cmd("frontier"))
+            inner = "bash -lc " + shlex.quote(_claude_seat_cmd(
+                "frontier", "mct" if (surface == "frontier" and backend == "mct") else "claude-code"))
+        elif term_cmd == "codex":
+            # Keep the locus user's Codex auth/config and native model picker.
+            # Pass standing guidance as configuration, without submitting a turn.
+            guidance = _frontier_directive_text()[0]
+            handoff = _frontier_handoff_pending()
+            if handoff:
+                guidance += "\n\n" + handoff
+            inner = _gpt_launch_cmd(guidance, remote=bool(ground_vm))
+        elif term_cmd == "hugpy-agent harness":
+            # A persistent OpenCode frontier seat backed by Hugpy. Its fleet
+            # model is a launch setting, including a model served by a local
+            # worker; the harness refreshes OpenCode's model map.
+            model = _frontier_models().get("hugpy", "")
+            inner = "hugpy-agent harness" + (" --model " + shlex.quote(model) if model else "")
         else:
             inner = term_cmd
+        if "abstract-claude mct " in inner:
+            inner = "MCT_LOCUS=" + shlex.quote(ground_vm or _station_locus() or "keeper") + " " + inner
         # One keeper per station: attach to (or create) the persistent tmux
         # session instead of spawning a second process. The mct workspace is
         # still injected below, textually, inside this wrapper's quoting.
-        tmux_sess = _tmux_session_for(surface, backend)
+        tmux_sess = _tmux_session_for(surface, launch_backend)
         if tmux_sess:
-            inner = _tmux_persist(tmux_sess, inner)
+            inner = _tmux_persist(tmux_sess, inner, remote=bool(ground_vm), surface=surface)
         # Seat the surface in its station (no-op when host-grounded).
         term_cmd = _in_vm(inner, ground_vm)
     if surface == "frontier" and "abstract-claude mct" in term_cmd:
@@ -4566,15 +9031,32 @@ async def ws_hostterm(request):
             await _push_mct_to_locus(ground_vm)
             term_cmd = term_cmd.replace("{ws}", "~/.config/hugpy-station/mct2/repl")
         else:
-            ws2 = str(FV_STATE_HOME / "mct2" / "repl")
+            # mct v2: the canonical workspace (FV_MCT_WS / active session) —
+            # the same dir /api/b/guidance writes, so a guidance update reaches
+            # the seat. The retired mct2/repl dir is migrated once by _bg_user_path.
+            ws2 = str(_active_ws())
             term_cmd = term_cmd.replace("{ws}", ws2)
             # the directive reaches mct via <ws>/operator-guidance.md, composed
-            # fresh at every launch
+            # fresh at every launch — and the session init prompt rides in it
+            # exactly once (1.0.65): consumed right after it is composed.
             _render_guidance(Path(ws2))
+            _frontier_handoff_consume("mct launch")
         _m2 = _frontier_models().get("mct", "")
         if _m2 and "--model" not in term_cmd:
             term_cmd = term_cmd.replace("abstract-claude mct ",
                                         "abstract-claude mct --model " + _m2 + " ", 1)
+        # Per-backend session dirs (operator 2026-09-10): LABEL mct's per-launch
+        # config dir (~/.claude-sessions/<stamp>-<pid>-mct) so the scoped seat
+        # wipe can target ONLY mct's dirs — mirroring claude-code's
+        # AC_SESSION_LABEL=frontier (set in _claude_seat_cmd). abstract-claude's
+        # cmd_mct → fresh_session → new_session_dir reads AC_SESSION_LABEL for the
+        # dir suffix. Injected once, before the invocation, inside whatever
+        # tmux/VM wrapping already applied. Caveat: only mct seats launched AFTER
+        # this change get the -mct suffix; pre-existing unlabeled mct dirs stay
+        # unmatched by the wipe glob (harmless — they are ephemeral per-launch).
+        if "AC_SESSION_LABEL=" not in term_cmd:
+            term_cmd = term_cmd.replace("abstract-claude mct ",
+                                        "AC_SESSION_LABEL=mct abstract-claude mct ", 1)
     if term_cmd:
         try:
             argv0 = shlex.split(term_cmd)[0]
@@ -4643,18 +9125,23 @@ async def ws_hostterm(request):
             await ws.close()
             return ws
         FV_SESSIONS[surf_key] = sid
-        FV_BACKENDS[sid] = backend or spec.get("default", "") if surface != "shell" else backend
+        FV_BACKENDS[sid] = launch_backend
     await ws.send_str(json.dumps({"t": "sid", "sid": sid}))
-    sess.attach(ws)
+    mediated = surface == "frontier" and backend == "mct"
+    if not mediated:
+        sess.attach(ws)
     try:
         async for msg in ws:
             if msg.type == WSMsgType.BINARY:
-                sess.write(msg.data)
+                if not mediated:
+                    sess.write(msg.data)
             elif msg.type == WSMsgType.TEXT:
                 try:
                     ctl = json.loads(msg.data)
                 except ValueError:
-                    sess.write(msg.data.encode()); continue
+                    if not mediated:
+                        sess.write(msg.data.encode())
+                    continue
                 if ctl.get("t") == "size":
                     _set_winsize(sess.master, int(ctl["rows"]), int(ctl["cols"]))
                 elif ctl.get("t") == "scroll":
@@ -4665,7 +9152,7 @@ async def ws_hostterm(request):
                     # n>0 = back/up (enters copy-mode, -e auto-exits at the
                     # bottom), n<0 = forward/down, cancel = jump back live
                     # (sent when the operator types while scrolled).
-                    tsess = _tmux_session_for(surface, backend)
+                    tsess = _tmux_session_for(surface, launch_backend)
                     if tsess:
                         try:
                             n = max(-120, min(120, int(ctl.get("n") or 0)))
@@ -4711,7 +9198,7 @@ async def ws_hostterm(request):
                     # Explicit restart of THIS backend: kill only ITS OWN named
                     # tmux session (never the surface's other backends), then
                     # ack so the client reconnects only after the kill lands.
-                    tsess = _tmux_session_for(surface, backend)
+                    tsess = _tmux_session_for(surface, launch_backend)
                     if tsess:   # the attach client dying leaves tmux alive
                         await _locus_run(ground_vm, f"tmux -L {KEEPER_TMUX_SOCK} "
                                          f"kill-session -t ={tsess}", timeout=15)
@@ -4728,7 +9215,8 @@ async def ws_hostterm(request):
                 break
     finally:
         if sess.alive:
-            sess.detach()      # surface persists; the client may come back
+            if sess.ws is ws:
+                sess.detach()      # surface persists; the client may come back
         else:
             SESSIONS.pop(sid, None)
             if FV_SESSIONS.get(surf_key) == sid:
@@ -5018,6 +9506,23 @@ async def fleet_message_post(request):
         return web.json_response({"ok": True, "id": row["id"], "to": to})
     if to not in await known_names():
         return web.json_response({"error": f"unknown station {to}"}, status=404)
+    if _ssh_host(to):
+        # 2026-09-03: an ssh/toolserver locus (hugpy, ae-vm-mgr, ...) has no lxc
+        # exec path. Its channel is the toolserver board: comms/ping posts a
+        # [ping] request on THAT locus's board, and the locus's own station
+        # sync (_deliver_pings) turns it into keeper mail + a pane nudge.
+        sender = _station_locus() or re.sub(r"[^a-z0-9-]", "-", frm.lower()) or "keeper"
+        try:
+            res = await _ts_call(request.app, "comms/ping",
+                                 {"to": to, "text": text, "from_": sender,
+                                  "kind": "message"}, timeout=15)
+        except Exception as e:  # noqa: BLE001 — toolserver down / rejected id
+            audit(request, "fleet-message", f"to={to} via=board failed: {e}", ok=False)
+            return web.json_response({"ok": False, "error": f"board ping failed: {e}"}, status=502)
+        bid = (res or {}).get("id") if isinstance(res, dict) else None
+        audit(request, "fleet-message", f"to={to} from={sender} via=board id={bid}", ok=True)
+        return web.json_response({"ok": True, "id": bid, "to": to, "via": "board",
+                                  "pinged": False})
     row = _mail_row(frm, to, text)      # no unread: nothing in-VM marks read
     rc, out, err = await _run(
         "lxc", "exec", to, "--", "sudo", "-u", "ubuntu", "-H",
@@ -5129,6 +9634,8 @@ async def _fleet_mail_loop(app):
 
 
 async def _start_fleet_mail(app):
+    if os.environ.get("STATION_DEV_QUIET") == "1":   # dev copy: never act on live seats
+        return
     app["fleet_mail"] = asyncio.create_task(_fleet_mail_loop(app))
 
 
@@ -5212,11 +9719,71 @@ def _todo_b_comment(item_id, text):
                 "detail": {"by": "B", "text": str(text)[:200]}})
 
 
-def _frontier_dispatch(tag, a_prompt):
+# --- reminder/hand-off dispatch surface (1.0.92) -----------------------------
+# Until 1.0.91 every composed reminder was TYPED into the live frontier pty as
+# a pointer line. With the keeper surface on `serve` that is simply wrong (the
+# pty is not the keeper), and on a handoff-roll the loop composed ONE line PER
+# OPEN TODO, so the operator saw seventeen pointer lines land in the input in a
+# single burst (2026-09-16 report). Delivery is now the toolserver prompt
+# queue, collapsed to ONE item per cycle; the prompt-inbox dirs stay as the
+# audit copy (capped, see _prompt_inbox_sweep). The pty write survives only for
+# a tmux keeper surface with STATION_REMINDER_PTY=1 explicitly set — in serve
+# mode it is never touched.
+STATION_REMINDER_PTY = ((os.environ.get("STATION_REMINDER_PTY") or "").strip().lower()
+                        in ("1", "on", "yes", "true"))
+PROMPT_INBOX_KEEP = int(os.environ.get("STATION_PROMPT_INBOX_KEEP") or "50")
+_DISPATCH_BATCH = []          # composed this cycle; flushed as one queued prompt
+_DISPATCH_SURFACE = "serve"   # refreshed once per cycle by _todo_reminder_cycle
+_DISPATCH_SERVE_OK = None     # serve answered /api/state this cycle (None = not probed)
+
+
+def _dispatch_note(sent):
+    """t360 (2026-09-16): the comment suffix after a hand-off names where it
+    actually went. `sent` only ever means "typed into a tmux pty", so on the
+    serve surface every reminder used to end in "saved to prompt-inbox (no
+    frontier seat live)" although the batch reached the keeper through the
+    toolserver prompt queue (its reminders panel + SessionStart hook)."""
+    if sent:
+        return " \u00b7 typed into the frontier terminal"
+    if _DISPATCH_SURFACE == "serve":
+        if _DISPATCH_SERVE_OK is False:
+            return " \u00b7 queued for the keeper serve chat (serve is DOWN right now; it drains when it is back)"
+        return " \u00b7 queued for the keeper serve chat (reminders panel)"
+    return " \u00b7 saved to prompt-inbox (no frontier terminal running \u2014 it picks this up when opened)"
+
+
+def _dispatch_state_path():
+    return FV_STATE_HOME / "handoff-dispatch.json"
+
+
+def _prompt_inbox_sweep(keep=None):
+    """Retention for the audit copies: keep the newest `keep` dirs, drop older.
+    Names are timestamp-prefixed, so a lexical sort is a chronological sort."""
+    keep = PROMPT_INBOX_KEEP if keep is None else keep
+    try:
+        root = _active_ws() / "prompt-inbox"
+        dirs = sorted((p for p in root.iterdir() if p.is_dir()), key=lambda p: p.name)
+    except OSError:
+        return 0
+    n = 0
+    for p in dirs[:max(0, len(dirs) - max(0, keep))]:
+        try:
+            shutil.rmtree(p)
+            n += 1
+        except OSError:
+            pass
+    return n
+
+
+def _frontier_dispatch(tag, a_prompt, item=None, why=""):
     # flow: docs/flows/todo-push-triage.flow.json (keeper hand-off edge)
-    """Save a composed prompt to the session prompt-inbox and type its pointer
-    into the running frontier terminal (the \u270d-panel file-pointing path).
-    Returns (sent, dst); dst None = could not even save."""
+    """Compose one reminder/hand-off. The prompt.md under the session
+    prompt-inbox is the AUDIT copy (and the pointer the queued item carries);
+    actual delivery is the toolserver prompt queue — this only BUFFERS the
+    entry and _flush_dispatch_batch() submits the whole cycle as one item.
+    Returns (sent, dst); dst None = could not even save. `sent` now means
+    "typed into the pty", which only happens on a tmux surface with
+    STATION_REMINDER_PTY=1; the queue submission is reported separately."""
     ts = time.strftime("%Y%m%d-%H%M%S")
     dst = _active_ws() / "prompt-inbox" / f"{ts}-{tag}"
     try:
@@ -5224,17 +9791,102 @@ def _frontier_dispatch(tag, a_prompt):
         (dst / "prompt.md").write_text(a_prompt, encoding="utf-8")
     except OSError:
         return False, None
+    it = item if isinstance(item, dict) else {}
+    _DISPATCH_BATCH.append({
+        "tag": tag, "id": str(it.get("id") or tag.rsplit("-", 1)[-1]),
+        "title": str(it.get("text") or "")[:160],
+        "status": str(it.get("status") or ""),
+        "ts": int(it.get("ts") or 0), "why": str(why or "")[:240],
+        "path": str(dst / "prompt.md")})
     sent = False
-    try:
-        sess = _frontier_live_session()
-        if sess is not None:
-            pointer = ("Handle the operator prompt at " + str(dst / "prompt.md")
-                       + " — read it via a pull, then respond.")
-            sess.write((pointer + "\r").encode("utf-8"))
-            sent = True
-    except Exception:
-        sent = False
+    if STATION_REMINDER_PTY and _DISPATCH_SURFACE == "tmux":
+        try:
+            sess = _frontier_live_session()
+            if sess is not None:
+                pointer = ("Handle the operator prompt at " + str(dst / "prompt.md")
+                           + " — read it via a pull, then respond.")
+                sess.write((pointer + "\r").encode("utf-8"))
+                sent = True
+        except Exception:
+            sent = False
     return sent, dst
+
+
+async def _flush_dispatch_batch(app):
+    """Collapse this cycle's composed reminders into ONE toolserver prompt.
+    Dedup signature = sorted open-id set + newest item ts; an unchanged open
+    set never requeues (state in <FV_STATE_HOME>/handoff-dispatch.json, plus a
+    cross-check against prompts still pending on the locus, so a restart that
+    loses the file still does not double-queue)."""
+    batch, _DISPATCH_BATCH[:] = list(_DISPATCH_BATCH), []
+    if not batch:
+        return None
+    ids = sorted({e["id"] for e in batch if e.get("id")})
+    max_ts = max([int(e.get("ts") or 0) for e in batch] or [0])
+    sig = hashlib.sha256(("|".join(ids) + "@%d" % max_ts).encode()).hexdigest()[:16]
+    marker = "[station-reminder-batch %s]" % sig
+    sp = _dispatch_state_path()
+    try:
+        prev = json.loads(sp.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        prev = {}
+    if isinstance(prev, dict) and str(prev.get("sig")) == sig:
+        return None                    # same open set, same newest ts: no requeue
+    locus = _station_locus()
+    if not locus or app is None:
+        return None
+    stale = []                         # older batches this one supersedes
+    try:                               # a still-pending copy also counts as queued
+        pend = await _ts_call(app, "prompt/list",
+                              {"locus": locus, "status": "open", "limit": 50})
+        for d in (pend or []):
+            if not isinstance(d, dict):
+                continue
+            t = str(d.get("text") or "")
+            if marker in t:
+                return None
+            if "[station-reminder-batch " in t and d.get("id"):
+                stale.append(str(d["id"]))
+    except Exception:
+        pass
+    lines = ["%d open items for keeper — queued by the station reminder cycle."
+             % len(batch),
+             "(These are NOT typed into your terminal. Pull each prompt file you "
+             "act on, then update the board item.)", ""]
+    for e in batch:
+        lines.append("- %s: %s" % (e["id"], e["title"] or "(no title)"))
+        if e.get("why"):
+            lines.append("    next: %s" % e["why"])
+        lines.append("    prompt: %s" % e["path"])
+    lines += ["", marker]
+    body = "\n".join(lines)
+    try:
+        doc = await _ts_call(app, "prompt/submit",
+                             {"locus": locus, "text": body, "files": [],
+                              "by": _station_id(), "session": _active_session(),
+                              "source": "station-reminder"}, timeout=30)
+    except Exception:
+        return None
+    # 1.0.97 (t338): the new batch carries the whole open set, so the older
+    # station-reminder prompts are superseded — close them (prompt/done also
+    # closes their '[prompt] …' board rows) instead of letting them pile up.
+    for pid in stale:
+        try:
+            await _ts_call(app, "prompt/done", {"id": pid, "status": "done"}, timeout=15)
+        except Exception:
+            pass
+    try:
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        sp.write_text(json.dumps({"sig": sig, "ids": ids, "max_ts": max_ts,
+                                  "ts": int(time.time()),
+                                  "prompt_id": (doc or {}).get("id")}, indent=2) + "\n",
+                      encoding="utf-8")
+    except OSError:
+        pass
+    _todo_hist({"event": "reminder", "id": "", "type": "batch",
+                "detail": {"action": "queued", "count": len(batch), "ids": ids,
+                           "prompt_id": (doc or {}).get("id")}})
+    return doc
 
 
 async def _todo_triage(item, trigger, comment_text=None):
@@ -5280,15 +9932,13 @@ async def _todo_triage(item, trigger, comment_text=None):
                         f"({item.get('type')}): {item.get('text')!r}. Handle it "
                         "and keep the board item's status and comments updated "
                         "via the todo tool as you work."))
-        sent, dst = _frontier_dispatch(f"triage-{item.get('id')}", a_prompt)
+        sent, dst = _frontier_dispatch(f"triage-{item.get('id')}", a_prompt,
+                                       item=item, why=reason)
         if dst is None:
             return
         _todo_b_comment(item.get("id"),
                         "→ frontier: " + (reason or "needs the frontier model")
-                        + (" · dispatched to the running frontier terminal"
-                           if sent else
-                           " · saved to prompt-inbox (no frontier terminal running"
-                           " — it picks this up when opened)"))
+                        + _dispatch_note(sent))
 
 
 # --- ⏱ board reminders — the vm_mgr push cadence, redundancy-corrected ----
@@ -5427,8 +10077,9 @@ def _watch_update(item_id, mut):
         pass
 
 
-async def _todo_reminder_cycle():
+async def _todo_reminder_cycle(app=None):
     # flow: docs/flows/todo-push-triage.flow.json
+    global _DISPATCH_SURFACE, _DISPATCH_SERVE_OK
     state, _err = _mct_todo_read()
     if state is None:
         return
@@ -5437,10 +10088,38 @@ async def _todo_reminder_cycle():
     now = int(time.time())
     loop = asyncio.get_event_loop()
     name = _active_session()
+    try:
+        _DISPATCH_SURFACE, _ac = await _keeper_surface_now()
+        _DISPATCH_SERVE_OK = bool((_ac or {}).get("ok"))
+    except Exception:
+        _DISPATCH_SURFACE = "serve"    # unknown surface: never type into a pty
+        _DISPATCH_SERVE_OK = None
+    # The board file is the UI's source (t186, file-primary) but it is NOT
+    # updated when an item is closed through the toolserver's todo_done — which
+    # is how the keeper actually closes things. That drift is why the
+    # 2026-09-16 burst re-dispatched t130/t135 hours after they were closed.
+    # Cross-check the central board and treat "done there" as done.
+    closed = set()
+    if app is not None:
+        try:
+            central = await _ts_call(app, "todo/list",
+                                     {"locus": _station_locus(), "status": "done",
+                                      "type": "", "limit": 500}, timeout=10)
+            closed = {str(d.get("id")) for d in (central or [])
+                      if isinstance(d, dict) and d.get("id")}
+        except Exception:
+            closed = set()
     for it in items:
         if (it.get("id") == _RELAY_ID
                 or it.get("type") not in ("todo", "request", "operator")
-                or it.get("status") not in ("open", "doing")):
+                or it.get("status") not in ("open", "doing")
+                or str(it.get("id")) in closed
+                # 1.0.97 (t338): a '[prompt] …' row is the board mirror of a
+                # queued prompt (prompt/submit) — a pointer, not work. Reminding
+                # about it re-queued the reminder cycle's OWN batches (t317 ->
+                # p20 -> t329 ...). prompt/done closes these rows.
+                or str(it.get("source") or "") == "prompt.submit"
+                or str(it.get("text") or "").startswith("[prompt]")):
             continue
         w = dict(it.get("watch") or {})
         comments = [c for c in (it.get("comments") or []) if isinstance(c, dict)]
@@ -5480,12 +10159,12 @@ async def _todo_reminder_cycle():
                         "Execute it, or set the flag precisely (completed / "
                         "in_process{detail, completion_indicator, log} / "
                         "operator_needed{reason} / fail{reason}) with a board comment.")
-            sent, dst = _frontier_dispatch(f"handoff-{it['id']}", a_prompt)
+            sent, dst = _frontier_dispatch(f"handoff-{it['id']}", a_prompt,
+                                           item=it, why=why)
             if dst is None:
                 return
             _watch_update(it["id"], {"last_dispatch": now, "dispatches": int(w.get("dispatches") or 0) + 1})
-            _todo_b_comment(it["id"], "→ keeper: " + why
-                            + ("" if sent else " · saved to prompt-inbox (no frontier seat live)"))
+            _todo_b_comment(it["id"], "→ keeper: " + why + _dispatch_note(sent))
             _todo_hist({"event": "reminder", "id": it["id"], "type": it.get("type"),
                         "detail": {"action": "handoff", "reason": why}})
         if flag:
@@ -5565,7 +10244,9 @@ async def _todo_reminder_cycle():
                 [{"role": "system", "content": _REMIND_SYS % (name, it["id"])},
                  {"role": "user", "content": json.dumps(payload)}], 700)
         except Exception:
-            return                       # gateway down: fail CLOSED, no blind ping
+            break                        # gateway down: fail CLOSED, no blind ping
+                                         # (break, not return, so what is already
+                                         #  composed still reaches the queue below)
         v = _parse_json_obj(reply)
         action = str(v.get("action") or "").strip().lower()
         reason = str(v.get("reason") or "").strip()[:300]
@@ -5583,15 +10264,15 @@ async def _todo_reminder_cycle():
                             "Either make concrete progress now or state "
                             "precisely what is missing; update the board item "
                             "either way."))
-            sent, dst = _frontier_dispatch(f"remind-{it['id']}", a_prompt)
+            sent, dst = _frontier_dispatch(f"remind-{it['id']}", a_prompt,
+                                           item=it, why=reason)
             if dst is None:
                 continue
             _watch_update(it["id"], {"dispatches": n + 1, "last_dispatch": now})
             _todo_b_comment(it["id"],
                             f"\u23f1 reminder \u2192 frontier (attempt {n + 1}): "
                             + (reason or "still open past the push cadence")
-                            + ("" if sent else " · saved to prompt-inbox "
-                               "(no frontier terminal running)"))
+                            + _dispatch_note(sent))
             _todo_hist({"event": "reminder", "id": it["id"], "type": it.get("type"),
                         "detail": {"action": "remind", "reason": reason,
                                    "attempt": n + 1}})
@@ -5608,6 +10289,12 @@ async def _todo_reminder_cycle():
             _todo_hist({"event": "reminder", "id": it["id"], "type": it.get("type"),
                         "detail": {"action": action, "reason": reason,
                                    "attempt": n}})
+    # one queued item for the whole cycle, then cap the audit copies
+    try:
+        await _flush_dispatch_batch(app)
+    except Exception:
+        _DISPATCH_BATCH[:] = []
+    _prompt_inbox_sweep()
 
 
 async def _todo_reminder_loop(app):
@@ -5615,8 +10302,16 @@ async def _todo_reminder_loop(app):
     while True:
         await asyncio.sleep(_REMIND_TICK)
         try:
+            await _loops_cycle(app)          # ⚠ loop detector rides the same tick (1.0.118)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+        if not FV_TODO_REMIND:
+            continue
+        try:
             _mint_cfg_relay()
-            await _todo_reminder_cycle()
+            await _todo_reminder_cycle(app)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -5624,15 +10319,275 @@ async def _todo_reminder_loop(app):
 
 
 async def _start_reminders(app):
+    if os.environ.get("STATION_DEV_QUIET") == "1":   # dev copy: never act on live seats
+        return
     if FV_TODO_REMIND:
         _mint_cfg_relay()
-        app["_todo_reminder"] = asyncio.create_task(_todo_reminder_loop(app))
+    # the loop starts even with reminders off: the ⚠ loop detector needs the tick
+    app["_todo_reminder"] = asyncio.create_task(_todo_reminder_loop(app))
 
 
 async def _stop_reminders(app):
     t = app.get("_todo_reminder")
     if t is not None:
         t.cancel()
+
+
+# --- ⚠ crash-loop / retry-loop detector (1.0.118) ---------------------------
+# Operator, 2026-09-29: "I've never once seen the station inform me of any
+# crash loops." Three loops ran silently that day (a PEFT adapter load retried
+# forever on a permanent error, a health probe pinging Coder-Next on a timer,
+# the serve reducer stacking JSON calls on the one Coder-Next slot). The pure
+# logic lives in loop_detector.py (tested over fixtures); this block only
+# FETCHES (systemctl show, central /llm/jobs?live=1, /api/llm/queue,
+# /llm/calls, /llm/workers) and ACTS: one ✉ keeper mail per loop (30 min
+# cooldown), one board todo per loop with the exact command, cleared when the
+# loop stops. GET /api/loops serves the set to the ⚠ strip and other tools.
+try:
+    import loop_detector as _loopdet
+except ImportError:                                  # pragma: no cover — packaging error
+    _loopdet = None
+
+LOOPS_STATE_PATH = FV_STATE_HOME / "loops.json"
+_LOOP_UNITS_USER = [u.strip() for u in (os.environ.get("STATION_LOOP_UNITS_USER") or
+                    "abstract-claude-serve@station.service,hugpy-station-web.service,"
+                    "hugpy-station-board.service,7006_hugpy_station.service,"
+                    "hugpy-agent-serve.service").split(",") if u.strip()]
+_LOOP_UNITS_SYSTEM = [u.strip() for u in (os.environ.get("STATION_LOOP_UNITS_SYSTEM") or
+                      "7002_hugpy_api.service,7004_hugpy_toolserver.service").split(",") if u.strip()]
+# 1.0.123: PEER loci on this host — another station user's own units (tonight's
+# 120-restart hugpy-station-web.service belonged to user hugpy and was invisible to
+# a detector that only read its own user manager). Peers = STATION_LOOP_PEER_USERS
+# (default "hugpy") ∪ ac-loci.json names that are local accounts served on loopback.
+_LOOP_PEER_USERS_ENV = [u.strip() for u in (os.environ.get("STATION_LOOP_PEER_USERS", "hugpy")).split(",")
+                        if u.strip()]
+_LOOP_PEER_UNITS = [u.strip() for u in (os.environ.get("STATION_LOOP_PEER_UNITS") or
+                    "hugpy-station-web.service,abstract-claude-serve-station.service,"
+                    "hugpy-agent-serve.service").split(",") if u.strip()]
+_LOOP_PEER_METHOD = {}                               # user -> "sudo-u" | "machine" | "unreachable"
+_LOOP_CENTRAL = (os.environ.get("STATION_LOOP_CENTRAL") or _LOCAL_HUGPY_FRONT).rstrip("/")
+_LOOP_CALLS_LIMIT = int(os.environ.get("STATION_LOOP_CALLS_LIMIT") or "200")
+_LOOPS = None
+_LOOPS_BUSY = False
+
+
+def _loops():
+    global _LOOPS
+    if _LOOPS is None and _loopdet is not None:
+        cfg = {}
+        dc = os.environ.get("STATION_LOOP_DECLARED_CALLERS")
+        if dc is not None:
+            cfg["declared_callers"] = tuple(x.strip() for x in dc.split(",") if x.strip())
+        if os.environ.get("STATION_LOOP_CALLER_BUDGET"):
+            cfg["caller_token_budget_day"] = int(os.environ["STATION_LOOP_CALLER_BUDGET"])
+        _LOOPS = _loopdet.LoopDetector(state_path=str(LOOPS_STATE_PATH), **cfg)
+    return _LOOPS
+
+
+def _loops_parse_show(text, scope):
+    """`systemctl show -p Id,NRestarts,ActiveState,SubState,Result u1 u2 …`
+    prints one KEY=VALUE block per unit, blank-line separated."""
+    rows, cur = [], {}
+    for ln in (text or "").splitlines() + [""]:
+        ln = ln.strip()
+        if not ln:
+            if cur.get("Id"):
+                if cur.get("LoadState") == "not-found":
+                    cur = {}
+                    continue
+                rows.append({"unit": cur["Id"], "scope": scope,
+                             "nrestarts": cur.get("NRestarts") or 0,
+                             "active_state": cur.get("ActiveState") or "",
+                             "sub_state": cur.get("SubState") or "",
+                             "result": cur.get("Result") or ""})
+            cur = {}
+            continue
+        k, _, v = ln.partition("=")
+        cur[k] = v
+    return rows
+
+
+def _loops_peer_users():
+    import pwd
+    me = getpass.getuser()
+    names = list(_LOOP_PEER_USERS_ENV)
+    try:
+        for name, v in (_ac_loci() or {}).items():
+            url = str((v or {}).get("url") or "")
+            if "127.0.0.1" in url or "localhost" in url:
+                names.append(str(name))
+    except Exception:                                    # noqa: BLE001
+        pass
+    out = []
+    for n in names:
+        if n == me or n in (u for u, _ in out):
+            continue
+        try:
+            out.append((n, pwd.getpwnam(n).pw_uid))
+        except KeyError:                                 # a remote locus, not an account here
+            continue
+    return out
+
+
+async def _loops_peer_units():
+    """Each peer user's station units, read without a password: `sudo -n -u <user>
+    XDG_RUNTIME_DIR=/run/user/<uid> systemctl --user show` (works for vm_mgr on ae),
+    else `systemctl --user -M <user>@ show` (needs polkit/root; kept as fallback)."""
+    rows = []
+    props = ["show", "-p", "Id,LoadState,NRestarts,ActiveState,SubState,Result"] + _LOOP_PEER_UNITS
+    for user, uid in _loops_peer_users():
+        tries = [("sudo-u", ["sudo", "-n", "-u", user, "env", "XDG_RUNTIME_DIR=/run/user/%d" % uid,
+                             "systemctl", "--user"] + props),
+                 ("machine", ["systemctl", "--user", "-M", user + "@"] + props)]
+        if _LOOP_PEER_METHOD.get(user) == "machine":
+            tries.reverse()
+        got = None
+        for method, argv in tries:
+            try:
+                rc, out, _err = await asyncio.wait_for(_run(*argv), timeout=10)
+            except Exception:                            # noqa: BLE001
+                continue
+            parsed = [r for r in _loops_parse_show(out, "user") if r["unit"] in _LOOP_PEER_UNITS]
+            if rc == 0 and "Id=" in (out or ""):
+                got = (method, parsed)
+                break
+        _LOOP_PEER_METHOD[user] = got[0] if got else "unreachable"
+        for r in (got[1] if got else []):
+            r["owner"], r["uid"] = user, uid
+            rows.append(r)
+    return rows
+
+
+async def _loops_units():
+    rows = []
+    for scope, units in (("user", _LOOP_UNITS_USER), ("system", _LOOP_UNITS_SYSTEM)):
+        if not units:
+            continue
+        argv = ["systemctl"] + (["--user"] if scope == "user" else []) + \
+               ["show", "-p", "Id,NRestarts,ActiveState,SubState,Result"] + units
+        try:
+            rc, out, _err = await asyncio.wait_for(_run(*argv), timeout=10)
+        except Exception:                                    # noqa: BLE001 — no systemd / no bus
+            continue
+        # LoadState=not-found units still print a block (NRestarts=0) — harmless
+        rows.extend(r for r in _loops_parse_show(out, scope) if r["unit"] in units)
+    try:
+        rows.extend(await _loops_peer_units())
+    except Exception:                                    # noqa: BLE001
+        pass
+    return rows
+
+
+async def _loops_get(app, path, timeout=6):
+    sess = app.get("proxy_sess")
+    if sess is None:
+        sess = app["proxy_sess"] = aiohttp.ClientSession()
+    async with sess.get(_LOOP_CENTRAL + path, timeout=aiohttp.ClientTimeout(total=timeout)) as r:
+        if r.status != 200:
+            return None
+        return await r.json(content_type=None)
+
+
+def _loops_central_watcher():
+    """True on the ONE station that watches central's shared sources
+    (STATION_LOOP_CENTRAL_WATCHER = a locus name; default the keeper locus)."""
+    want = (os.environ.get("STATION_LOOP_CENTRAL_WATCHER") or KEEPER_TARGET).strip().lower()
+    return _notify_origin() == want
+
+
+async def _loops_cycle(app):
+    """One detector pass. Every source is best-effort: a central that is down
+    simply contributes nothing this tick (the systemd source still runs)."""
+    global _LOOPS_BUSY
+    det = _loops()
+    if det is None or _LOOPS_BUSY:
+        return None
+    _LOOPS_BUSY = True
+    try:
+        now = time.time()
+        try:
+            det.observe_units(await _loops_units(), now)
+        except Exception:                                    # noqa: BLE001
+            pass
+        # 1.0.125 fleet dedupe: central's calls/jobs/queue/workers are ONE shared
+        # source — only the designated central-watcher station reads them (default:
+        # the keeper station); every other station watches its own units/logs only.
+        central = [] if not _loops_central_watcher() else [
+                         ("/llm/jobs?live=1", lambda d: det.observe_jobs((d or {}).get("jobs") or [], now)),
+                         ("/api/llm/queue", lambda d: det.observe_queue(d or {}, now)),
+                         ("/llm/calls?limit=%d" % _LOOP_CALLS_LIMIT,
+                          lambda d: det.observe_calls((d or {}).get("calls") or [], now)),
+                         ("/llm/workers", lambda d: det.observe_workers(d if isinstance(d, list) else [], now))]
+        for path, fn in central:
+            try:
+                fn(await _loops_get(app, path))
+            except Exception:                                # noqa: BLE001 — central down / shape drift
+                continue
+        ev = det.finish_cycle(now)
+        await _loops_act(app, det, ev, now)
+        _b_findings_publish([dict(_b_loop_finding(r), emit_reason="new") for r in ev.get("new") or []])
+        return ev
+    finally:
+        _LOOPS_BUSY = False
+
+
+async def _loops_act(app, det, ev, now):
+    """Loops go through the SAME notifier as findings (keeper_notify.fanout):
+    one ✉ per loop (cooldown), one keeper-board todo, resolved when the loop
+    stops — delivered to the KEEPER from any station. Never raises: rows are
+    only marked when delivery succeeds, so the next cycle retries."""
+    for state in ("mail", "new", "cleared"):
+        for row in ev.get(state) or []:
+            _todo_hist({"event": "loop", "key": row["key"], "source": row["source"],
+                        "identity": row["identity"], "count": row.get("count"), "state": state})
+    if _kn is None:
+        return
+
+    def resolve_note(row):
+        return ("loop stopped %s — auto-resolved by the station loop detector (it saw no "
+                "recurrence for one cycle); reopen if it returns.\n\n%s"
+                % (time.strftime("%Y-%m-%d %H:%M", time.localtime(now)), row.get("detail") or ""))[:2000]
+
+    try:
+        await _kn.fanout(ev, _notify_sink(app), fmt_mail=_loopdet.fmt_mail, fmt_board=_loopdet.fmt_board,
+                         fmt_resolve=resolve_note, now=now, by="station-loops")
+    except Exception:                                    # noqa: BLE001
+        pass
+    if ev.get("new") or ev.get("cleared") or ev.get("mail") or ev.get("updated"):
+        det.save()
+
+
+async def api_loops(request):
+    """GET /api/loops — the current crash/retry loop set: {ok, ts, active:[…],
+    recent:[…] (cleared inside the last hour), config:{thresholds}}. ?refresh=1
+    runs a detector pass first (rate-limited by the busy flag)."""
+    det = _loops()
+    if det is None:
+        return web.json_response({"ok": False, "error": "loop_detector module missing"}, status=503)
+    if request.query.get("refresh") == "1":
+        try:
+            await _loops_cycle(request.app)
+        except Exception:                                    # noqa: BLE001
+            pass
+    snap = det.snapshot()
+    snap["ok"] = True
+    try:
+        snap["findings"] = _notify_book().strip_rows() if _notify_book() is not None else []
+    except Exception:                                    # noqa: BLE001
+        snap["findings"] = []
+    try:
+        snap["config"]["units"] = {"user": _LOOP_UNITS_USER, "system": _LOOP_UNITS_SYSTEM}
+        snap["config"]["central_watcher"] = _loops_central_watcher()
+        snap["config"]["declared_callers"] = list(det.cfg.get("declared_callers") or ())
+        snap["config"]["peers"] = [
+            {"user": u, "uid": uid, "units": _LOOP_PEER_UNITS,
+             "method": _LOOP_PEER_METHOD.get(u, "not-yet-read"),
+             "seen": {k.split("/", 1)[1]: list(v)[-1][1] for k, v in det._units.items()
+                      if k.startswith(u + "/") and v}}
+            for u, uid in _loops_peer_users()]
+    except Exception:                                    # noqa: BLE001
+        pass
+    return web.json_response(snap)
 
 
 async def vm_keeper_alias(request):
@@ -5644,14 +10599,8 @@ async def vm_keeper_alias(request):
     vm = request.match_info["vm"]
     if vm in ("keeper", "@keeper", "host"):
         raise web.HTTPNotFound()          # never recurse into ourselves ("host" = explicit alias, 2026-08-27)
-    if vm not in await known_names() and not _ssh_host(vm):
-        return web.json_response({"ok": False, "error": f"unknown locus: {vm}"}, status=404)
     tail = request.path.split(f"/api/vm/{vm}/", 1)[1]
-    resp = await _wb_request(request, vm, path=f"/api/vm/keeper/{tail}")
-    if resp is not None:
-        return resp
-    return web.json_response(
-        {"ok": False, "error": f"{vm}: workbench console unreachable"}, status=502)
+    return _retired(tail, vm)
 
 
 async def vm_host_alias(request):
@@ -5686,11 +10635,7 @@ async def keeper_todo_history(request):
 
 
 def _todo_keeper_chat(messages, max_tokens):
-    from hugpy_agent.config import load_config
-    from hugpy_agent.gateway import Gateway
-    gw = Gateway.from_config(load_config(overrides=_b_overrides()))
-    res = gw.chat(messages, max_tokens=max_tokens)
-    return (getattr(res, "text", None) or getattr(res, "content", None) or str(res) or "").strip()
+    return _hugpy_chat(messages, max_tokens)
 
 
 def _parse_items_reply(text):
@@ -5920,6 +10865,8 @@ FRONTIER_DIRECTIVE_PATH = FV_STATE_HOME / "frontier-directive.md"
 # directive points A at it, and 🛡 steward → directive shows/edits it.
 FRONTIER_HANDOFF_PATH = FV_STATE_HOME / "frontier-handoff.md"
 FRONTIER_MODELS_PATH = FV_STATE_HOME / "frontier-models.json"
+GPT_CONFIG_PATH = FV_STATE_HOME / "abstract-gpt" / "config.json"
+GPT_SOURCE_ROOT = ROOT.parents[3] / "share" / "modules" / "abstract_gpt" / "src"
 # B's model (the local keeper: todo triage, ✎ prompt-revise, and — at next
 # launch — the mct seat / daemon). Empty = the hugpy package default
 # (DEFAULT_AGENT_BRAIN). The console applies it as a load_config override so a
@@ -5968,7 +10915,9 @@ _MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,80}$")
 # Default frontier model for BOTH seats (operator, 2026-08-20): Fable. "" in
 # frontier-models.json means "Claude Code's own account default" if wanted.
 FRONTIER_MODEL_DEFAULTS = {"mct": "claude-fable-5",
-                           "claude-code": "claude-fable-5"}
+                           "claude-code": "claude-fable-5",
+                           "codex": "",
+                           "hugpy": ""}
 # Claude Code tools that touch the filesystem directly. When the frontier fs
 # switch is MEDIATED these are hard-denied in the claude-code seat's settings
 # (permissions.deny — native Claude Code policy, no hook needed), so A must
@@ -6034,6 +10983,54 @@ def _frontier_models():
     return out
 
 
+def _gpt_config():
+    from gpt_station import read_config
+    return read_config(GPT_CONFIG_PATH)
+
+
+def _gpt_launch_cmd(guidance="", remote=False):
+    from gpt_station import launch_command
+    config = _gpt_config()
+    config["default_model"] = _frontier_models().get("codex", "") or config.get("default_model", "")
+    return launch_command(config, GPT_CONFIG_PATH, guidance, remote=remote)
+
+
+def _gpt_tracker():
+    from gpt_station import tracker
+    return tracker(KEEPER_TMUX_SOCK)
+
+
+async def api_gpt(request):
+    """Persist GPT launch defaults and report the exact live native session."""
+    resp = await _sidecar_proxy(request)
+    if resp is not None:
+        return resp
+    from gpt_station import settings, update_config, wrapper_binary, EFFORTS
+    try:
+        if request.method == "POST":
+            body = await request.json()
+            config = update_config(GPT_CONFIG_PATH, body)
+            if "default_model" in body:
+                models = _frontier_models()
+                models["codex"] = config.get("default_model") or ""
+                FRONTIER_MODELS_PATH.parent.mkdir(parents=True, exist_ok=True)
+                FRONTIER_MODELS_PATH.write_text(json.dumps(models, indent=2) + "\n")
+            audit(request, "gpt-settings", "updated", ok=True)
+        config = _gpt_config()
+        config["default_model"] = _frontier_models().get("codex", "") or config.get("default_model", "")
+        tracker = await asyncio.to_thread(_gpt_tracker)
+        return web.json_response({"settings": settings(config), "efforts": EFFORTS,
+                                  "path": str(GPT_CONFIG_PATH), "session": tracker,
+                                  "dangerous": tracker["unrestricted"],
+                                  "configured_dangerous": settings(config)["dangerous"],
+                                  "wrapper": wrapper_binary(), "launch": _gpt_launch_cmd(),
+                                  "applies": "next launch"})
+    except (ValueError, TypeError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    except OSError as exc:
+        return web.json_response({"error": "GPT settings unavailable: " + str(exc)}, status=503)
+
+
 def _frontier_fs_mediated():
     """Host-level mirror of the frontier fs switch: True = A's direct filesystem
     access is DENIED (mediated via B). Written by /api/frontier/fs/toggle
@@ -6045,6 +11042,87 @@ def _frontier_fs_mediated():
     return False
 
 
+# ── Delegation switch (board t7, operator 2026-09-10): per frontier backend, the
+# seat acts as a ROUTER — it briefs subagents for every task instead of doing
+# the work in its own context. Lets the frontier keeper be the newest model
+# without draining tokens on task execution, and keeps it free to take new
+# queries while work is in flight. Persisted in frontier-delegate.json; lands
+# in the directive (claude-code: next launch; mct: next guidance render) and,
+# when that seat is live, as a typed notice right away.
+FRONTIER_DELEGATE_FLAG = FV_STATE_HOME / "frontier-delegate.json"
+_DELEGATE_ONLY_TEXT = (
+    "# Delegation switch: DELEGATE-ONLY (operator)\n"
+    "You are the ROUTER for this seat, not the worker. Do not execute tasks yourself: "
+    "for every task that needs more than a sentence of judgement, launch a subagent "
+    "(the Agent tool) with a complete brief and let IT do the reading, editing, "
+    "running and testing; keep your own turns to routing, brief-writing, and a short "
+    "summary of what came back. Several independent tasks → several subagents in one "
+    "message, in parallel. Direct questions that need no tool use you answer yourself. "
+    "This keeps your context (the operator's spend) small and leaves you free to take "
+    "new queries while work is in flight.")
+_DELEGATE_OFF_TEXT = ("# Delegation switch: OFF\nHandle tasks yourself; delegate when the "
+                      "token economy above says so.")
+
+
+def _frontier_delegate_doc():
+    doc = _read_json(FRONTIER_DELEGATE_FLAG, None)
+    out = {"mct": False, "claude-code": False}
+    if isinstance(doc, dict):
+        for k in out:
+            out[k] = bool(doc.get(k))
+    return out
+
+
+def _delegate_section(backend):
+    return _DELEGATE_ONLY_TEXT if _frontier_delegate_doc().get(backend) else _DELEGATE_OFF_TEXT
+
+
+async def api_frontier_delegate(request):
+    """GET/POST /api/frontier/delegate — the per-backend delegate-only switch.
+    POST {"backend": "mct"|"claude-code", "on": bool}. Returns {delegate:{mct,
+    claude-code}, notified: <tmux session typed into or "">}."""
+    resp = await _sidecar_proxy(request)
+    if resp is not None:
+        return resp
+    notified = ""
+    if request.method == "POST":
+        try:
+            body = await request.json()
+            be = body.get("backend")
+            on = bool(body.get("on"))
+            if be not in ("mct", "claude-code"):
+                raise ValueError
+        except Exception:
+            return web.json_response({"error": 'body must be {"backend": "mct"|"claude-code", "on": bool}'}, status=400)
+        doc = _frontier_delegate_doc()
+        doc[be] = on
+        FRONTIER_DELEGATE_FLAG.parent.mkdir(parents=True, exist_ok=True)
+        FRONTIER_DELEGATE_FLAG.write_text(json.dumps(doc), encoding="utf-8")
+        # re-render the mct seat's composed guidance where the pointer-exchange
+        # REPL actually reads it (the mct2 workspaces — the station's own and,
+        # when a live session runs elsewhere, that one), not the broker ws.
+        seen = set()
+        for ws in (FV_STATE_HOME / "mct2" / "repl", _mct2_live_workspace()):
+            if ws and str(ws) not in seen:
+                seen.add(str(ws))
+                try:
+                    _render_guidance(ws)
+                except Exception:
+                    pass
+        sess = _tmux_session_for("frontier", be) or ("keeper-mct" if be == "mct" else "keeper-claude")
+        if await _tmux_has(sess):
+            line = ("📨 operator switch: DELEGATE-ONLY mode is now ON for this seat — from here on do not execute "
+                    "tasks yourself: brief a subagent (Agent tool) for every task and keep your own turns to "
+                    "routing and short summaries; several independent tasks → parallel subagents."
+                    if on else
+                    "📨 operator switch: delegate-only mode is now OFF for this seat — handle tasks yourself again "
+                    "(delegate per the directive's token economy).")
+            notified = sess if await _tmux_type_line(sess, line) else ""
+        audit(request, "frontier-delegate", f"{be}={'on' if on else 'off'}" + (f" → {notified}" if notified else ""), ok=True)
+    return web.json_response({"ok": True, "delegate": _frontier_delegate_doc(), "notified": notified,
+                              "applies": "directive section at the next launch (claude-code) / next turn (mct); a live seat is also told right away"})
+
+
 def _claude_seat_system_prompt():
     """The exact text the claude-code seat receives via --append-system-prompt:
     the frontier directive, then the operator's standing B-guidance (if any),
@@ -6053,11 +11131,16 @@ def _claude_seat_system_prompt():
     parts = [_frontier_directive_text()[0].rstrip()]
     try:
         up = _bg_user_path()
-        g = up.read_text(encoding="utf-8").strip() if up.exists() else ""
+        # user text only, with any stray directive copy removed: the directive
+        # enters the system prompt exactly once (parts[0])
+        g = _strip_directive(up.read_text(encoding="utf-8")).strip() if up.exists() else ""
     except OSError:
         g = ""
     if g:
         parts.append("# Operator guidance\n" + g)
+    h = _frontier_handoff_pending()
+    if h:
+        parts.append("# Session init prompt (handoff — this launch only)\n" + h)
     if _frontier_fs_mediated():
         parts.append("# Filesystem switch: MEDIATED\nYour direct file tools ("
                      + ", ".join(FS_DENY_TOOLS) + ") are denied by the operator for "
@@ -6066,6 +11149,7 @@ def _claude_seat_system_prompt():
     else:
         parts.append("# Filesystem switch: DIRECT\nYour file tools are open. Prefer "
                      "delegating search and bulk reads to B anyway (token economy).")
+    parts.append(_delegate_section("claude-code"))
     return "\n\n".join(parts) + "\n"
 
 
@@ -6158,27 +11242,853 @@ async def api_frontier_models(request):
         FRONTIER_MODELS_PATH.parent.mkdir(parents=True, exist_ok=True)
         FRONTIER_MODELS_PATH.write_text(json.dumps(cur, indent=2) + "\n")
         audit(request, "frontier-models", json.dumps(cur), ok=True)
+        # 1.0.65 (operator): a model pick must LITERALLY change the model. Both
+        # frontier backends take `/model <id>` at their prompt (Claude Code's
+        # slash command; the mct REPL's own) — type it into the live seat's
+        # tmux session when one exists; next launch uses --model anyway.
+        applied_live = {}
+        for k in body:
+            sess = (BACKEND_TMUX_SESSION.get("frontier") or {}).get(k, "")
+            if not sess or k not in cur:
+                continue
+            # Hugpy's selected fleet model is supplied at launch; it has no
+            # slash-model command for an already-running chat seat.
+            if k == "hugpy":
+                applied_live[k] = "next launch (Hugpy model is a launch setting)"
+                continue
+            rc, _o, _e = await _run("tmux", "-L", KEEPER_TMUX_SOCK, "has-session", "-t", "=" + sess)
+            if rc != 0:
+                applied_live[k] = "next launch (no live seat)"
+                continue
+            line = "/model " + (cur[k] or "default")
+            # Paced like a human at the TUI: close any menu, clear the input line,
+            # type the command, let the slash-autocomplete settle BEFORE Enter (an
+            # early Enter picks a suggestion instead), then confirm the "switch?
+            # (history re-read)" dialog Claude Code shows on a cached conversation
+            # — its default is Yes; on a fresh seat the extra Enter is an empty line.
+            tk = ["tmux", "-L", KEEPER_TMUX_SOCK, "send-keys", "-t", sess]
+            await _run(*tk, "Escape"); await asyncio.sleep(0.4)
+            await _run(*tk, "C-u"); await asyncio.sleep(0.3)
+            rc2, _o2, err2 = await _run(*tk, "-l", line)
+            if rc2 == 0:
+                await asyncio.sleep(1.2)
+                await _run(*tk, "Enter")
+                await asyncio.sleep(2.0)
+                await _run(*tk, "Enter")
+            applied_live[k] = "sent to live seat" if rc2 == 0 else f"failed: {(err2 or '').strip()[:80]}"
+        request["applied_live"] = applied_live
     m = _frontier_models()
     return web.json_response({
+        "applied_live": request.get("applied_live", {}),
         "models": m, "path": str(FRONTIER_MODELS_PATH),
         "effective": {
             "mct": {"model": m["mct"], "launch": f"abstract-claude mct <ws> --model {m['mct']}",
                     "note": "THE mct (pointer exchange, promoted 2026-08-27; impl files keep the mct2 name) — A is `claude -p --resume` per turn (chat history kept via <ws>/session.json; /new in the REPL resets); flight/queue state at /api/mct2/status; /model in the REPL changes it for that session only"},
             "claude-code": {"model": m["claude-code"] or "(Claude Code default for this account)",
-                            "launch": "CLAUDE_CONFIG_DIR=<seat> claude --dangerously-skip-permissions"
+                            "launch": "abstract-claude launch -- --dangerously-skip-permissions (fresh ~/.claude-sessions/<stamp>-<pid>-<label> per launch; legacy CLAUDE_CONFIG_DIR=<seat> claude only without abstract-claude)"
                                       + (f" --model {m['claude-code']}" if m["claude-code"] else "")
                                       + " --append-system-prompt <directive>"},
+            "codex": {"model": m["codex"] or "(Codex default for this account)",
+                      "launch": _gpt_launch_cmd()},
+            "hugpy": {"model": m["hugpy"] or "(Hugpy agent default)",
+                      "launch": "hugpy-agent harness" + (f" --model {m['hugpy']}" if m["hugpy"] else ""),
+                      "note": "OpenCode terminal backed by Hugpy; set this to a fleet-worker model id to run A on that model."},
         },
-        # A CURATED shortcut list — NOT a whitelist. The dropdown also offers a
-        # free-text "custom…" entry, and POST accepts ANY id matching _MODEL_RE,
-        # so the operator is never limited to these (2026-08-22: the old list
-        # omitted opus-4-8 and had no custom path, so a go-to model could not be
-        # picked at all). Keep the operator's current go-tos near the top.
-        "choices": ["claude-fable-5", "claude-opus-5", "claude-opus-4-8",
-                    "claude-sonnet-5", "claude-haiku-4-5-20251001",
-                    "opus", "sonnet", "haiku", ""],
+        # 1.0.66 (operator): the LIVE model list — the toolserver asks the Models
+        # API with the fleet token (claude/models, cached there 10 min) and this
+        # station caches it too, so a page load costs one call. Static fallback
+        # when the toolserver is unreachable. NOT a whitelist: "custom…" + POST
+        # accept ANY id matching _MODEL_RE.
+        "choices": await _frontier_model_choices(request.app),
+        "choices_source": _MODEL_CHOICES["source"],
         "custom_ok": True,
     })
+
+
+# ── 1.0.67: prompt-cache countdown for the frontier claude-code seat ─────────────
+# Claude Code logs every API exchange to the seat's transcript (<CLAUDE_CONFIG_DIR>/
+# projects/<cwd-slug>/<session>.jsonl). Each assistant row carries the API's usage:
+# input_tokens, cache_read_input_tokens, cache_creation_input_tokens and the TTL
+# split (cache_creation.ephemeral_5m/1h_input_tokens). The cached prefix = read +
+# creation of the LAST request; it expires TTL after that request (refreshed by
+# every request). Busy = the last row is an assistant tool_use with no result yet,
+# or a user prompt with no assistant answer yet.
+_CACHE_PROBE = r'''python3 - <<'__PY__'
+import json, os, glob, time
+home = os.path.expanduser("~")
+# 1.0.85: prefer the KEEPER SEAT's own transcript. The broad ~/.claude/projects
+# glob below picked the newest transcript of ANY Claude Code session of this
+# account (an operator working in a terminal on the same box), so "busy" and
+# the cache countdown described the wrong session and board nudges were
+# deferred for as long as the operator was busy elsewhere. The seat's cwd is
+# read from its tmux pane; Claude Code files transcripts under
+# projects/<cwd with every non-alphanumeric char as "-">/ in whichever config
+# dir the seat runs from (fresh per-launch ~/.claude-sessions/<stamp>, the
+# legacy ~/.claude-seat/<label>, or the account's ~/.claude).
+import re, subprocess
+cands = []
+try:
+    cwd, pane_pid = subprocess.run(["tmux", "-L", "console", "display-message", "-p", "-t", "=keeper-claude:",
+                          "#{pane_current_path}\t#{pane_pid}"], capture_output=True, text=True, timeout=3).stdout.strip().split("\t")[:2]
+except Exception:
+    cwd, pane_pid = "", ""
+# 1.0.89 hotfix (keeper 2026-09-15): the glob ORDER below is not where the seat
+# runs. abstract-claude's default fresh mode is "wipe" (rebuild ~/.claude in
+# place, CLAUDE_CONFIG_DIR unset), so the live seat writes ~/.claude/projects/<slug>
+# — but any leftover ~/.claude-seat/<label>/projects/<slug>/*.jsonl (a
+# daemon-spawned bg session, an old launch) wins the cascade and the meter
+# freezes on a foreign transcript that no wipe touches. Ask the pane's own
+# claude process (same user: /proc/<pid>/environ + cmdline) which config dir
+# and session it really uses; the cascade stays as the fallback.
+seat_dir, seat_sid = "", ""
+try:
+    if pane_pid:
+        out = subprocess.run(["ps", "-o", "pid=,cmd=", "--ppid", pane_pid], capture_output=True, text=True, timeout=3).stdout
+        stack = [pane_pid] + [ln.split()[0] for ln in out.splitlines() if ln.strip()]
+        seen = set()
+        while stack:
+            p = stack.pop(0)
+            if p in seen: continue
+            seen.add(p)
+            try:
+                cl = open("/proc/%s/cmdline" % p, "rb").read().split(b"\0")
+            except OSError:
+                continue
+            argv = [a.decode("utf-8", "replace") for a in cl if a]
+            if argv and (os.path.basename(argv[0]).startswith("claude") or ("claude" in (argv[1] if len(argv) > 1 else "") and "node" in argv[0]) or re.search(r"/claude/versions/", argv[0] or "")):
+                try:
+                    env = dict(kv.split("=", 1) for kv in open("/proc/%s/environ" % p, "rb").read().decode("utf-8", "replace").split("\0") if "=" in kv)
+                except OSError:
+                    env = {}
+                seat_dir = env.get("CLAUDE_CONFIG_DIR") or os.path.join(env.get("HOME") or home, ".claude")
+                for i, a in enumerate(argv):
+                    if a == "--session-id" and i + 1 < len(argv): seat_sid = argv[i + 1]
+                    elif a.startswith("--session-id="): seat_sid = a.split("=", 1)[1]
+                    elif a == "--resume" and i + 1 < len(argv) and argv[i + 1].endswith(".jsonl") and not seat_sid:
+                        seat_sid = os.path.basename(argv[i + 1])[:-6]
+                break
+            ch = subprocess.run(["ps", "-o", "pid=", "--ppid", p], capture_output=True, text=True, timeout=3).stdout.split()
+            stack.extend(ch)
+except Exception:
+    seat_dir, seat_sid = "", ""
+if cwd:
+    slug = re.sub(r"[^A-Za-z0-9]", "-", cwd)
+    if seat_dir:
+        cands = glob.glob(os.path.join(seat_dir, "projects", slug, "*.jsonl"))
+        if seat_sid:
+            hit = [c for c in cands if os.path.basename(c) == seat_sid + ".jsonl"]
+            if hit: cands = hit
+    if not cands:
+        for pat in (os.path.join(home, ".claude-sessions", "*", "projects", slug, "*.jsonl"),
+                    os.path.join(home, ".claude-seat", "*", "projects", slug, "*.jsonl"),
+                    os.path.join(home, ".claude", "projects", slug, "*.jsonl")):
+            cands = glob.glob(pat)
+            if cands: break
+if not cands:
+    cands = glob.glob(os.path.join(home, ".claude-seat", "frontier", "projects", "*", "*.jsonl"))
+if not cands:
+    cands = glob.glob(os.path.join(home, ".claude", "projects", "*", "*.jsonl"))
+if not cands:
+    print(json.dumps({"ok": False, "error": "no transcript"})); raise SystemExit
+f = max(cands, key=os.path.getmtime)
+rows = []
+try:
+    with open(f, encoding="utf-8", errors="replace") as fh:
+        for ln in fh:
+            ln = ln.strip()
+            if not ln: continue
+            try: rows.append(json.loads(ln))
+            except ValueError: pass
+except OSError as e:
+    print(json.dumps({"ok": False, "error": str(e)})); raise SystemExit
+def ts(r):
+    t = r.get("timestamp") or ""
+    try:
+        import datetime
+        return datetime.datetime.strptime(t[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=datetime.timezone.utc).timestamp()
+    except Exception:
+        return 0
+asst = [r for r in rows if r.get("type") == "assistant" and (r.get("message") or {}).get("usage")
+        and any(int(((r.get("message") or {}).get("usage") or {}).get(k) or 0) for k in
+                ("input_tokens", "output_tokens", "cache_read_input_tokens", "cache_creation_input_tokens"))]
+if not asst:
+    print(json.dumps({"ok": False, "error": "no requests yet", "transcript": f})); raise SystemExit
+last = asst[-1]; m = last["message"]; u = m["usage"]
+cc = u.get("cache_creation") or {}
+ttl = 3600 if (cc.get("ephemeral_1h_input_tokens") or 0) > 0 else 300
+read = u.get("cache_read_input_tokens") or 0; crt = u.get("cache_creation_input_tokens") or 0
+last_ts = ts(last)
+# busy: last transcript row is an assistant tool_use (result pending) or a user turn awaiting an answer
+tail = rows[-1]
+busy = False
+if tail.get("type") == "assistant" and (tail.get("message") or {}).get("stop_reason") == "tool_use": busy = True
+elif tail.get("type") == "user":
+    c = (tail.get("message") or {}).get("content")
+    if isinstance(c, list) and any(isinstance(x, dict) and x.get("type") == "tool_result" for x in c): busy = True
+    elif isinstance(c, (str, list)): busy = True
+now = time.time()
+hour = [r for r in asst if now - ts(r) <= 3600]
+print(json.dumps({
+    "ok": True, "transcript": f, "session_id": last.get("sessionId") or last.get("session_id") or "",
+    "model": m.get("model") or "", "last_request_ts": int(last_ts), "age_s": int(now - last_ts),
+    "cached_tokens": read + crt, "cache_read": read, "cache_creation": crt,
+    "context_tokens": (u.get("input_tokens") or 0) + read + crt, "output_tokens": u.get("output_tokens") or 0,
+    "ttl_s": ttl, "expires_at": int(last_ts + ttl), "remaining_s": int(last_ts + ttl - now),
+    "busy": busy, "stop_reason": m.get("stop_reason") or "",
+    "requests_last_hour": len(hour), "requests_total": len(asst),
+    "cache_creation_split": {"5m": cc.get("ephemeral_5m_input_tokens") or 0, "1h": cc.get("ephemeral_1h_input_tokens") or 0},
+}))
+__PY__'''
+
+# steward tabs (operator 2026-09-15): the GPT (codex) seat's OWN session +
+# token/context meter — the twin of _CACHE_PROBE for keeper-codex. The MCT
+# pointer exchange is merged into the native frontier session and its token
+# tracker (`hugpy-agent mct-usage` / /api/a/usage?backend=mct) is retired, so
+# each frontier backend's session meter is THE tracker for that backend.
+# Codex CLI writes one rollout-<stamp>-<session>.jsonl per session under
+# $CODEX_HOME/sessions/YYYY/MM/DD/ and appends an event_msg/token_count row
+# (info.last_token_usage + model_context_window) after every response — the
+# model's own accounting, not an estimate. The pane's codex process names the
+# rollout it holds open (/proc/<pid>/fd), so a stale rollout of another
+# session can never win; the newest rollout file is the fallback.
+_CODEX_PROBE = r'''python3 - <<'__PY__'
+import json, os, glob, time, re, subprocess, datetime
+home = os.path.expanduser("~")
+cwd, pane_pid = "", ""
+try:
+    cwd, pane_pid = subprocess.run(["tmux", "-L", "console", "display-message", "-p", "-t", "=keeper-codex:",
+                          "#{pane_current_path}\t#{pane_pid}"], capture_output=True, text=True, timeout=3).stdout.strip().split("\t")[:2]
+except Exception:
+    cwd, pane_pid = "", ""
+seat_live = bool(pane_pid)
+f, codex_home, proc_pid = "", "", 0
+try:
+    if pane_pid:
+        stack, seen = [pane_pid], set()
+        while stack and not f:
+            p = stack.pop(0)
+            if p in seen: continue
+            seen.add(p)
+            try:
+                argv = [a.decode("utf-8", "replace") for a in open("/proc/%s/cmdline" % p, "rb").read().split(b"\0") if a]
+            except OSError:
+                continue
+            if argv and os.path.basename(argv[0]) == "codex":
+                proc_pid = int(p)
+                try:
+                    env = dict(kv.split("=", 1) for kv in open("/proc/%s/environ" % p, "rb").read().decode("utf-8", "replace").split("\0") if "=" in kv)
+                except OSError:
+                    env = {}
+                codex_home = env.get("CODEX_HOME") or os.path.join(env.get("HOME") or home, ".codex")
+                try:
+                    for fd in os.listdir("/proc/%s/fd" % p):
+                        try: t = os.readlink("/proc/%s/fd/%s" % (p, fd))
+                        except OSError: continue
+                        b = os.path.basename(t)
+                        if b.startswith("rollout-") and b.endswith(".jsonl") and os.path.exists(t):
+                            if not f or os.path.getmtime(t) > os.path.getmtime(f): f = t
+                except OSError:
+                    pass
+                break
+            try:
+                stack.extend(open("/proc/%s/task/%s/children" % (p, p)).read().split())
+            except OSError:
+                pass
+except Exception:
+    pass
+if not f:
+    print(json.dumps({"ok": False, "error": "no transcript", "backend": "codex", "seat": "keeper-codex", "seat_live": seat_live})); raise SystemExit
+def ts(t):
+    try:
+        return datetime.datetime.strptime((t or "")[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=datetime.timezone.utc).timestamp()
+    except Exception:
+        return 0
+sid, model, cli, scwd = "", "", "", ""
+counts, last, last_ts, busy, compactions = [], None, 0, False, 0
+try:
+    with open(f, encoding="utf-8", errors="replace") as fh:
+        for ln in fh:
+            ln = ln.strip()
+            if not ln: continue
+            try: r = json.loads(ln)
+            except ValueError: continue
+            t = r.get("type"); p = r.get("payload") or {}
+            if not isinstance(p, dict): continue
+            if t == "session_meta":
+                sid = p.get("session_id") or p.get("id") or sid; cli = p.get("cli_version") or cli; scwd = p.get("cwd") or scwd
+            elif t == "turn_context":
+                model = p.get("model") or model
+            elif t == "compacted":
+                compactions += 1
+            elif t == "event_msg":
+                et = p.get("type")
+                if et == "token_count" and isinstance(p.get("info"), dict) and (p["info"].get("last_token_usage") or {}).get("total_tokens"):
+                    last = p["info"]; last_ts = ts(r.get("timestamp")); counts.append(last_ts)
+                elif et == "task_started": busy = True
+                elif et in ("task_complete", "turn_aborted"): busy = False
+except OSError as e:
+    print(json.dumps({"ok": False, "error": str(e), "backend": "codex", "seat": "keeper-codex", "seat_live": seat_live})); raise SystemExit
+if last is None:
+    print(json.dumps({"ok": False, "error": "no requests yet", "transcript": f, "backend": "codex", "seat": "keeper-codex",
+                      "seat_live": seat_live, "session_id": sid, "model": model})); raise SystemExit
+u = last.get("last_token_usage") or {}; tot = last.get("total_token_usage") or {}
+window = int(last.get("model_context_window") or 0)
+inp = int(u.get("input_tokens") or 0); cached = int(u.get("cached_input_tokens") or 0); cw = int(u.get("cache_write_input_tokens") or 0)
+now = time.time()
+ttl = 600   # OpenAI prompt caching keeps a prefix warm ~5-10 min after its last use (an estimate: the API does not report it)
+print(json.dumps({
+    "ok": True, "backend": "codex", "provider": "openai", "seat": "keeper-codex", "seat_live": seat_live, "pid": proc_pid,
+    "transcript": f, "session_id": sid, "model": model, "cli_version": cli, "cwd": scwd or cwd,
+    "last_request_ts": int(last_ts), "age_s": int(now - last_ts),
+    "cached_tokens": cached, "cache_read": cached, "cache_creation": cw,
+    "context_tokens": inp, "output_tokens": int(u.get("output_tokens") or 0), "reasoning_tokens": int(u.get("reasoning_output_tokens") or 0),
+    "context_window": window, "context_pct": (round(100.0 * inp / window, 1) if window else None),
+    "totals": {"input": int(tot.get("input_tokens") or 0), "cached_input": int(tot.get("cached_input_tokens") or 0),
+               "output": int(tot.get("output_tokens") or 0), "reasoning": int(tot.get("reasoning_output_tokens") or 0),
+               "total": int(tot.get("total_tokens") or 0)},
+    "compactions": compactions,
+    "ttl_s": ttl, "ttl_basis": "estimate", "expires_at": int(last_ts + ttl), "remaining_s": int(last_ts + ttl - now),
+    "busy": busy, "stop_reason": "",
+    "requests_last_hour": len([x for x in counts if now - x <= 3600]), "requests_total": len(counts),
+}))
+__PY__'''
+
+# steward tabs add-on (operator 2026-09-15): the LIVE SUBAGENTS the frontier
+# seat spawned with Claude Code's Agent tool, from the seat's OWN transcript
+# (no agent-side plumbing). The resolver is _CACHE_PROBE's own head (same
+# pane → claude process → CLAUDE_CONFIG_DIR/--session-id → transcript, same
+# fallback cascade), split off at its parse step, so both probes always read
+# the same file. Per spawn: the assistant tool_use "Agent" block (input:
+# description = purpose, prompt = task text → first line/sentence = title,
+# subagent_type, model — explicit, else inherited = the session's model); a
+# background agent's id comes from the tool_result text ("agentId: <id>") and
+# its finish from the queued_command attachment carrying <task-notification>
+# (task-id = agentId, status); a foreground Agent finishes with its own
+# tool_result. Each subagent's own transcript
+# (<config>/projects/<slug>/<session>/subagents/agent-<id>.jsonl — what the
+# /tmp/claude-<uid>/…/tasks/<id>.output symlink points at) names the model
+# it really ran on, its last usage, and (mtime) when it last wrote.
+_AGENTS_TAIL = r'''
+import datetime
+def ts(t):
+    try:
+        return datetime.datetime.strptime((t or "")[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=datetime.timezone.utc).timestamp()
+    except Exception:
+        return 0
+sess_model, spawns, order, by_tool = "", {}, [], {}
+sid = os.path.basename(f)[:-6]
+sub_dir = os.path.join(os.path.dirname(f), sid, "subagents")
+try:
+    with open(f, encoding="utf-8", errors="replace") as fh:
+        for ln in fh:
+            ln = ln.strip()
+            if not ln: continue
+            try: r = json.loads(ln)
+            except ValueError: continue
+            t = r.get("type"); m = r.get("message") if isinstance(r.get("message"), dict) else {}
+            if t == "assistant" and m.get("model"): sess_model = m["model"]
+            c = m.get("content")
+            if t == "assistant" and isinstance(c, list):
+                for x in c:
+                    if isinstance(x, dict) and x.get("type") == "tool_use" and x.get("name") == "Agent":
+                        inp = x.get("input") if isinstance(x.get("input"), dict) else {}
+                        title = str(inp.get("prompt") or "").strip().split("\n", 1)[0].strip()
+                        title = re.split(r"(?<=[.!?])\s", title, 1)[0].strip()[:160]
+                        a = {"id": "", "tool_use_id": x.get("id") or "", "purpose": str(inp.get("description") or "")[:120],
+                             "title": title, "subagent_type": str(inp.get("subagent_type") or "general-purpose"),
+                             "model": str(inp.get("model") or ""), "model_explicit": bool(inp.get("model")),
+                             "status": "running", "started_at": int(ts(r.get("timestamp"))), "ended_at": 0,
+                             "tokens": None, "background": False, "last_write_ts": 0}
+                        by_tool[a["tool_use_id"]] = a; order.append(a)
+            elif t == "user" and isinstance(c, list):
+                for x in c:
+                    if isinstance(x, dict) and x.get("type") == "tool_result" and x.get("tool_use_id") in by_tool:
+                        a = by_tool[x["tool_use_id"]]
+                        txt = x.get("content")
+                        if isinstance(txt, list): txt = "\n".join(str(y.get("text") or "") for y in txt if isinstance(y, dict))
+                        mm = re.search(r"agentId:\s*([0-9A-Za-z_-]+)", str(txt or ""))
+                        if mm:
+                            a["id"] = mm.group(1); a["background"] = True; spawns[a["id"]] = a
+                        else:
+                            a["status"] = "failed" if x.get("is_error") else "completed"; a["ended_at"] = int(ts(r.get("timestamp")))
+            elif t == "attachment" or (t == "user" and isinstance(c, str)):
+                p = c if t == "user" else (str(((r.get("attachment") or {}).get("prompt")) or "") if isinstance(r.get("attachment"), dict) else "")
+                if "<task-notification>" in p:
+                    tid = re.search(r"<task-id>([^<]+)</task-id>", p); st = re.search(r"<status>([^<]+)</status>", p)
+                    a = spawns.get(tid.group(1).strip() if tid else "")
+                    if a is None:
+                        tu = re.search(r"<tool-use-id>([^<]+)</tool-use-id>", p); a = by_tool.get(tu.group(1).strip() if tu else "")
+                    if a is not None:
+                        s = (st.group(1) if st else "completed").strip().lower()
+                        a["status"] = "failed" if s in ("failed", "error", "errored", "killed", "cancelled") else "completed"
+                        a["ended_at"] = int(ts(r.get("timestamp")))
+except OSError as e:
+    print(json.dumps({"ok": False, "error": str(e)})); raise SystemExit
+now = time.time()
+for a in order:
+    if not a["model"]: a["model"] = sess_model
+    if a["id"]:
+        sp = os.path.join(sub_dir, "agent-%s.jsonl" % a["id"])
+        try:
+            st = os.stat(sp); a["last_write_ts"] = int(st.st_mtime)
+            usage, mdl = None, ""
+            with open(sp, "rb") as fh:
+                fh.seek(max(0, st.st_size - 262144))
+                for raw in fh.read().decode("utf-8", "replace").splitlines():
+                    try: rr = json.loads(raw)
+                    except ValueError: continue
+                    mm = rr.get("message") if isinstance(rr.get("message"), dict) else {}
+                    if rr.get("type") == "assistant":
+                        if mm.get("model"): mdl = mm["model"]
+                        if isinstance(mm.get("usage"), dict): usage = mm["usage"]
+            if mdl: a["model"] = mdl
+            if usage:
+                a["tokens"] = {"input": int(usage.get("input_tokens") or 0), "output": int(usage.get("output_tokens") or 0),
+                               "cache_read": int(usage.get("cache_read_input_tokens") or 0),
+                               "cache_write": int(usage.get("cache_creation_input_tokens") or 0)}
+        except OSError:
+            pass
+    a["elapsed_s"] = max(0, int((a["ended_at"] or now) - a["started_at"])) if a["started_at"] else 0
+order.reverse()
+print(json.dumps({"ok": True, "transcript": f, "session_id": sid, "model": sess_model, "now": int(now),
+                  "running": sum(1 for a in order if a["status"] == "running"), "agents": order[:50]}))
+__PY__'''
+_AGENTS_PROBE = ((_CACHE_PROBE.split("\nrows = []\n", 1)[0] + _AGENTS_TAIL)
+                 if "\nrows = []\n" in _CACHE_PROBE else "")
+
+# $/MTok input (Anthropic first-party, 2026-06): the rebuild estimate uses the
+# cache WRITE rate (1.25x for the 5-minute TTL, 2x for the 1-hour TTL).
+_MODEL_INPUT_PRICE = {"claude-fable-5-1": 10.0, "claude-fable-5": 10.0, "claude-opus-5": 5.0,
+                      "claude-opus-4-8": 5.0, "claude-opus-4-7": 5.0, "claude-opus-4-6": 5.0,
+                      "claude-sonnet-5": 2.0, "claude-sonnet-4-6": 3.0, "claude-haiku-4-5": 1.0}
+
+
+async def api_frontier_cache(request):
+    """GET /api/frontier/cache?vm=<locus|@keeper>[&backend=claude-code|codex] —
+    the frontier seat's OWN session + token/context meter, read from that
+    seat's transcript (the usage the model reported, not an estimate).
+    backend (steward tabs, operator 2026-09-15): claude-code (default, so the
+    old callers are unchanged — keeper-claude, the Claude Code transcript +
+    prompt-cache countdown) or codex (keeper-codex, the Codex rollout's
+    token_count rows); gpt/chatgpt alias codex. One shape for both:
+    ok, backend, seat, seat_live, session_id, model, age_s, context_tokens,
+    cached_tokens/cache_read/cache_creation, output_tokens, busy, state,
+    ttl_s/expires_at/remaining_s, requests_last_hour/requests_total; codex
+    adds context_window, context_pct, totals{input,cached_input,output,
+    reasoning,total}, reasoning_tokens, compactions, ttl_basis="estimate"."""
+    vm = (request.query.get("vm") or "").strip()
+    if vm == "@keeper":
+        vm = ""
+    elif vm and vm not in await all_locus_names():
+        return web.json_response({"ok": False, "error": f"unknown locus {vm}"}, status=404)
+    backend = (request.query.get("backend") or "claude-code").strip().lower()
+    if backend in ("gpt", "chatgpt", "openai"):
+        backend = "codex"
+    if backend in ("ac", "abstract-claude"):
+        backend = "serve"
+    # t-serve: backend=serve reads the keeper serve's OWN usage DB, so the token
+    # meter keeps working now that serve is the keeper surface. On the host seat
+    # in serve mode it is also the DEFAULT, and the tmux transcript probe is the
+    # fallback (so the meter still reports while keeper-claude is the one live).
+    if backend == "serve" or (not vm and backend == "claude-code"
+                              and (await _keeper_surface_now())[0] == "serve"):
+        sdoc = await _ac_serve_cache_doc()
+        if sdoc:
+            sdoc["locus"] = vm or "host"
+            sdoc["state"] = "warm" if sdoc.get("remaining_s", 0) > 0 else "lapsed"
+            base = next((v for k, v in _MODEL_INPUT_PRICE.items()
+                         if str(sdoc.get("model", "")).startswith(k)), None)
+            mult = 2.0 if sdoc.get("ttl_s") == 3600 else 1.25
+            sdoc["rebuild_cost_usd"] = (round(sdoc["cached_tokens"] / 1e6 * base * mult, 4) if base else None)
+            sdoc["warm_turn_cost_usd"] = (round(sdoc["cached_tokens"] / 1e6 * base * 0.1, 4) if base else None)
+            sdoc["price_basis"] = (f"${base}/MTok input, write x{mult}, read x0.1"
+                                   if base else "unknown model price")
+            return web.json_response(sdoc)
+        if backend == "serve":
+            return web.json_response({"ok": False, "backend": "serve", "surface": "serve",
+                                      "error": "keeper serve unreachable at " + AC_UPSTREAM},
+                                     status=502)
+        backend = "claude-code"      # serve had nothing: fall through to the tmux probe
+    if backend not in ("claude-code", "codex"):
+        return web.json_response({"ok": False, "error": f"unknown frontier backend {backend}", "backend": backend}, status=400)
+    rc, out, err = await _locus_run_fast(vm, _CODEX_PROBE if backend == "codex" else _CACHE_PROBE, 20)
+    try:
+        doc = json.loads((out or "").strip().splitlines()[-1])
+    except Exception:
+        return web.json_response({"ok": False, "error": (err or out or "probe failed").strip()[:300],
+                                  "backend": backend}, status=502)
+    doc.setdefault("backend", backend)
+    doc.setdefault("seat", "keeper-codex" if backend == "codex" else "keeper-claude")
+    if doc.get("ok"):
+        doc["state"] = "busy" if doc.get("busy") else ("warm" if doc.get("remaining_s", 0) > 0 else "lapsed")
+        if backend == "codex":
+            # no OpenAI price table here: cached input is billed at a discount,
+            # but the rebuild/warm-turn dollar estimate is Anthropic-only.
+            doc["rebuild_cost_usd"] = None
+            doc["warm_turn_cost_usd"] = None
+            doc["price_basis"] = "OpenAI prompt caching (cached input discounted); no price table"
+        else:
+            base = next((v for k, v in _MODEL_INPUT_PRICE.items() if str(doc.get("model", "")).startswith(k)), None)
+            mult = 2.0 if doc.get("ttl_s") == 3600 else 1.25
+            doc["rebuild_cost_usd"] = (round(doc["cached_tokens"] / 1e6 * base * mult, 4) if base else None)
+            doc["warm_turn_cost_usd"] = (round(doc["cached_tokens"] / 1e6 * base * 0.1, 4) if base else None)
+            doc["price_basis"] = f"${base}/MTok input, write x{mult}, read x0.1" if base else "unknown model price"
+    doc["locus"] = vm or "host"
+    return web.json_response(doc)
+
+
+async def api_frontier_limits(request):
+    """GET /api/frontier/limits — the frontier (claude-code) quota/limit state
+    for the seat card's LimitsBadge (p515). Derived from the keeper serve with
+    NO abstract-claude change: its configured default_model + quota_fallback_model
+    (/api/state) vs the model the most recent run actually used (/api/usage/report).
+    fallback_active = recent runs are on the fallback model, i.e. the default hit
+    its limit and abstract-claude's launcher auto-switched (launch.py LIMIT_RE).
+    Shape the frontend expects: {default_model, fallback_model, state:ok|hit,
+    fallback_active, last_hit_ts, current_model}. "near" and a precise last_hit_ts
+    need the serve-side quota event (not yet emitted), so state is ok|hit only and
+    last_hit_ts stays null until that lands."""
+    st = await _ac_serve_state()
+    if not st.get("ok"):
+        # Serve is the surface this signal is derived from. When it is not
+        # answering (down, or a tmux-keeper host with no serve) return non-2xx
+        # so the console's api() rejects and LimitsBadge hides (setLim(false))
+        # rather than rendering a misleading green "ok" badge.
+        return web.json_response({"ok": False, "error": st.get("error") or "keeper serve unavailable"},
+                                 status=503)
+    default_model = st.get("model") or ""
+    fallback_model = st.get("fallback_model") or ""
+    current_model = ""
+    rep = await _ac_get("/api/usage/report?last=1")
+    if isinstance(rep, dict):
+        recent = rep.get("recent") or []
+        if recent:
+            current_model = recent[0].get("model") or ""
+    fallback_active = bool(fallback_model and current_model
+                           and current_model == fallback_model
+                           and current_model != default_model)
+    state = "hit" if fallback_active else "ok"
+    return web.json_response({"ok": True, "default_model": default_model,
+                              "fallback_model": fallback_model, "current_model": current_model,
+                              "state": state, "fallback_active": fallback_active,
+                              "last_hit_ts": None})
+
+
+async def api_frontier_agents(request):
+    """GET /api/frontier/agents?vm=<locus|@keeper>[&backend=claude-code|codex]
+    — the subagents the frontier seat spawned (steward tabs add-on, operator
+    2026-09-15), newest first, last 50: {ok, backend, seat, session_id, model,
+    now, running, agents: [{id, tool_use_id, purpose, title, subagent_type,
+    model, model_explicit, status: running|completed|failed, started_at,
+    ended_at, elapsed_s, tokens{input,output,cache_read,cache_write}|null,
+    background, last_write_ts}]}. claude-code reads the seat's own transcript
+    (_AGENTS_PROBE); codex has no spawn record in its rollout → empty list
+    with a note. The elapsed timer ticks client-side from started_at."""
+    vm = (request.query.get("vm") or "").strip()
+    if vm == "@keeper":
+        vm = ""
+    elif vm and vm not in await all_locus_names():
+        return web.json_response({"ok": False, "error": f"unknown locus {vm}"}, status=404)
+    backend = (request.query.get("backend") or "claude-code").strip().lower()
+    if backend in ("gpt", "chatgpt", "openai"):
+        backend = "codex"
+    if backend not in ("claude-code", "codex"):
+        return web.json_response({"ok": False, "error": f"unknown frontier backend {backend}", "backend": backend}, status=400)
+    if backend == "codex":
+        return web.json_response({"ok": True, "backend": "codex", "seat": "keeper-codex", "agents": [], "running": 0,
+                                  "now": int(time.time()), "locus": vm or "host",
+                                  "note": "Codex CLI records no subagent spawns in its rollout — nothing to list"})
+    if not _AGENTS_PROBE:
+        return web.json_response({"ok": False, "error": "agents probe unavailable (cache probe drifted)", "backend": backend}, status=503)
+    rc, out, err = await _locus_run_fast(vm, _AGENTS_PROBE, 25)
+    try:
+        doc = json.loads((out or "").strip().splitlines()[-1])
+    except Exception:
+        return web.json_response({"ok": False, "error": (err or out or "probe failed").strip()[:300],
+                                  "backend": backend}, status=502)
+    doc.setdefault("backend", backend)
+    doc.setdefault("seat", "keeper-claude")
+    doc.setdefault("agents", [])
+    doc["locus"] = vm or "host"
+    return web.json_response(doc)
+
+
+# ── 1.0.68: rolling state (toolserver assess/state) + relaunch on the init prompt ──
+# ROLLING-HANDOFF-SPEC.md: the fleet judge keeps a per-locus rolling state (objective,
+# done, next steps, init prompt) in the toolserver DB. The station shows it and can
+# hand it to a FRESH frontier seat: write init_prompt → frontier-handoff.md (the
+# 1.0.65 launch consumes it), kill the seat's tmux session, start a new one. The
+# idle-relaunch rule does that on its own when the seat sits at the prompt.
+IDLE_RELAUNCH_MIN = int(os.environ.get("STATION_IDLE_RELAUNCH_MIN", "20") or 0)
+_rlog = logging.getLogger("station.idle-relaunch")
+
+
+def _station_locus():
+    """This station's own locus name in the toolserver: STATION_LOCUS, else the
+    distributed locus whose endpoint is <this user>@<one of this host's ips>."""
+    env = (os.environ.get("STATION_LOCUS") or "").strip().lower()
+    if env:
+        return env
+    if _TS_LOCI.get("self"):   # 1.0.85: loci-sync hides the self host from the dropdown, keeps its name
+        return _TS_LOCI["self"]
+    me, ips = getpass.getuser(), _local_ips()
+    for name, h in (_TS_LOCI.get("hosts") or {}).items():
+        if h.get("user") == me and h.get("host") in ips:
+            return name
+    return ""
+
+
+def _locus_name_for(vm):
+    return _station_locus() if not vm or vm in ("@keeper", "keeper") else vm
+
+def _keeper_locus():
+    """The host keeper's ONE canonical toolserver locus for its central `todos`
+    board: STATION_LOCUS when set, else 'keeper' — the exact value every host
+    writer already falls back to (the comms sender and MCT_LOCUS lines both use
+    `_station_locus() or 'keeper'`) and where this host's board actually lives in
+    the DB (the `keeper` slice). Read, write AND the file<->DB sync all use this,
+    so they can never disagree on whose board it is (board-sot 2026-09-18)."""
+    return _station_locus() or "keeper"
+
+
+async def _seat_session_created(sess):
+    """Epoch seconds the tmux seat session was created (0 = no such session)."""
+    rc, out, _ = await _run("tmux", "-L", KEEPER_TMUX_SOCK, "list-sessions", "-F", "#{session_name} #{session_created}")
+    if rc != 0:
+        return 0
+    for ln in (out or "").splitlines():
+        parts = ln.split()
+        if len(parts) == 2 and parts[0] == sess and parts[1].isdigit():
+            return int(parts[1])
+    return 0
+
+
+async def _seat_pass_dialogs(sess, tries=6):
+    """A fresh claude-code seat may stop at Claude Code's one-time dialogs (bypass
+    notice, folder trust). Answer them so an unattended relaunch never strands the
+    seat: Down+Enter picks 'Yes' in both. Stops as soon as the prompt is up."""
+    for _ in range(tries):
+        await asyncio.sleep(3)
+        rc, out, _ = await _run("tmux", "-L", KEEPER_TMUX_SOCK, "capture-pane", "-p", "-t", "=" + sess, "-S", "-30")
+        if rc != 0:
+            return False
+        if "Bypass Permissions mode" in out or "trust this folder" in out:
+            await _run("tmux", "-L", KEEPER_TMUX_SOCK, "send-keys", "-t", "=" + sess, "Down", "Enter")
+            continue
+        if "❯" in out:
+            return True
+    return False
+
+
+async def _rolling_state(app, vm):
+    locus = _locus_name_for(vm)
+    if not locus:
+        return {"ok": False, "error": "this station has no locus in the toolserver yet (set STATION_LOCUS or register it)"}
+    try:
+        doc = await _ts_call(app, "assess/state", {"locus": locus}, timeout=20)
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:200], "locus": locus}
+    out = dict(doc, ok=True, locus=locus)
+    if not vm or vm in ("@keeper", "keeper"):
+        sess = _tmux_session_for("frontier", "claude-code") or "keeper-claude"
+        created = await _seat_session_created(sess)
+        out["seat_session"] = sess
+        out["seat_created"] = created
+        out["init_prompt_newer_than_seat"] = bool(created and int(doc.get("ts") or 0) > created)
+        try:
+            rc, cout, _ = await _locus_run_fast("", _CACHE_PROBE, 20)
+            cd = json.loads((cout or "").strip().splitlines()[-1]) if rc == 0 else {}
+        except Exception:
+            cd = {}
+        out["busy"] = bool(cd.get("busy"))
+        out["idle_s"] = int(cd.get("age_s") or 0) if cd.get("ok") else None
+        out["idle_relaunch"] = {"minutes": IDLE_RELAUNCH_MIN, "enabled": IDLE_RELAUNCH_MIN > 0,
+                                "would": bool(IDLE_RELAUNCH_MIN > 0 and created and doc.get("init_prompt")
+                                              and out["init_prompt_newer_than_seat"] and not out["busy"]
+                                              and (out["idle_s"] or 0) >= IDLE_RELAUNCH_MIN * 60)}
+    return out
+
+
+async def api_frontier_state(request):
+    """GET /api/frontier/state?vm= — the rolling state (objective, next steps, init
+    prompt) for the locus, plus whether the host seat is due for an idle relaunch."""
+    vm = (request.query.get("vm") or "").strip()
+    if vm == "@keeper":
+        vm = ""
+    return web.json_response(await _rolling_state(request.app, vm))
+
+
+async def _relaunch_host_seat(app, reason):
+    """Hand the rolling init prompt to a FRESH host frontier claude-code seat."""
+    st = await _rolling_state(app, "")
+    if not st.get("ok"):
+        return {"ok": False, "error": st.get("error", "no state")}
+    if st.get("busy"):
+        return {"ok": False, "error": "seat is working — not relaunching mid-turn"}
+    ip = (st.get("init_prompt") or "").strip()
+    if not ip:
+        return {"ok": False, "error": "no init prompt in the rolling state"}
+    FRONTIER_HANDOFF_PATH.parent.mkdir(parents=True, exist_ok=True)
+    FRONTIER_HANDOFF_PATH.write_text(ip + "\n", encoding="utf-8")
+    sess = st.get("seat_session") or "keeper-claude"
+    await _run("tmux", "-L", KEEPER_TMUX_SOCK, "kill-session", "-t", "=" + sess)
+    # mct v2: same file-based launch as _tmux_persist — the seat command is
+    # far past tmux's 16 KB argv limit when passed inline.
+    key = "mct" if TERM_SURFACES["frontier"].get("default") == "mct" else "claude-code"
+    body = _claude_seat_cmd("frontier", key)
+    if sess == "keeper-claude":
+        body = ("(command -v abstract-claude >/dev/null 2>&1 && abstract-claude seat-report "
+                "--seat claude-code --watch-pid $$ >/dev/null 2>&1 &); " + body)
+    script = _seat_launch_script(sess, body, "frontier")
+    cmd = ("bash " + shlex.quote(str(script))) if script is not None else ("bash -lc " + shlex.quote(body))
+    argv = _scope_prefix() + ["tmux", "-L", KEEPER_TMUX_SOCK, "new-session", "-d", "-s", sess, "bash", "-lc", cmd]
+    proc = await asyncio.create_subprocess_exec(*argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+                                                cwd=str(FV_STATE_HOME))
+    out, _ = await proc.communicate()
+    if proc.returncode != 0:
+        return {"ok": False, "error": "tmux new-session failed: " + (out or b"").decode()[:200]}
+    ready = await _seat_pass_dialogs(sess)
+    _audit_line("frontier-relaunch", f"{reason} · init_prompt {len(ip)} chars · session {sess} · prompt_up={ready}")
+    return {"ok": True, "session": sess, "init_prompt_chars": len(ip), "reason": reason, "prompt_up": ready}
+
+
+async def api_ac_rollover(request):
+    """GET/POST /api/ac/rollover — proxy the keeper serve's session-rollover
+    status/controls onto the shape the console's rollover chip renders (p509).
+
+    GET  -> serve GET /api/session/rollover, mapped to
+            {policy:"auto|manual|off", pending:{session_id, grace_s|grace_until}|null,
+             current:<current context tokens>, rolling:<threshold tokens>, due:bool}.
+    POST -> forwards {action:"roll"|"cancel", session_id} to serve
+            POST /api/session/rollover (reply passed through verbatim)."""
+    if request.method == "POST":
+        try:
+            body = await request.json()
+        except Exception:                                # noqa: BLE001
+            body = {}
+        payload = {"action": (body.get("action") or "").strip(),
+                   "session_id": (body.get("session_id") or "").strip()}
+        doc = await _ac_post("/api/session/rollover", payload)
+        if not isinstance(doc, dict):
+            return web.json_response(
+                {"ok": False, "error": "keeper serve unreachable at " + AC_UPSTREAM},
+                status=502)
+        return web.json_response(doc)
+    # GET: map serve's rollover status onto the console's rollover-chip shape.
+    doc = await _ac_get("/api/session/rollover", timeout=4)
+    policy = (doc or {}).get("policy") or {}
+    # newest per-session eval carries the live context size + due flag
+    newest = None
+    for ev in ((doc or {}).get("evals") or {}).values():
+        if isinstance(ev, dict) and (newest is None
+                                     or (ev.get("ts") or 0) > (newest.get("ts") or 0)):
+            newest = ev
+    pending = None
+    pending_raw = (doc or {}).get("pending")
+    if isinstance(pending_raw, dict):
+        pending = {"session_id": pending_raw.get("session_id") or "",
+                   "grace_s": pending_raw.get("grace_s"),
+                   "grace_until": pending_raw.get("grace_until")}
+    out = {"policy": policy.get("rollover_mode") or "auto",
+           "pending": pending,
+           "current": (newest or {}).get("context_tokens"),
+           "rolling": policy.get("rollover_context_tokens"),
+           "due": bool((doc or {}).get("due")) or bool((newest or {}).get("due"))}
+    return web.json_response(out)
+
+
+def _audit_line(action, detail):
+    _alog.info("%s %s", action, detail)
+    try:
+        with open(str(FV_STATE_HOME / "audit.log"), "a", encoding="utf-8") as fh:
+            fh.write(json.dumps({"ts": int(time.time()), "u": "station", "action": action, "detail": detail}) + "\n")
+    except OSError:
+        pass
+
+
+async def api_frontier_relaunch(request):
+    """POST /api/frontier/relaunch?vm=@keeper — operator-triggered relaunch on the init prompt."""
+    vm = (request.query.get("vm") or "").strip()
+    if vm and vm not in ("@keeper", "keeper"):
+        # 1.0.101: a locus with its own serve (ac-loci.json) relaunches THAT unit
+        if _ac_target(vm)[0]:
+            res = await _ac_serve_restart("operator", vm)
+            audit(request, "frontier-relaunch", json.dumps(res)[:200], ok=bool(res.get("ok")))
+            return web.json_response(res, status=200 if res.get("ok") else 409)
+        return web.json_response({"ok": False, "error": "relaunch is host-seat only for now"}, status=400)
+    # t-serve: in serve mode the keeper surface is the abstract-claude serve
+    # console, so "relaunch" restarts ITS unit. ?surface=tmux (or
+    # STATION_KEEPER_SURFACE=tmux) keeps the legacy tmux seat relaunch.
+    # ?surface=serve|tmux is the canonical switch; ?backend= is accepted as an
+    # alias because the frontier picker speaks in backend keys (t296).
+    want = (request.query.get("surface") or request.query.get("backend")
+            or "").strip().lower()
+    surface_now, _ac = await _keeper_surface_now()
+    if want != "tmux" and (want == "serve" or surface_now == "serve"):
+        res = await _ac_serve_restart("operator")
+        audit(request, "frontier-relaunch", json.dumps(res)[:200], ok=bool(res.get("ok")))
+        return web.json_response(res, status=200 if res.get("ok") else 409)
+    res = await _relaunch_host_seat(request.app, "operator")
+    audit(request, "frontier-relaunch", json.dumps(res)[:200], ok=bool(res.get("ok")))
+    return web.json_response(res, status=200 if res.get("ok") else 409)
+
+
+async def _idle_relaunch_loop(app):
+    """Every 60 s: if the host frontier seat has been AT THE PROMPT for
+    STATION_IDLE_RELAUNCH_MIN minutes and the rolling init prompt is newer than
+    the seat, relaunch it on that prompt. Never while busy. 0 disables."""
+    await asyncio.sleep(90)
+    while True:
+        try:
+            # t-serve: in serve mode there is no idle tmux prompt to roll, and
+            # the loop must never kill the tmux keeper seat behind the
+            # operator's back. Stay quiet and let serve be.
+            if IDLE_RELAUNCH_MIN > 0 and (await _keeper_surface_now())[0] == "serve":
+                pass
+            elif IDLE_RELAUNCH_MIN > 0:
+                st = await _rolling_state(app, "")
+                if st.get("ok") and (st.get("idle_relaunch") or {}).get("would"):
+                    res = await _relaunch_host_seat(app, f"idle {st.get('idle_s')} s ≥ {IDLE_RELAUNCH_MIN} min")
+                    _rlog.info("idle relaunch: %s", res)
+        except Exception as e:  # noqa: BLE001
+            _rlog.warning("idle relaunch loop: %s", e)
+        await asyncio.sleep(60)
+
+
+async def _start_idle_relaunch(app):
+    if os.environ.get("STATION_DEV_QUIET") == "1":   # dev copy: never act on live seats
+        return
+    app["idle_relaunch"] = asyncio.create_task(_idle_relaunch_loop(app))
+
+
+async def _stop_idle_relaunch(app):
+    t = app.get("idle_relaunch")
+    if t:
+        t.cancel()
+
+
+_MODEL_CHOICES = {"ids": None, "ts": 0, "source": "static"}
+_MODEL_CHOICES_STATIC = ["claude-fable-5-1", "claude-fable-5", "claude-opus-5", "claude-opus-4-8",
+                         "claude-sonnet-5", "claude-haiku-4-5-20251001", ""]
+
+
+async def _frontier_model_choices(app):
+    """Live Claude model ids (via the toolserver's claude/models) + "" (= the CLI
+    default), cached 10 min per station process; the static list on failure."""
+    now = time.time()
+    if _MODEL_CHOICES["ids"] is not None and now - _MODEL_CHOICES["ts"] < 600:
+        return _MODEL_CHOICES["ids"]
+    try:
+        doc = await _ts_call(app, "claude/models", {}, timeout=25)
+        ids = [i for i in (doc.get("ids") or []) if isinstance(i, str) and _MODEL_RE.match(i)]
+        if ids:
+            _MODEL_CHOICES.update(ids=ids + [""], ts=now, source="models-api via toolserver")
+            return _MODEL_CHOICES["ids"]
+    except Exception:
+        pass
+    if _MODEL_CHOICES["ids"] is None:
+        _MODEL_CHOICES.update(ids=list(_MODEL_CHOICES_STATIC), ts=now, source="static")
+    return _MODEL_CHOICES["ids"]
 
 
 # --- B's model (local keeper) — picker over the fleet's text-gen registry --- #
@@ -6258,6 +12168,9 @@ print("apikey=%d" % (1 if (d.get("apiKey") or d.get("primaryApiKey")) else 0))
 PY
 else echo creds=0; fi
 [ -n "${ANTHROPIC_API_KEY:-}" ] && echo envkey=1 || echo envkey=0
+# 1.0.64: the fleet's durable OAuth token is served by the toolserver into login
+# shells (CLAUDE_CODE_OAUTH_TOKEN) — that IS a login, credentials file or not.
+[ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && echo envtoken=1 || echo envtoken=0
 '''
 
 
@@ -6270,7 +12183,8 @@ async def _probe_claude_auth(vm):
             kv[k.strip()] = v.strip()
     now = int(time.time())
     exp = int(kv["expires_at"]) if kv.get("expires_at", "").isdigit() else None
-    method = ("oauth" if kv.get("oauth") == "1" else
+    method = ("oauth-token" if kv.get("envtoken") == "1" else   # served by the toolserver (1.0.64)
+              "oauth" if kv.get("oauth") == "1" and not (exp is not None and exp < now) else
               "api-key" if kv.get("apikey") == "1" else
               "env-api-key" if kv.get("envkey") == "1" else "none")
     return {
@@ -6339,7 +12253,12 @@ done
 for f in /etc/sudoers.d.disabled-by-station/*; do [ -f "$f" ] && echo "disabled=$f"; done
 if id -nG "$U" 2>/dev/null | tr ' ' '
 ' | grep -qx sudo; then echo group=sudo; fi
-if [ "$(id -un)" = "$U" ]; then sudo -n true >/dev/null 2>&1 && echo effective=1 || echo effective=0
+if [ "$(id -un)" = "$U" ]; then
+  # 1.0.64: a host arm whose only root path is the hugpy-gate registry is
+  # "effective" too — report it as gate, not as a failed blanket grant.
+  if sudo -n true >/dev/null 2>&1; then echo effective=1
+  elif [ -x /usr/local/sbin/hugpy-gate ] && sudo -n /usr/local/sbin/hugpy-gate list >/dev/null 2>&1; then echo effective=gate
+  else echo effective=0; fi
 elif [ "$(id -u)" = 0 ]; then su -s /bin/bash "$U" -c 'sudo -n true' >/dev/null 2>&1 && echo effective=1 || echo effective=0
 else echo effective=?; fi
 [ -f /var/log/agent-sudo.log ] && tail -n 12 /var/log/agent-sudo.log | sed 's/^/log=/'
@@ -6364,7 +12283,9 @@ def _parse_sudo_state(out):
             st["group_sudo"] = True
         elif ln.startswith("effective="):
             v = ln[10:]
-            st["effective"] = True if v == "1" else False if v == "0" else None
+            st["effective"] = True if v in ("1", "gate") else False if v == "0" else None
+            if v == "gate":
+                st["gate"] = True      # 1.0.64: root only via the hugpy-gate registry
         elif ln.startswith("log="):
             st["log"].append(ln[4:])
         elif ln.startswith("tool="):
@@ -6597,6 +12518,7 @@ async def api_vm_console_status(request):
     """GET /api/stations/{name}/console-status — is a hugpy-station installed
     and serving inside this locus (VM or ssh host)? token present, port
     answering, install log."""
+    return _retired("workbench installer", request.match_info.get("name", ""))
     vm = request.match_info["name"]
     h = _ssh_host(vm)
     if vm not in await known_names() and not h:
@@ -6642,6 +12564,7 @@ async def api_vm_console_install(request):
     upgrade) a headless hugpy-station inside the VM from THIS host's own
     package files, serving on :8800 behind a per-VM token. Runs in the
     background; poll console-status. Provision-gated like create/delete."""
+    return _retired("workbench installer", request.match_info.get("name", ""))
     vm = request.match_info["name"]
     if vm not in await known_names() and not _ssh_host(vm):
         return web.json_response({"error": f"unknown locus {vm}"}, status=404)
@@ -6665,6 +12588,9 @@ _HOST_CANVAS = {"design": (Path(_hugpy_path("state", "wireframe.json", "wirefram
 
 async def api_host_canvas(request):
     kind = request.match_info["kind"]
+    own = _station_locus()
+    if own:                       # the host seat IS a locus → one central copy
+        return await _central_canvas_route(request, own, kind)
     path, key, cap = _HOST_CANVAS[kind]
     if request.method == "POST":
         try:
@@ -6797,6 +12723,20 @@ async def api_mct2_status(request):
     ground = "" if req_vm in ("", "@keeper") else req_vm
     if ground and ground not in await all_locus_names():
         ground = ""
+    if ground and _ssh_host(ground):
+        rows = await _seat_rows(request.app, ground, "mct")
+        if not rows:
+            return web.json_response({"present": False, "locus": ground,
+                                      "source": "toolserver seat/state"})
+        r = rows[0]
+        doc = dict(r.get("status") or {})
+        doc["alive"] = bool(r.get("alive"))
+        if not doc["alive"] and doc.get("state") != "offline":
+            doc["state"] = "offline"
+        doc.update({"present": True, "locus": ground, "source": "toolserver seat/state",
+                    "age_s": r.get("reported_ago_s"), "model": doc.get("model") or r.get("model"),
+                    "reporter_pid": r.get("pid")})
+        return web.json_response(doc)
     if ground:
         py = ("import json,os; "
               "p=os.path.expanduser('~/.config/hugpy-station/mct2/repl/status.json'); "
@@ -6854,6 +12794,40 @@ async def api_mct2_exchange_file(request):
                               "content": text[-200000:]})
 
 
+async def _seat_rows(app, locus, seat=""):
+    body = {"locus": locus}
+    if seat:
+        body["seat"] = seat
+    try:
+        rows = await _ts_call(app, "seat/state", body, timeout=8)
+        return [r for r in (rows or []) if isinstance(r, dict)]
+    except Exception:
+        return None
+
+
+async def _seat_auth_from_toolserver(app, locus):
+    """claude_auth for an ssh locus, from what its seats REPORTED (seat/state)
+    — the same document _probe_claude_auth built by ssh-ing in (1.0.77)."""
+    rows = await _seat_rows(app, locus)
+    h = _ssh_host(locus) or {}
+    if rows is None:
+        return {"ok": False, "locus": locus, "user": h.get("user", ""), "method": "unknown",
+                "authed": False, "installed": False, "error": "toolserver seat/state unreachable"}
+    live = [r for r in rows if r.get("alive")]
+    src = live or rows
+    auth_ok = any(r.get("auth_ok") for r in src) if src else False
+    latest = max(src, key=lambda r: r.get("reported") or 0) if src else {}
+    return {"ok": True, "locus": locus, "user": latest.get("login") or h.get("user", ""),
+            "home": "", "installed": bool(rows), "version": "",
+            "credentials_file": False, "credentials_path": "",
+            "method": "oauth-token" if auth_ok else "none", "authed": auth_ok,
+            "has_refresh_token": False, "expires_at": None, "expired": False,
+            "subscription": "", "error": "" if rows else "no seat has reported yet",
+            "source": "toolserver seat/state", "seats": [
+                {"seat": r.get("seat"), "alive": r.get("alive"), "stale": r.get("stale"),
+                 "model": r.get("model"), "reported_ago_s": r.get("reported_ago_s")} for r in rows]}
+
+
 async def api_seat_status(request):
     """GET /api/seat?vm=<locus> — everything this locus's seats launch with,
     in one document: grounding, models, directive source, fs switch, sudo,
@@ -6865,7 +12839,10 @@ async def api_seat_status(request):
         ground = req_vm
     else:
         ground = MODEL_VM
-    auth = await _probe_claude_auth(ground)
+    if ground and _ssh_host(ground):
+        auth = await _seat_auth_from_toolserver(request.app, ground)
+    else:
+        auth = await _probe_claude_auth(ground)
     models = _frontier_models()
     dtext, dsrc, dpath = _frontier_directive_text()
     return web.json_response({
@@ -6902,7 +12879,8 @@ async def api_firstrun(request):
              for exe, role in need.items()}
     token = bool(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
                  or (Path.home() / ".config/claude-auth/env").exists()
-                 or (Path.home() / ".claude-oauth.env").exists())
+                 or (Path.home() / ".claude-oauth.env").exists()
+                 or _fetch_toolserver_oauth_token())
     ready = all(s["present"] for s in seats.values()) and token
     return web.json_response({"ready": ready, "seats": seats, "token": token})
 
@@ -6931,14 +12909,26 @@ async def api_firstrun_provision(request):
         return web.json_response({"ok": False, "error": str(e)}, status=500)
 
 
+# backend → AC_SESSION_LABEL suffix on its per-launch ~/.claude-sessions dir.
+# claude-code labels with "frontier" (_claude_seat_cmd: AC_SESSION_LABEL=frontier);
+# mct labels with "mct" (ws_hostterm injects AC_SESSION_LABEL=mct). The scoped
+# wipe uses this to delete ONLY the requested backend's dirs.
+SEAT_WIPE_LABEL = {"claude-code": "frontier", "mct": "mct"}
+
+
 async def api_seat_wipe(request):
-    """POST /api/seat/wipe?vm=<locus> — factory-reset the frontier claude seat
-    on that locus. Kills its tmux session, deletes the seat dir
-    (~/.claude-seat/frontier — sessions, projects incl. A's memory, todos,
-    caches) plus A_STATE_DIRS under ~/.claude. ~/.claude/.credentials.json and
-    ~/.claude/.claude.json deliberately survive (see _claude_seat_cmd: wiping
-    them re-runs onboarding/login), so the next launch re-creates the seat
-    OAuth-authenticated with settings.json freshly stamped from the template."""
+    """POST /api/seat/wipe?vm=<locus>&backend=claude-code|mct — factory-reset
+    ONE frontier backend on that locus (operator 2026-09-10: "wipe seat must
+    wipe THAT backend's .claude — never destroy the other, never destroy
+    login"). Kills only that backend's tmux session (keeper-claude / keeper-mct)
+    and deletes only its per-launch config dirs under ~/.claude-sessions matched
+    by the backend's AC_SESSION_LABEL suffix (*-frontier / *-mct — see
+    SEAT_WIPE_LABEL). The SHARED login (~/.claude.json, ~/.claude-oauth.env, the
+    durable OAuth token) and the OTHER backend's dirs are deliberately NOT
+    touched, so both seats stay logged in and the sibling seat's state survives;
+    the next launch of the wiped backend re-provisions a fresh labeled session
+    dir from the surviving shared login. Defaults to claude-code when no backend
+    is given (back-compat with the pre-per-backend button)."""
     req_vm = (request.query.get("vm") or "").strip()
     if req_vm == "@keeper":
         ground = ""
@@ -6946,26 +12936,57 @@ async def api_seat_wipe(request):
         ground = req_vm
     else:
         ground = MODEL_VM
-    tsess = _tmux_session_for("frontier", "claude-code") or "keeper-claude"
-    state = " ".join('"$HOME/.claude/' + d + '"' for d in A_STATE_DIRS)
+    backend = (request.query.get("backend") or "claude-code").strip().lower()
+    # t-serve: the DEFAULT wipe on the host seat is now the serve surface's own
+    # reset — drop serve's labeled per-launch session dirs and restart its unit.
+    # NO tmux session is killed (keeper-claude is never touched). ?surface=tmux
+    # (or backend=mct) still runs the legacy per-backend tmux wipe below.
+    want = (request.query.get("surface") or "").strip().lower()
+    if not ground and want != "tmux" and backend in ("serve", "claude-code"):
+        surface_now, _ac = await _keeper_surface_now()
+        if want == "serve" or surface_now == "serve":
+            label = os.environ.get("AC_SESSION_LABEL") or "keeper-serve"
+            rc, out, err = await _locus_run(
+                "", f'rm -rf "$HOME/.claude-sessions/"*-{label}; echo wiped', timeout=30)
+            res = await _ac_serve_restart("seat wipe")
+            ok = rc == 0 and "wiped" in (out or "") and bool(res.get("ok"))
+            audit(request, "seat_wipe", f"locus=host surface=serve unit={AC_SERVE_UNIT} rc={rc}", ok=ok)
+            return web.json_response({
+                "ok": ok, "locus": "host", "surface": "serve", "backend": "serve",
+                "unit": AC_SERVE_UNIT, "killed": None,
+                "removed": [f"~/.claude-sessions/*-{label}"],
+                "kept": ["~/.claude.json", "~/.claude-oauth.env (OAuth token)",
+                         "every tmux seat (keeper-claude/keeper-codex untouched)"],
+                "restart": res}, status=200 if ok else 502)
+    if backend not in SEAT_WIPE_LABEL:
+        return web.json_response(
+            {"error": "backend must be claude-code|mct|serve"}, status=400)
+    label = SEAT_WIPE_LABEL[backend]
+    tsess = (_tmux_session_for("frontier", backend)
+             or ("keeper-mct" if backend == "mct" else "keeper-claude"))
+    # dir mode: each launch lands in ~/.claude-sessions/<stamp>-<pid>-<label>.
+    # The quoted prefix + unquoted glob deletes only this backend's labeled dirs;
+    # `rm -rf` with the literal (no match) is a silent no-op. Shared login and the
+    # other backend's (differently-labeled / unlabeled) dirs are untouched.
     script = (
         f"tmux -L {KEEPER_TMUX_SOCK} kill-session -t ={tsess} 2>/dev/null; "
-        f'rm -rf "$HOME/.claude-seat/frontier" {state}; echo wiped')
+        f'rm -rf "$HOME/.claude-sessions/"*-{label}; echo wiped')
     rc, out, err = await _locus_run(ground, script, timeout=30)
     ok = rc == 0 and "wiped" in (out or "")
     audit(request, "seat_wipe",
-          f"locus={ground or 'host'} sess={tsess} rc={rc}", ok=ok)
+          f"locus={ground or 'host'} backend={backend} sess={tsess} rc={rc}", ok=ok)
     if not ok:
         return web.json_response(
             {"error": (err or out or "wipe failed").strip(),
-             "locus": ground or "host"}, status=502)
+             "locus": ground or "host", "backend": backend}, status=502)
+    other = "mct" if backend == "claude-code" else "claude-code"
     return web.json_response({
-        "ok": True, "locus": ground or "host", "killed": tsess,
-        "removed": ["~/.claude-seat/frontier"] +
-                   ["~/.claude/" + d for d in A_STATE_DIRS],
-        "kept": ["~/.claude/.credentials.json", "~/.claude/.claude.json"],
-        "relaunch": "open the frontier claude-code seat — it re-provisions "
-                    "from the template and the surviving OAuth credentials"})
+        "ok": True, "locus": ground or "host", "backend": backend, "killed": tsess,
+        "removed": [f"~/.claude-sessions/*-{label}"],
+        "kept": ["~/.claude.json", "~/.claude-oauth.env (OAuth token)",
+                 f"the {other} backend's session dirs"],
+        "relaunch": f"open the frontier {backend} seat — it re-provisions a fresh "
+                    "labeled session dir from the surviving shared login"})
 
 
 async def api_about(request):
@@ -6994,8 +13015,73 @@ async def api_about(request):
     })
 
 
+def _mct_sidecar_dirs():
+    """Where the mct sidecars (mct_gateway.py, mct_http.py, bin/mct-pull,
+    bin/mct-push, static/mct-renderer.js) may live besides this backend's own
+    tree: the locus's per-version app tree under its state dir (how the keeper
+    runs) — the /opt package may predate them (station.apply installs only
+    server.py + two static files)."""
+    return [ROOT.parent, FV_STATE_HOME / "app" / "current" / "resources"]
+
+
+def _ensure_mct_cli_links():
+    """~/.local/bin/mct-pull and mct-push → the shipped wrappers, so every
+    native seat (bash -l PATH) can pull its context and push its reply. Only a
+    missing link or a symlink is (re)pointed — a real file is never clobbered."""
+    home_bin = Path(os.path.expanduser("~/.local/bin"))
+    try:
+        home_bin.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return
+    for name in ("mct-pull", "mct-push"):
+        target = next((d / "bin" / name for d in _mct_sidecar_dirs() if (d / "bin" / name).is_file()), None)
+        if target is None:
+            continue
+        link = home_bin / name
+        try:
+            if link.is_symlink():
+                if os.readlink(link) != str(target):
+                    link.unlink()
+                    link.symlink_to(target)
+            elif not link.exists():
+                link.symlink_to(target)
+        except OSError as e:
+            print(f"mct: could not link {link} → {target}: {e}", file=sys.stderr)
+
+
+async def _mct_static_fallback(request):
+    """/static/mct-renderer.js when the packaged static dir predates it."""
+    for d in _mct_sidecar_dirs():
+        p = d / "backend" / "static" / "mct-renderer.js"
+        if p.is_file():
+            return web.FileResponse(p, headers={"Cache-Control": "no-store"})
+    raise web.HTTPNotFound()
+
+
 def make_app():
     app = web.Application(middlewares=[auth_mw], client_max_size=MAX_UPLOAD_SIZE)
+    # 2026-09-18: runtime-mutable state holder set BEFORE startup (pre-freeze)
+    # so the hot-loop writes below do not trip aiohttp's "Changing state of
+    # started application is deprecated" (spammed once per SSE event).
+    app["_rt"] = {}
+    # mct v2: the durable pointer-exchange ledger is the DEFAULT operator↔keeper
+    # channel. Import its sidecars from this tree, else the locus's app tree.
+    install_mct = None
+    try:
+        from mct_http import install as install_mct
+    except ImportError:
+        for d in _mct_sidecar_dirs():
+            if (d / "backend" / "mct_http.py").is_file() and str(d / "backend") not in sys.path:
+                sys.path.append(str(d / "backend"))
+        try:
+            from mct_http import install as install_mct
+        except ImportError as e:
+            print("mct: ledger broker NOT installed (mct_http/mct_gateway missing): " + str(e), file=sys.stderr)
+    if install_mct is not None:
+        install_mct(app, FV_STATE_HOME, _station_locus, _ts_call, _frontier_enabled,
+                    collate=_mct_b_collate, capture=_mct_b_capture)
+    _ensure_mct_cli_links()
+    app.on_startup.append(_start_log_ring)
     app.on_startup.append(_start_reaper)
     app.on_cleanup.append(_stop_reaper)
     # console-api sidecar: the full fleet management API, same as the web console
@@ -7004,6 +13090,8 @@ def make_app():
     app.on_startup.append(_start_bugreport_api)
     app.on_startup.append(_start_reminders)     # ⏱ board reminder cycle
     app.on_cleanup.append(_stop_reminders)
+    app.on_startup.append(_start_bugscan)       # 🐞 intermittent local-agent log review
+    app.on_cleanup.append(_stop_bugscan)
     app.on_cleanup.append(_stop_bugreport_api)
     app.router.add_get("/api/vms", api_vms_merged)     # sidecar rows + ⇅ ssh hosts
     app.router.add_get("/api/about", api_about)        # Help→About + shell title
@@ -7029,7 +13117,21 @@ def make_app():
     app.router.add_post("/api/fleet/message", fleet_message_post)
     app.router.add_post("/api/vm/{vm}/todo/brief", vm_todo_brief_post)   # ⧉ brief keeper
     app.on_startup.append(_start_fleet_mail)   # 30s station-outbox collector
+    app.on_startup.append(_start_loci_sync)    # toolserver loci/pointers → ssh hosts + pulled sessions
+    app.on_startup.append(_start_todo_ts_sync)  # 1.0.90: toolserver todos (own locus + '') → local board file
+    app.on_cleanup.append(_stop_todo_ts_sync)
+    app.on_startup.append(_start_local_seat_fit)  # 1.0.85: opencode/qwen-code get the toolserver bridge
+    app.on_startup.append(_start_events_relay)  # 1.0.77: toolserver change bus → /api/events
+    app.on_cleanup.append(_stop_events_relay)
+    app.router.add_get("/api/events", api_events)
+    app.on_cleanup.append(_stop_loci_sync)
+    app.on_startup.append(_start_idle_relaunch)  # 1.0.68: relaunch the idle host seat on a newer init prompt
+    app.on_cleanup.append(_stop_idle_relaunch)
     app.on_cleanup.append(_stop_fleet_mail)
+    # ◳ host-seat canvas BEFORE the bugreport suffix loop: "flow" is one of its
+    # suffixes and used to swallow /api/vm/@keeper/flow ("unknown route").
+    app.router.add_get("/api/vm/@keeper/{kind:design|flow}", api_host_canvas)
+    app.router.add_post("/api/vm/@keeper/{kind:design|flow}", api_host_canvas)
     for _suf in BUGREPORT_SUFFIXES:   # bugreport-api owns these per-VM
         app.router.add_route("*", "/api/vm/{vm}/" + _suf, bugreport_proxy)
     for _suf in ("todo-history", "todo/assist", "todo-revision", "messages"):
@@ -7040,8 +13142,6 @@ def make_app():
     app.router.add_post("/api/term/show", api_term_show)
     app.router.add_get("/api/flows", api_flows_list)
     app.router.add_post("/api/flows/{fid}", api_flow_save)
-    app.router.add_get("/api/vm/@keeper/{kind:design|flow}", api_host_canvas)
-    app.router.add_post("/api/vm/@keeper/{kind:design|flow}", api_host_canvas)
     app.router.add_route("*", "/api/vm/{tail:.*}", api_proxy)
     app.router.add_route("*", "/api/console/{tail:.*}", api_proxy)
     app.router.add_route("*", "/api/discord/{tail:.*}", api_proxy)
@@ -7085,11 +13185,22 @@ def make_app():
     # route that puts a switched-to VM's shell IN that VM (term-wrapper).
     app.router.add_route("*", "/term/{tail:.*}", term_proxy)
     app.router.add_route("*", "/term", term_proxy)
+    # session/focus subsystem surfaces (see SESSION-FOCUS-SUBSYSTEM.md on ae)
+    app.router.add_route("*", "/ac/{tail:.*}", ac_proxy)
+    app.router.add_route("*", "/ac", ac_proxy)
+    app.router.add_route("*", "/ts/{tail:.*}", ts_proxy)
+    app.router.add_post("/api/handoff/spawn", handoff_spawn)
+    app.router.add_get("/api/handoff/spawn", handoff_spawn)        # capability probe
+    app.router.add_get("/api/toolserver/config", api_toolserver_config_get)   # 1.0.63
+    app.router.add_post("/api/toolserver/config", api_toolserver_config_post)
+    app.router.add_get("/api/sessions/pulled", api_sessions_pulled)
     app.router.add_get("/api/term/backends", term_backends)
     app.router.add_get("/api/term/frontier", term_frontier)
     app.router.add_post("/api/term/frontier", term_frontier)
     app.router.add_get("/api/term/bgate", term_bgate)
     app.router.add_post("/api/term/bgate", term_bgate)
+    app.router.add_post("/api/term/unstick", term_unstick)
+    app.router.add_post("/api/term/paste", term_paste)
     app.router.add_get("/api/browser-access", browser_access_get)
     app.router.add_post("/api/browser-access", browser_access_post)
     app.router.add_get("/api/a/template", a_template_get)
@@ -7098,13 +13209,27 @@ def make_app():
     app.router.add_get("/api/b/guidance", b_guidance_get)
     app.router.add_post("/api/b/guidance", b_guidance_post)
     app.router.add_post("/api/b/chat", b_chat)
+    app.router.add_get("/api/b/findings", api_b_findings)                # B's findings set (1.0.124)
     app.router.add_get("/api/mct/todo", mct_todo_get)
     app.router.add_post("/api/mct/prompt", mct_prompt)
     app.router.add_post("/api/mct/prompt/revise", mct_prompt_revise)
     app.router.add_get("/api/mct/live", mct_live)
+    app.router.add_get("/api/mct/live/object", mct_live_object)   # mct v2: render a ledger object by pointer
     app.router.add_post("/api/mct/todo", mct_todo_post)
     app.router.add_get("/api/mct/todo/history", mct_todo_history)
     app.router.add_post("/api/mct/todo/assist", mct_todo_assist)
+    app.router.add_post("/api/mct/todo/ping", mct_todo_ping)           # board t2: per-item keeper ping
+    app.router.add_get("/api/frontier/delegate", api_frontier_delegate)    # board t7: delegate-only switch
+    app.router.add_post("/api/frontier/delegate", api_frontier_delegate)
+    app.router.add_post("/api/findings/{sig}/disposition", api_findings_disposition)  # 1.0.124
+    app.router.add_get("/api/findings/notify", api_findings_notify)                     # 1.0.124
+    app.router.add_get("/api/loops", api_loops)                        # ⚠ crash/retry loop set (1.0.118)
+    app.router.add_get("/api/steward/log", api_steward_log)            # board t1: console log backlog
+    app.router.add_get("/api/steward/log/stream", api_steward_log_stream)  # board t1: live SSE log
+    app.router.add_get("/api/locus/journal", api_locus_journal)             # 📜 resolved journal source
+    app.router.add_get("/api/locus/journal/stream", api_locus_journal_stream)  # 📜 journalctl -f (SSE)
+    app.router.add_get("/api/bugscan", api_bugscan)                  # 🐞 local-agent log review
+    app.router.add_post("/api/bugscan", api_bugscan)
     app.router.add_post("/api/mct/finder", mct_finder)
     app.router.add_get("/api/mct/vm", mct_vm_get)
     app.router.add_post("/api/mct/vm", mct_vm_post)
@@ -7126,6 +13251,15 @@ def make_app():
     app.router.add_post("/api/frontier/handoff", api_frontier_handoff)
     app.router.add_get("/api/frontier/models", api_frontier_models)
     app.router.add_post("/api/frontier/models", api_frontier_models)
+    app.router.add_get("/api/gpt", api_gpt)
+    app.router.add_post("/api/gpt", api_gpt)
+    app.router.add_get("/api/frontier/cache", api_frontier_cache)       # 1.0.67 prompt-cache countdown; ?backend= per seat (steward tabs)
+    app.router.add_get("/api/frontier/limits", api_frontier_limits)     # p515: frontier quota/limit state for the seat-card LimitsBadge
+    app.router.add_get("/api/frontier/agents", api_frontier_agents)     # steward tabs: the seat's live subagents
+    app.router.add_get("/api/frontier/state", api_frontier_state)       # 1.0.68 rolling state (toolserver assess/state)
+    app.router.add_post("/api/frontier/relaunch", api_frontier_relaunch)  # 1.0.68 fresh seat on the init prompt
+    app.router.add_get("/api/ac/rollover", api_ac_rollover)            # p509 serve session-rollover status
+    app.router.add_post("/api/ac/rollover", api_ac_rollover)           # p509 roll/cancel forwarding
     app.router.add_get("/api/b/model", api_b_model)
     app.router.add_post("/api/b/model", api_b_model)
     app.router.add_get("/api/claude/auth", api_claude_auth)
@@ -7135,6 +13269,8 @@ def make_app():
     app.router.add_post("/api/stations/{name}/console-install", api_vm_console_install)
     app.router.add_get("/api/frontier/fs/status", api_frontier_fs_status)
     app.router.add_post("/api/frontier/fs/toggle", api_frontier_fs_toggle)
+    if not (STATIC / "mct-renderer.js").is_file():   # packaged static dir predates mct v2
+        app.router.add_get("/static/mct-renderer.js", _mct_static_fallback)
     app.router.add_static("/static/", STATIC, show_index=False)
     # 📖 the shipped guides: the docs drawer fetches "/docs/<name>.md" (not
     # under /static/), which had no route here — the docs existed on disk but
@@ -7223,4 +13359,10 @@ if __name__ == "__main__":
     print(f"station-console on {scheme}://{HOST}:{PORT}  (auth: {mode})")
     if not AUTH_REQUIRED:
         print("  !! no password set — OPEN on loopback only. Run --set-password.")
-    web.run_app(make_app(), host=HOST, port=PORT, ssl_context=ssl_ctx, print=None)
+    # board t9 (operator 2026-09-10): a stop used to take the full 60 s aiohttp
+    # shutdown grace because long-lived browser connections (the /api/events
+    # SSE stream, terminal websockets, the 📜 log stream) never close on their
+    # own — then systemd's 90 s stop timeout on top. 3 s is plenty: every
+    # stream here is a hint the browser re-opens by itself.
+    web.run_app(make_app(), host=HOST, port=PORT, ssl_context=ssl_ctx, print=None,
+                shutdown_timeout=3.0)

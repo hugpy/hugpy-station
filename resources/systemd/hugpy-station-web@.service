@@ -11,17 +11,35 @@ Wants=network-online.target
 
 [Service]
 User=%i
-# Uniform credential seam (same contract as hugpy-agent's generated agent.env):
-# the installer writes HUGPY_API_KEY / HUGPY_BASE / HUGPY_URL here, root-0600.
-# %h is NOT the instance user's home in system units, hence the /etc path.
+# ENV CONTRACT (1.0.90) — nothing here depends on a hand-edited file:
+#   /etc/hugpy-station/toolserver.env   host seam: STATION_CONSOLE_TOOLSERVER + token
+#                                       (hugpy-station-locus writes it once per host)
+#   /etc/hugpy-station/hugpy-api.env    host seam: HUGPY_URL + HUGPY_API_KEY (optional)
+#   /etc/hugpy-station/%i.env           THE instance file, root 0600, written by the
+#                                       package's first-run (hugpy-station-locus +
+#                                       hugpy-station-firstrun): PORT, STATION_LOCUS,
+#                                       HUGPY_STATION_STATE, STATION_CONSOLE_TOKEN,
+#                                       HUGPY_URL, HUGPY_API_KEY, operator token.
+# PORT rule: the instance file's PORT is chosen ONCE at first-run — the first
+# free port from 8898 upward, distinct from every other instance on the host —
+# and never changed afterwards; the 8898 below is only the single-instance
+# default when no instance file exists. %h is root's home in a system unit,
+# hence the /etc path.
+EnvironmentFile=-/etc/hugpy-station/toolserver.env
+EnvironmentFile=-/etc/hugpy-station/hugpy-api.env
 EnvironmentFile=-/etc/hugpy-station/%i.env
 Environment=HOST=127.0.0.1
 Environment=PORT=8898
 Environment=STATION_CONSOLE_REQUIRE_AUTH=1
 Environment=STATION_CONSOLE_PROXY_TLS=1
-# bash -l: the account's own login PATH (~/.local/bin for claude/hugpy-agent,
+# STATE: the ONE state dir. The run wrapper pins HUGPY_STATION_STATE explicitly
+# (the instance file's value, else ${XDG_CONFIG_HOME:-<home>/.config}/hugpy-station), exports AC_ROOT
+# (<state>/abstract-claude — the seats' model/fresh-session config), re-runs the
+# idempotent first-run so every dir the app expects exists, then exec's server.py
+# from THIS package — /opt can never lag what the unit runs.
+# bash -l: the account's own login PATH (~/.local/bin for claude/abstract-claude,
 # /snap/bin for lxc) — the same seats the desktop app sees.
-ExecStart=/bin/bash -lc 'exec python3 "/opt/hugpy-station/resources/backend/server.py"'
+ExecStart=/bin/bash -l /opt/hugpy-station/resources/bin/hugpy-station-web-run
 Restart=on-failure
 RestartSec=3
 

@@ -1,0 +1,26 @@
+# Reap tmux-spawn-*.scope units left behind by dead agent seats (1.0.91).
+#
+# 2026-09-16: an orphaned `ugrep -rn … /` sat for 10 h in a scope whose tmux
+# pane was long gone, read ~854 GB and drove load to ~30. tmux creates one
+# scope per pane but nothing removes a scope whose pane died while a
+# grandchild kept running.
+#
+# USER unit. NOT enabled by the package — the station user enables it:
+#   ln -sf <app>/resources/systemd/sweep-orphan-seat-scopes.service \
+#          <app>/resources/systemd/sweep-orphan-seat-scopes.timer \
+#          ~/.config/systemd/user/
+#   systemctl --user daemon-reload && systemctl --user enable --now sweep-orphan-seat-scopes.timer
+# hugpy-station-firstrun links resources/bin CLIs into ~/.local/bin, which is
+# the path below; run the script straight from the app tree instead if you
+# prefer (ExecStart takes an absolute path either way).
+[Unit]
+Description=Reap orphaned tmux-spawn-*.scope units left by dead agent seats
+Documentation=man:hugpy-station(1)
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/sweep-orphan-seat-scopes --verbose
+# The sweeper must never be the thing that causes load; it only reads /proc.
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=120

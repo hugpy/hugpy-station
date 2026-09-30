@@ -24,6 +24,13 @@ see the fleet must never pretend it can.**
 **Use case:** one place to see and power the whole fleet, with the truth about
 what it can and can't currently see.
 
+**Removing a locus (1.0.80).** In the 🖥 stations drawer each VM / ssh host has
+two ways out: **◌ hide locus** drops it from the tab strip and dropdown while
+leaving the machine untouched (it stays in the drawer greyed, with **◉ unhide**;
+stored in `~/.config/hugpy-station/hidden-loci.json`), and the destructive
+**🗑 delete** (LXD guest, irreversible) / **✕ remove** (ssh host, also archives
+the locus centrally). Hide when you just want a quieter strip.
+
 ---
 
 ## Terminals: keeper vs shell, and the side dock
@@ -52,9 +59,10 @@ your terminal's geometry — operator task o3.)*
 A lightweight wireframe editor. Sketch a UI on a 1280×800 canvas (boxes with
 roles: container, nav, sidebar, button, input, text, image, list, note).
 
-- **→ VM** writes the design to `~/wireframe.json` in the VM for the keeper to
-  read.
-- **← VM** pulls back what the keeper wrote or revised.
+- **→ VM** hands the design to the locus (toolserver `canvas/put`, kind
+  `design`) and nudges its keeper with a `[canvas]` board request.
+- **← VM** pulls back what the keeper wrote or revised (`canvas/get`). Edits on
+  either side land live — the drawer follows the DB change bus.
 - **⧉** copies it as a fenced block to paste into the keeper chat.
 
 **Use case:** hand a layout to the keeper and get one back — the same sketch you
@@ -93,11 +101,12 @@ sign-off; it is now a spec to implement against). Editing nodes or edges while
 agreed automatically drops it back to proposed, and every save bumps the `rev`
 counter so board notes can cite an exact revision ("as of flow rev 4").
 
-- **→ VM** writes the flow to `~/flow.json` in the VM (bumps rev).
-- **← VM** pulls back what the keeper derived or revised.
+- **→ VM** hands the flow to the locus (toolserver `canvas/put`, kind `flow`,
+  bumps rev) and nudges its keeper with a `[canvas]` board request.
+- **← VM** pulls back what the keeper derived or revised (`canvas/get`); a
+  keeper's `canvas_put` also lands live over the DB change bus.
 - **⧉** copies it as a fenced ` ```flow ` block; the toolbar's **📋** imports
-  one the keeper printed. Until the host route lands (operator item o19), the
-  drawer shows a calm "not enabled" note and this block exchange is the road.
+  one the keeper printed — still handy for chat, no longer the only road.
 
 **Use case:** the keeper derives the flow of a real program, you redraw the
 loop the way it *should* work, mark it agreed — and the keeper implements
@@ -124,6 +133,7 @@ Inside, the board is **tabbed**, each tab with a live count:
 - **⚖ proposals** — see below.
 - **⚑ operator** — see below.
 - **🔖 bookmarks** — stable builds / checkpoints the keeper pins.
+- **🧭 direction** — standing operator rulings the keeper carries forward; no dedicated tab yet, they render in the **queue** lane.
 - **done** — completed items.
 
 **Item types:**
@@ -141,6 +151,21 @@ Inside, the board is **tabbed**, each tab with a live count:
   columns, a keeper **recommendation**, and **accept / decline**. Use case: when
   a choice has real trade-offs, the keeper lays them out and you decide on the
   record instead of in scrollback.
+- **🧭 direction** — a standing ruling or invariant from the operator ("always
+  X", "never Y") that governs later work. Not a task and not the keeper's
+  opinion — only the operator's word becomes a direction; the keeper carries it
+  forward and marks where it was applied.
+
+**Which lane** (full contract: [TODO-BOARD-SOP.md](TODO-BOARD-SOP.md)):
+
+| type | tab · glyph | id | when to use / when NOT | note template |
+|---|---|---|---|---|
+| `todo` | queue · ☑ | `t<N>` | your own queue — incl. anything the operator MIGHT want. NOT an ask the operator must action. | `SCOPE: … — DONE: …` |
+| `request` | queue · ✋ | `t<N>` | an ask AT the keeper (operator/peer filed it). NOT a self-note. | `ASK <who>: … — DONE: …` |
+| `bookmark` | 🔖 | `bm<N>` | a stable build / shipped commit / verified checkpoint. NOT a plan. | `SHIPPED <UTC>: … — VERIFIED: … — ROLLBACK: …` |
+| `operator` | ⚑ | `o<N>` | ONE action only the operator can take (privilege you lack), with a copyable `cmd`. NOT a wish-list. | `@worker: … task: …` + `cmd:` block |
+| `proposal` | ⚖ | `p<N>` | a decision wanted FROM the operator: pros/cons/rec. NOT self-decided. | `PROBLEM: … / OPTIONS: A) … B) … / REC: …` |
+| `direction` | queue · 🧭 | `d<N>` | a standing operator ruling/invariant you carry forward. NOT a one-off task or your own opinion. | `RULING (<who, date>): "<quote>" — STATE: <APPLIED\|FOLDED\|CLOSED>` |
 
 **Priority:** any actionable item can carry `"priority": "medium"` or `"high"`
 (absent = low, the default). High wears a red chip, medium amber, low none; open

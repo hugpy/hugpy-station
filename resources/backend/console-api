@@ -67,7 +67,7 @@ TODO_MAX_ITEMS = 500
 # (its /health & friends are SPA catch-alls). It acts as the to-do section's
 # own keeper: parses free-text asks into items and proposes tidied lists.
 # Down → these endpoints 502, everything else works.
-HUGPY_URL = os.environ.get("HUGPY_URL", "http://192.168.1.250:7002")
+HUGPY_URL = os.environ.get("HUGPY_URL") or os.environ.get("HUGPY_BASE") or "http://127.0.0.1:7002"   # 1.0.65: central lives on the host now (the hugpy VM is gone); other hosts set HUGPY_URL in toolserver.env
 
 # Keeper agents advertised to the console UI. The UI renders a per-agent
 # launch chooser ONLY when this list has >1 entry; a fleet without the

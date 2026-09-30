@@ -1,0 +1,61 @@
+# unshipped-artifacts.tsv — THE INVENTORY OF THINGS THAT COULD SILENTLY DRIFT.
+# Read by resources/bin/station-drift-check.sh (section G), which build-release.sh
+# runs before it will build. Every live artifact that the running system executes
+# or serves but that NO shipping repo owns must have a line here.
+#
+# COLUMNS (tab-separated):
+#   path  class  md5  disposition  note
+#
+#   class        authored | derived | state
+#   disposition  SHIP-ME  authored, load-bearing, in no shipping repo.
+#                         ALWAYS FAILS the gate. Clear it by bringing the file
+#                         into /srv/hugpy/src/station-app/resources/ (or c144)
+#                         and changing the line to ACK or deleting it.
+#                ACK      acknowledged and PINNED to the md5 below. Passes while
+#                         byte-identical; FAILS the moment it is edited, because
+#                         an edit to an unshipped file is live work that the next
+#                         install will destroy. Re-pin with --register only after
+#                         deciding the edit does not need to ship.
+#                STATE    genuine runtime state. NEVER checked. Recorded here
+#                         only so the authored/state distinction is on the record
+#                         and nobody re-litigates it.
+#
+# Compiled 2026-09-19 from a full sweep of /srv/vm_mgr/hugpy-station,
+# /srv/vm_mgr/abstract-claude-serve, /srv/hugpy/abstract-claude-serve,
+# /srv/vm_mgr/bin and the vm_mgr systemd user units.
+
+# ── SHIP-ME: authored, load-bearing, owned by nothing ───────────────────────
+/srv/vm_mgr/bin/exchange_capture_hook.py	authored	b51ff961a6787e65caa21be9576f033e	ACK	Stop hook. SHIPPED 1.0.110 as resources/backend/hooks/exchange_capture_hook.py, firstrun links it to ~/.local/bin; live copy pinned until install cuts over.
+/srv/vm_mgr/bin/ledger_hook.py	authored	2602954efe250c309881cd33298e95b3	ACK	Session-ledger hook. SHIPPED 1.0.110 as resources/backend/hooks/ledger_hook.py, firstrun links to ~/.local/bin; live copy pinned until install cuts over.
+/srv/vm_mgr/abstract-claude-serve/run-station.sh	authored	50b7bd00a3dd3f9ce752b6e41e288386	ACK	Superseded by shipped resources/bin/abstract-claude-serve-run + resources/systemd/abstract-claude-serve@.service (keeper values via <state>/env/station.env). Live fork pinned until the @ unit is repointed to the shipped runner.
+/srv/hugpy/abstract-claude-serve/run-station.sh	authored	af4a1b3218fb404891d7adc1871aa00e	ACK	hugpy :9125 fork. Same go-forward as the vm_mgr run-station.sh: shipped abstract-claude-serve-run + per-locus station.env. Live fork pinned until cutover. hand-edit by hugpy 2026-09-29 03:27 CDT, content unexplained, ACKed by keeper 2026-09-30 pending r1160
+/srv/vm_mgr/.config/systemd/user/abstract-claude-serve@.service	authored	ef0a96f0842a8ad2a560b3abcd82acf9	ACK	RELINKED 2026-09-30 (1.0.128 station-serve-update): byte-identical to shipped resources/systemd/abstract-claude-serve@.service (ExecStart %h/.local/bin/abstract-claude-serve-run %i). Hand fork kept as abstract-claude-serve@.service.hand-20260929202254.
+/srv/vm_mgr/hugpy-station/a-settings-template.json	authored	cceec7edbaa12df05e4bbcc137fd4f8a	ACK	Live hook block folded into shipped seed resources/backend/a-settings-template.json (1.0.110). Live state copy pinned; new installs seed the wiring.
+
+# ── ACK: unshipped but pinned; any edit fails the gate ──────────────────────
+/srv/vm_mgr/abstract-claude-serve/run.sh	authored	391da426497d07cfcccff8703b53c534	ACK	dev console launcher (:9123, dev.hugpy.ai/claude). Same class as run-station.sh but not on the keeper path.
+/srv/vm_mgr/bin/apply-steward-tabs-keeper.py	authored	7e6fc62ce41212cbeed7d07803fca6f0	ACK	one-off operator tool, not on any serving path.
+/srv/vm_mgr/bin/deploy-mct-v2.sh	authored	52a532c3f397bc01593688a97e6c1578	ACK	one-off deploy helper.
+/srv/vm_mgr/bin/handoff-roll	authored	6922eec5d9bebbcf0d1a3196479af3ec	ACK	driven by handoff-roll.service/.timer below.
+/srv/vm_mgr/hugpy-station/ac-loci.json	authored	c948eeda17d472fcd04c0811c038d283	ACK	small locus registry; no installer seeds it.
+/srv/vm_mgr/.config/systemd/user/7006_hugpy_station.service	authored	451b46a6b622d93cc851783fb7d9f8f9	ACK	no reference anywhere in station-app.
+/srv/vm_mgr/.config/systemd/user/handoff-roll.service	authored	08ab322c2b9177aa9b1de2e07009bffb	ACK	no reference anywhere in station-app.
+/srv/vm_mgr/.config/systemd/user/handoff-roll.timer	authored	4a8834f4fdea3c423159df044569c18e	ACK	no reference anywhere in station-app.
+/srv/vm_mgr/.config/systemd/user/hugpy-station-web.service	authored	d9c6b437170a75e34816080f5d3f7532	ACK	deliberate vm_mgr-sovereign replacement for the shipped hugpy-station-web@.service template (says so in its own header).
+/srv/vm_mgr/.config/systemd/user/identity-render.service	authored	1347ae6750d2f13dac37089a099c0473	ACK	no reference anywhere in station-app.
+/srv/vm_mgr/.config/systemd/user/mct-conversation-archive.service	authored	7f7d3fe1e052edd75a9ea859ecdb2b0d	ACK	no reference anywhere in station-app.
+/srv/vm_mgr/.config/systemd/user/web-console.service	authored	522f9a304a9f518da3502bf1e526a5df	ACK	no reference anywhere in station-app.
+
+# ── STATE: never checked, recorded so the distinction stays settled ─────────
+/srv/vm_mgr/hugpy-station/abstract-claude/roster.json	state	-	STATE	abstract_claude runtime roster.
+/srv/vm_mgr/hugpy-station/abstract-claude/models.json	state	-	STATE	discovered model list.
+/srv/vm_mgr/hugpy-station/b-model.json	state	-	STATE	host-detected B model; hugpy-station-firstrun generates it at install.
+/srv/vm_mgr/hugpy-station/seat-launch	state	-	STATE	per-seat launchers generated by the station backend. (Not drift; they do accumulate without rotation.)
+/srv/vm_mgr/hugpy-station/console.sqlite3	state	-	STATE	console DB.
+/srv/vm_mgr/hugpy-station/env	state	-	STATE	secrets/env; deliberately never packaged.
+
+# ── DERIVED and already correct — listed so the sweep is complete ───────────
+# /srv/vm_mgr/bin/sweep-orphan-seat-scopes.sh        == resources/bin/sweep-orphan-seat-scopes (byte-identical)
+# /srv/vm_mgr/hugpy-station/frontier-models.json     seeded by hugpy-station-firstrun from resources/backend/frontier-models.default.json
+# /srv/vm_mgr/hugpy-station/abstract-claude/config.json  merged by firstrun from resources/backend/abstract-claude.default.json
+# webui-station trees are covered mechanically by section D, not here.
