@@ -22,6 +22,8 @@
 #                         <AC_ROOT>/webui-station). REBAKED FROM THE INSTALLED
 #                         PACKAGE ON EVERY START — do not hand-edit it.
 #   AC_SESSION_LABEL      per-launch session dir label; what a seat wipe deletes
+#   AC_SESSION_DIRECTIVES_DIR  rendered per-session directives (default
+#                         <state>/directives/rendered) — RE-DERIVED ON EVERY START
 # A settings template at <state>/a-settings-template.json (or the shipped
 # resources/backend/a-settings-template.json) is passed through as
 # AC_SETTINGS_JSON, so serve-launched sessions get the same permissions deny
@@ -51,7 +53,11 @@ _tsu="${HUGPY_TOOLSERVER_URL:-${TOOLSERVER_URL:-${STATION_CONSOLE_TOOLSERVER:-}}
 [ -n "$_tsu" ] && export TOOLSERVER_URL="$_tsu"
 [ -n "${TOOLSERVER_TOKEN:-}" ] || export TOOLSERVER_TOKEN="${STATION_CONSOLE_TOOLSERVER_TOKEN:-${HUGPY_OPERATOR_TOKEN:-}}"
 [ -n "${HUGPY_OPERATOR_TOKEN:-}" ] && [ -z "${TOOLSERVER_OPERATOR_TOKEN:-}" ] && export TOOLSERVER_OPERATOR_TOKEN="$HUGPY_OPERATOR_TOKEN"
-export EXCHANGE_LOCUS="${EXCHANGE_LOCUS:-${STATION_LOCUS:-keeper}}"
+# 1.0.141: no silent `keeper` fallback — an unconfigured locus leaves it unset
+# (abstract-claude then resolves its locus from the registry by login@host).
+_el="${EXCHANGE_LOCUS:-${STATION_LOCUS:-}}"
+case "$_el" in ae-vm-mgr|ae_vm_mgr) _el=keeper ;; esac   # documented legacy alias
+if [ -n "$_el" ]; then export EXCHANGE_LOCUS="$_el"; else unset EXCHANGE_LOCUS; fi
 [ -n "${EXCHANGE_INGEST_URL:-}" ] && export EXCHANGE_INGEST_URL
 export AC_USAGE_BACKEND="${AC_USAGE_BACKEND:-toolserver}"
 export AC_ROOT="${AC_ROOT:-$HUGPY_STATION_STATE/abstract-claude}"
@@ -69,6 +75,20 @@ for _t in "$HUGPY_STATION_STATE/a-settings-template.json" \
     export AC_SETTINGS_JSON
     break
 done
+
+# 1.0.143: per-session directives + init briefs — DERIVED on every serve start by
+# resources/backend/directives.py (shipped templates + this locus's live facts +
+# the operator layers in <state>), one file per standing session kind. serve-core
+# appends <dir>/<role>.md to the system prompt of every turn of that standing
+# session (keeper/chat/worker), read fresh per turn, so a steward save (which the
+# station re-renders) lands on the next turn. A hand edit there does not survive.
+export AC_SESSION_DIRECTIVES_DIR="${AC_SESSION_DIRECTIVES_DIR:-$HUGPY_STATION_STATE/directives/rendered}"
+_dv="$APP_ROOT/resources/backend/directives.py"
+if [ -f "$_dv" ]; then
+  python3 "$_dv" render --state "$HUGPY_STATION_STATE" --out "$AC_SESSION_DIRECTIVES_DIR" \
+      ${EXCHANGE_LOCUS:+--locus "$EXCHANGE_LOCUS"} >&2 \
+    || echo "abstract-claude-serve-run: directive render failed (non-fatal) — sessions keep the last rendered set" >&2
+fi
 
 AC="${ABSTRACT_CLAUDE_BIN:-}"
 [ -n "$AC" ] || AC="$(command -v abstract-claude 2>/dev/null || true)"
@@ -98,6 +118,22 @@ if [ -n "$_gw" ] && [ -z "${AC_LOCAL_LLM_URL:-}" ]; then
   fi
 fi
 
+# 1.0.107: keep THIS serve venv on the pinned module manifest before starting.
+# 1.0.147 (F3.17): provision FIRST, then bake from the provisioned package — the bake
+# below derives the console UI from the abstract-serve-core that $AC resolves to, so
+# baking before the pin shipped the PREVIOUS package's UI after a pin bump (0.1.14
+# keeper-live.js on a 0.1.15 venv). Both steps stay non-fatal.
+# The serve venv is long-lived and pip-installed (not editable), so a restaged
+# wheel never reached it on its own — it drifted to abstract_claude 0.1.44 while
+# the bundle shipped 0.1.49. Re-provision from the bundle on every start
+# (idempotent: a no-op when already matching). The venv is the one that owns $AC.
+_acvenv="$(cd "$(dirname "$(readlink -f "$AC")")/.." 2>/dev/null && pwd)"
+_prov="$(dirname "$(readlink -f "$0")")/station-provision-venv"
+if [ -x "$_prov" ] && [ -n "$_acvenv" ] && [ -x "$_acvenv/bin/pip" ]; then
+  "$_prov" "$_acvenv" || echo "abstract-claude-serve-run: manifest provision skipped (non-fatal)" >&2
+fi
+
+# Bake AFTER the provision above (1.0.147): the UI is derived from the package the venv now holds.
 # Console UI under /ac — ALWAYS DERIVED, NEVER HAND-AUTHORED (2026-09-19).
 # The package webui is built with base=/claude; the station renders serve at /ac
 # through ac_proxy, so the dist needs a "/claude/" -> "/ac/" rewrite.
@@ -114,6 +150,9 @@ fi
 # of which station-drift-check.sh reports and the release build refuses to ship
 # through. See resources/bin/station-bake-webui for the full contract.
 export AC_UI_DIST="${AC_UI_DIST:-$AC_ROOT/webui-station}"
+# 1.0.141: a FRESH locus has no AC_ROOT yet — the bake cd-ed into it and failed,
+# leaving serve on the package dist (base /claude: every /ac asset 404, blank pane).
+mkdir -p "$AC_ROOT" 2>/dev/null || true
 _bake="$(dirname "$(readlink -f "$0")")/station-bake-webui"
 if [ "${AC_UI_BAKE:-1}" = 0 ]; then
   echo "abstract-claude-serve-run: AC_UI_BAKE=0 — serving $AC_UI_DIST as-is" >&2
@@ -124,22 +163,46 @@ else
   echo "abstract-claude-serve-run: station-bake-webui missing at $_bake — console UI NOT re-derived" >&2
 fi
 
-# 1.0.107: keep THIS serve venv on the pinned module manifest before starting.
-# The serve venv is long-lived and pip-installed (not editable), so a restaged
-# wheel never reached it on its own — it drifted to abstract_claude 0.1.44 while
-# the bundle shipped 0.1.49. Re-provision from the bundle on every start
-# (idempotent: a no-op when already matching). The venv is the one that owns $AC.
-_acvenv="$(cd "$(dirname "$(readlink -f "$AC")")/.." 2>/dev/null && pwd)"
-_prov="$(dirname "$(readlink -f "$0")")/station-provision-venv"
-if [ -x "$_prov" ] && [ -n "$_acvenv" ] && [ -x "$_acvenv/bin/pip" ]; then
-  "$_prov" "$_acvenv" || echo "abstract-claude-serve-run: manifest provision skipped (non-fatal)" >&2
-fi
-
 # start marker: station-serve-update restarts the serve only when the pins, the
 # installed modules or THIS runner changed since the running process started.
 mkdir -p "$AC_ROOT" 2>/dev/null || true
 printf 'runner=%s\napp=%s\n' "$(sha256sum "$_self" 2>/dev/null | cut -c1-16)" \
     "$(cat "$APP_ROOT/resources/VERSION" 2>/dev/null)" > "$AC_ROOT/.serve-run-$INSTANCE" 2>/dev/null || true
 cd "$HUGPY_STATION_STATE" 2>/dev/null || cd "$HOME" || true
-echo "abstract-claude-serve-run: instance=$INSTANCE root=$AC_ROOT listen=$AC_HOST:$AC_PORT"
-exec "$AC" serve --host "$AC_HOST" --port "$AC_PORT"
+
+# 1.0.139: a serve started by THIS runner NEVER opens a window. abstract-serve-core
+# >= 0.1.8 opens the Serve app once serve is healthy (serve_cli._open: run.sh, else
+# `hugpy-station --serve <backend>` through the full launcher). Every caller of this
+# runner already renders serve itself — the Station's native /ac view, the serve-app
+# window, or nobody (the systemd unit) — so that window was a duplicate, and through
+# the pre-1.0.139 launcher's port-8899 reaper it killed the Station that had just
+# spawned this serve (and the headless hugpy-station-web@ backend). --no-browser
+# is in the pinned abstract-claude (0.1.70); an older serve venv (provision
+# skipped) might reject the flag, so probe it and, without it, start serve with
+# no display at all — _open() is a no-op headless.
+SERVE_ARGS=(serve --host "$AC_HOST" --port "$AC_PORT")
+_serve_help="$("$AC" serve --help 2>/dev/null || true)"   # captured: no grep -q SIGPIPE under pipefail
+if [[ "$_serve_help" == *--no-browser* ]]; then
+  SERVE_ARGS+=(--no-browser)
+else
+  echo "abstract-claude-serve-run: $AC serve has no --no-browser — starting it without DISPLAY/WAYLAND_DISPLAY so it cannot open a window" >&2
+  unset DISPLAY WAYLAND_DISPLAY
+fi
+# 1.0.141: publish WHERE this serve listens, so any station can reach this
+# locus's serve without a hand-made ac-loci.json:
+#   * <state>/ac-serve-<instance>.json {port, pid} — read by a peer station's
+#     probe over ssh (locus_exec.probe_serve), checked against /proc/<pid>;
+#   * the central seat_state row (seat "keeper", status.surface=serve,
+#     status.port) via abstract-claude's seat-report sidecar, which watches
+#     THIS pid (exec keeps it) and reports alive=false when serve exits.
+_ss="$HUGPY_STATION_STATE/ac-serve-$INSTANCE.json"
+printf '{"surface":"serve","instance":"%s","host":"%s","port":%s,"pid":%s,"started":%s}\n' \
+    "$INSTANCE" "$AC_HOST" "$AC_PORT" "$$" "$(date +%s)" > "$_ss.tmp" 2>/dev/null \
+    && mv -f "$_ss.tmp" "$_ss" 2>/dev/null || true
+if [ "${AC_SEAT_REPORT:-1}" != 0 ] && "$AC" seat-report --help >/dev/null 2>&1; then
+  _sr=(seat-report --seat keeper --watch-pid "$$" --status-file "$_ss")
+  [ -n "${EXCHANGE_LOCUS:-}" ] && _sr+=(--locus "$EXCHANGE_LOCUS")
+  ( exec "$AC" "${_sr[@]}" >/dev/null 2>&1 ) &
+fi
+echo "abstract-claude-serve-run: instance=$INSTANCE root=$AC_ROOT listen=$AC_HOST:$AC_PORT args=${SERVE_ARGS[*]}"
+exec "$AC" "${SERVE_ARGS[@]}"

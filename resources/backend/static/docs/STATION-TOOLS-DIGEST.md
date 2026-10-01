@@ -24,7 +24,7 @@ comms_ping {"to": "<peer>", "text": "…", "from_": "<your locus>-keeper", "ref"
 - **Boards** `todo_list {status,type,limit,locus}` · `todo_add {text,type,priority,note,by,locus}`
   · `todo_update {id,status|priority|text|note}` · `todo_done {id}` · `todo_remove {id}`.
   `locus` = WHOSE board (`''` = global). Types: `todo` (own queue) · `request` (ask AT a keeper)
-  · `operator` (ONE privileged action for C, exact `cmd` in note) · `proposal` (decision for C)
+  · `operator` (ONE privileged action for C) · `proposal` (decision for C) — both in the BOARD-ITEM-FORMAT.md shape
   · `direction` · `bookmark`. Contract: `./docs/TODO-BOARD-SOP.md`.
 - **Comms** `comms_ping {to,text,from_,ref}` (lands as a `[ping]` request on the target's board;
   its station nudges its keeper) · `comms_inbox {to,since}`. Answer ON the board

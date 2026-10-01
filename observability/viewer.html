@@ -1,0 +1,49 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'">
+<title>hugpy Station — Observability</title><link rel="stylesheet" href="viewer.css"></head>
+<body>
+<header>
+  <strong>🧭 Observability</strong>
+  <button id="back" title="back">◀</button><button id="reload" title="reload page">↻</button>
+  <input id="url" placeholder="http://127.0.0.1:7002/ — page to inspect">
+  <button id="go">open</button>
+  <button id="devtools" title="Chrome DevTools for the inspected page">inspect</button>
+  <label class="cap"><input id="capturing" type="checkbox" checked> capture</label>
+  <button id="export" title="write the whole capture to <userData>/observability/exports">export</button>
+  <button id="clear">clear</button>
+</header>
+<div id="filters">
+  <label>domains <input id="f-domains" placeholder="127.0.0.1:7002, *.hugpy.ai (empty = all)"></label>
+  <label>routes <input id="f-routes" placeholder="/api/* (empty = all)"></label>
+  <label>tag methods <input id="f-methods" placeholder="empty = all"></label>
+  <label>types <input id="f-types" placeholder="XHR, Fetch"></label>
+  <label>action <input id="f-action" placeholder="button#save or text"></label>
+  <label>tag <select id="f-tagwhen"><option value="always">always</option><option value="armed">only while armed</option></select></label>
+  <button id="apply">apply</button>
+</div>
+<div id="filters2" class="filters">
+  <label>server spans <select id="s-spans"><option>none</option><option>handler</option><option>app</option><option>all</option></select></label>
+  <label>modules <input id="s-modules" placeholder="hugpy_server.*, hugpy_fleet.* (empty = all app)"></label>
+  <button id="s-apply">set</button>
+  <span class="sep"></span>
+  <label>trace next <input id="arm-n" type="number" min="1" max="50" value="1" class="num"> action(s)</label>
+  <button id="arm">arm</button><span id="armed" class="dim"></span>
+  <span class="sep"></span>
+  <label>inference <select id="inference"></select></label>
+  <label class="explain-only">model API <input id="x-url" placeholder="http://127.0.0.1:7002/v1"></label>
+  <label class="explain-only">model <input id="x-model" placeholder="(first from /models)" class="short"></label>
+  <button id="x-apply" class="explain-only">set</button>
+</div>
+<main>
+  <section id="left">
+    <nav><button data-tab="traces" class="on">requests</button><button data-tab="console">console</button><button data-tab="saved">saved</button><span id="status"></span></nav>
+    <div id="traces" class="pane"><table><thead><tr><th>action</th><th>link</th><th>req</th><th>st</th><th>ms</th><th>server</th></tr></thead><tbody id="rows"></tbody></table></div>
+    <div id="console" class="pane hidden"></div>
+    <div id="saved" class="pane hidden"></div>
+    <div id="detail"><p class="dim">Select a request: action → listener → JS stack → request → Flask handler + Python stack → output / exception → response → consumer.</p></div>
+  </section>
+  <section id="page"></section>
+</main>
+<script src="viewer.js"></script>
+</body></html>

@@ -1,0 +1,160 @@
+{
+ "contract_checks": [
+  [
+   "feature OFF by default (fresh userData, env unset)",
+   true
+  ],
+  [
+   "DevTools coexists with the CDP capture",
+   true
+  ],
+  [
+   "all tagged requests settled (response + server join)",
+   true
+  ],
+  [
+   "GET: all 6 hops joined",
+   true
+  ],
+  [
+   "GET: listener is the delegated root listener",
+   true
+  ],
+  [
+   "GET: response consumed by page code (stack join)",
+   true
+  ],
+  [
+   "POST: all 6 hops joined",
+   true
+  ],
+  [
+   "POST: request body preview + handler callees",
+   true
+  ],
+  [
+   "await chain: 2 requests, both linked through async parents",
+   true
+  ],
+  [
+   "await chain: handlers list_items then get_item",
+   true
+  ],
+  [
+   "raise: all 6 hops joined, 500",
+   true
+  ],
+  [
+   "raise: real server traceback boom \u2192 _load_config \u2192 _explode",
+   true
+  ],
+  [
+   "raise: exception span events (not reconstructed)",
+   true
+  ],
+  [
+   "raise: consumer is the page catch (console.error)",
+   true
+  ],
+  [
+   "handled raise: shown as handled, not as an error",
+   true
+  ],
+  [
+   "XHR from a direct listener: linked sync",
+   true
+  ],
+  [
+   "poller requests are NOT attributed to actions",
+   true
+  ],
+  [
+   "burst: 20 distinct per-request trace ids",
+   true
+  ],
+  [
+   "burst: 20 complete traces (row final + handler + spans)",
+   true
+  ],
+  [
+   "server: zero dropped trace writes",
+   true
+  ],
+  [
+   "burst: all grouped under the window session id",
+   true
+  ],
+  [
+   "explain refused at level \"summary\" and no model call",
+   true
+  ],
+  [
+   "explain at level \"explain\": exactly one model call",
+   true
+  ],
+  [
+   "save: artifact written + provenance event",
+   true
+  ],
+  [
+   "armed: \"trace next 2 actions\" auto-saved a bundle of the linked traces",
+   true
+  ],
+  [
+   "armed: after the run, tagging stops (tagWhen=armed)",
+   true
+  ],
+  [
+   "saved tab lists the artifacts",
+   true
+  ],
+  [
+   "provenance ledger has observability_trace events with server file items",
+   true
+  ]
+ ],
+ "contract_pass": 28,
+ "contract_total": 28,
+ "hugpy_ui_bundle": {
+  "url": "http://127.0.0.1:7395/console",
+  "requests": 38,
+  "link_kinds": {
+   "unlinked": 4,
+   "timer": 2,
+   "scheduled-after-action": 32
+  },
+  "server_hops_joined": 38,
+  "listeners_seen_on_first_click": [
+   [
+    "click",
+    "Zr",
+    "ab-active:nth-of-type(2)"
+   ],
+   [
+    "auxclick",
+    "Vn",
+    "div#root"
+   ],
+   [
+    "click",
+    "Vn",
+    "div#root"
+   ],
+   [
+    "mousedown",
+    "Vn",
+    "div#root"
+   ],
+   [
+    "mouseup",
+    "Vn",
+    "div#root"
+   ],
+   [
+    "pointerdown",
+    "Vn",
+    "div#root"
+   ]
+  ]
+ }
+}

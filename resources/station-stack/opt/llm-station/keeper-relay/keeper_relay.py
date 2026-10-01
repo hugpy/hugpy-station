@@ -1620,11 +1620,31 @@ def enqueue(state, item):
     on overflow. Shared by the Discord intake and the board watcher so both get
     the same at-most-once idle-gated drain with a single overflow policy."""
     if len(state["queue"]) >= MAX_QUEUE:
-        dropped = state["queue"].pop(0)
-        audit({"ts": dropped.get("ts"), "author": dropped.get("author"),
-               "decision": "drop", "reason": "queue-overflow(max=%d)" % MAX_QUEUE,
-               "queued": False, "sha256": dropped.get("sha256"),
-               "prefix": dropped.get("prefix", "")})
+        # 2026-10-01 (t4178): overflow COALESCES, it never drops — the oldest
+        # entries are folded into ONE "[coalesced]" head entry that carries their text.
+        q = state["queue"]
+
+        def _fold(head, old):
+            head["n"] = int(head.get("n") or 0) + 1
+            head["parts"] = (list(head.get("parts") or []) + ["%s: %s" % (
+                old.get("author") or "?", str(old.get("payload") or old.get("prefix") or "")[:300])])[-30:]
+            audit({"ts": old.get("ts"), "author": old.get("author"),
+                   "decision": "coalesce", "reason": "queue-overflow(max=%d)" % MAX_QUEUE,
+                   "queued": True, "sha256": old.get("sha256"), "prefix": old.get("prefix", "")})
+
+        if q[0].get("author") != "coalesced":
+            oldest = q.pop(0)
+            head = {"ts": oldest.get("ts"), "author": "coalesced", "n": 0, "parts": []}
+            _fold(head, oldest)
+            q.insert(0, head)
+        head = q[0]
+        if len(q) > 1:
+            _fold(head, q.pop(1))
+        head["payload"] = ("[coalesced] relay queue overflow — %d earlier notice(s) folded here since %s:\n%s"
+                           % (head["n"], time.strftime("%H:%M", time.localtime(float(head.get("ts") or time.time()))),
+                              "\n".join("- " + x for x in head["parts"])))[:4000]
+        head["sha256"] = digest(head["payload"])
+        head["prefix"] = head["payload"][:40]
     state["queue"].append(item)
 
 
@@ -1820,6 +1840,10 @@ def todo_watch(cfg, state):
         # Self-authorship goes through _is_self_authored so the EXPLICIT
         # signatures ("<station>-keeper", "host-keeper" -- nomenclature
         # 2026-08-27) filter exactly like the legacy bare "keeper".
+        # 2026-10-01 (operator): a `finding` (bug report) belongs to the locus's
+        # WORKER session, never the keeper — seen, but no [board] notice.
+        if str(it.get("type") or "").lower() == "finding":
+            continue
         if not _is_self_authored(it.get("by")) and not _is_self_authored(it.get("via")):
             new_notify.append(it)
     new_seen = _cap_seen(merged)
@@ -2724,8 +2748,19 @@ def _lull_judge(cfg, snapshot, tail):
     skip = [i for i in cand_ids
             if i in {j for j in _as_str_list(obj.get("skip")) if j in cand_set}
             and i not in relay_claim]
+    if skip and not _lull_skip_on():
+        # 2026-10-01 (board t4178 [F2.5]): the model may no longer withhold a
+        # candidate — every one is relayed; its "skip" opinion is only audited.
+        return cand_ids, [], _lull_final_line(obj.get("line"), cand_ids), "ok(skip-off:%s)" % ",".join(skip)
     relay = [i for i in cand_ids if i not in skip]
     return relay, skip, _lull_final_line(obj.get("line"), relay), "ok"
+
+
+def _lull_skip_on():
+    """KEEPER_RELAY_LULL_SKIP=1 restores the brain's power to SKIP candidates it
+    judges "already seen". Default OFF (operator 2026-10-01, t4178): a model
+    verdict must not silently withhold a notice."""
+    return str(os.environ.get("KEEPER_RELAY_LULL_SKIP") or "0").strip().lower() in ("1", "true", "on", "yes")
 
 
 def _lull_capture_tail(cfg):

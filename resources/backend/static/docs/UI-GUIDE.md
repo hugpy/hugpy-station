@@ -163,8 +163,8 @@ Inside, the board is **tabbed**, each tab with a live count:
 | `todo` | queue · ☑ | `t<N>` | your own queue — incl. anything the operator MIGHT want. NOT an ask the operator must action. | `SCOPE: … — DONE: …` |
 | `request` | queue · ✋ | `t<N>` | an ask AT the keeper (operator/peer filed it). NOT a self-note. | `ASK <who>: … — DONE: …` |
 | `bookmark` | 🔖 | `bm<N>` | a stable build / shipped commit / verified checkpoint. NOT a plan. | `SHIPPED <UTC>: … — VERIFIED: … — ROLLBACK: …` |
-| `operator` | ⚑ | `o<N>` | ONE action only the operator can take (privilege you lack), with a copyable `cmd`. NOT a wish-list. | `@worker: … task: …` + `cmd:` block |
-| `proposal` | ⚖ | `p<N>` | a decision wanted FROM the operator: pros/cons/rec. NOT self-decided. | `PROBLEM: … / OPTIONS: A) … B) … / REC: …` |
+| `operator` | ⚑ | `o<N>` | ONE action only the operator can take (privilege you lack), with a copyable `cmd`. NOT a wish-list. | [BOARD-ITEM-FORMAT.md](BOARD-ITEM-FORMAT.md) §1: `[root]\|[OP]` title + WHY/WHO/GATE/DO/VERIFY/EXPECT |
+| `proposal` | ⚖ | `p<N>` | a decision wanted FROM the operator: pros/cons/rec. NOT self-decided. | [BOARD-ITEM-FORMAT.md](BOARD-ITEM-FORMAT.md) §2: PROBLEM/OPTIONS/REC/DECISION/SKETCH |
 | `direction` | queue · 🧭 | `d<N>` | a standing operator ruling/invariant you carry forward. NOT a one-off task or your own opinion. | `RULING (<who, date>): "<quote>" — STATE: <APPLIED\|FOLDED\|CLOSED>` |
 
 **Priority:** any actionable item can carry `"priority": "medium"` or `"high"`

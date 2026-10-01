@@ -1,0 +1,11 @@
+{
+  "name": "hugpy-serve",
+  "productName": "hugpy serve",
+  "version": "0.1.0",
+  "description": "The shared Serve console (Claude / GPT / Hugpy, whichever are installed) as a standalone window; launcher lifted from the hugpy Station shell. run.sh [claude|gpt|hugpy] picks the backend selected first.",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron ."
+  }
+}

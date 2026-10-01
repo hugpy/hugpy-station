@@ -53,6 +53,12 @@ files:
   - main.js
   - preload.js
   - package.json
+  # observability (phase 1, OFF by default): main-process JS + the viewer page,
+  # required from main.js, so it lives in the asar next to it. Its test/ dir (the
+  # e2e harness, the Flask target, fixtures, evidence) never ships.
+  - observability/**/*
+  - "!observability/test/**"
+  - "!observability/README.md"
 
 # -> <install root>/resources/... ; main.js resolves these via process.resourcesPath.
 extraResources:
@@ -113,6 +119,16 @@ extraResources:
   # this desktop entry and wrapper make it discoverable on a Station install.
   - from: resources/abstract-claude-console.desktop
     to: abstract-claude-console.desktop
+  # hugpy serve (2026-09-30): the shared Serve console (Claude / GPT / Hugpy,
+  # whichever are installed) as its own window. `hugpy-station --serve [backend]`
+  # runs it on THIS runtime, so no second Electron ships. node_modules is only
+  # the dev runtime for resources/serve-app/run.sh and never ships.
+  - from: resources/serve-app
+    to: serve-app
+    filter:
+      - "**/*"
+      - "!node_modules"
+      - "!node_modules/**"
 
 # -> <install root>/... (siblings of the Electron binary, NOT inside resources/).
 # The launcher must sit next to `hugpy-station` because it derives APP_ROOT from
@@ -233,6 +249,10 @@ deb:
     - python3-aiohttp
     - libappindicator3-1 | libayatana-appindicator3-1
     - libnotify4
+    # 1.0.139: the terminal (tmux) keeper seat. A Recommends, not a Depends, so
+    # `dpkg -i` stays offline-installable; without it the backend reports
+    # frontier.tmux unavailable and the UI disables the tmux button (no tracebacks).
+    - tmux
 
 rpm:
   artifactName: hugpy-station-${version}.x86_64.${ext}

@@ -1,0 +1,12 @@
+### Keeper toolkit — state, landing, privilege
+- **Ledger** = the state of record per locus and task. SessionStart injects it into your session. `ledger_get {locus:"{{locus}}", task}` · `ledger_put {locus:"{{locus}}", task, doc, by:"{{signature}}", status}`. A put REPLACES the whole document, so read it, edit it, then put the full text back.
+- **Issues:** `issue_record_action {fp, action, by, note}` and `issue_set {fp, state, reason}` keep a visible record. A disposition explains; it never silently drops a ping (🧭 d4187).
+- **Release and landing:**
+  - Python packages: the abstract-pypit loop, `push.sh status | stage | release` in the package's staging dir. Edit `live/`, never the declared source.
+  - The station: a versioned release built from source, gated by the drift gate. The procedure is bookmark 🔖 b4195. Never edit a running install.
+  - The hugpy live tree and central belong to the hugpy locus (🧭 d4185). Hand that work over with `ledger_put {locus:"hugpy"}` plus a delivered prompt.
+  - Checklist: `KEEPER-DEV-GUIDE.md`.
+- **Privilege:** run `sudo hugpy-gate list` first.
+  - auto tier: `sudo hugpy-gate run <id> -p k=v`.
+  - confirm tier: `sudo hugpy-gate approve <id> --ttl 600 --note "why"`, then `sudo hugpy-gate run <id> -p k=v --confirm <id>`.
+  - File `type=operator` only when no gate action covers the step, in the `BOARD-ITEM-FORMAT.md` shape, with the reason in `GATE:`.

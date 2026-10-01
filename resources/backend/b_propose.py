@@ -33,7 +33,7 @@ SYSTEM = (
     "keeper to review. Answer with a single JSON object and nothing else:\n"
     '{"summary": str, "likely_cause": str, "proposed_fix": str, "commands": [str], '
     '"files": [{"path": str, "line": int}], "confidence": "low"|"medium"|"high", "needs_privilege": bool}\n'
-    "Every prior proposal for this signature is listed with the keeper's disposition. Your fix MUST be "
+    "Every prior proposal for this issue is listed with the keeper's disposition. Your fix MUST be "
     "materially different from every prior one (a different cause or a different change — not a "
     "rewording). If you cannot offer one, answer exactly {\"no_new_fix\": true, \"why\": str}. Never "
     "invent file paths or commands the excerpts do not support; say so in likely_cause instead."
@@ -163,8 +163,34 @@ def locate_source(finding, roots, max_chars=CONTEXT_CHARS):
 
 
 # ── prompt ─────────────────────────────────────────────────────────────────────────────
-def build_messages(finding, ctx, sig=None, max_chars=CONTEXT_CHARS):
-    sig = sig or {}
+def memory_block(mem):
+    """1.0.140: B's history for THIS issue only — the toolserver's
+    issue_memory(fp) (brief + its proposals with the keeper's dispositions).
+    Nothing about any other issue is ever put in the prompt."""
+    lines = ["", "ISSUE MEMORY (this issue only — fp %s)" % mem.get("fp")]
+    brief = str(mem.get("brief") or "").strip()
+    if brief:
+        lines.append(brief[:2500])
+    props = [p for p in mem.get("proposals") or [] if p.get("status") in ("delivered", "duplicate", None)]
+    if props:
+        lines.append("PRIOR PROPOSALS for this issue (yours must differ materially from every one):")
+        for p in props:
+            lines.append("- %s [%s%s] fix: %s | commands: %s" % (
+                p.get("id") or "?", p.get("disposition") or "open",
+                (": " + p["reason"]) if p.get("reason") else "", (p.get("fix") or "")[:300],
+                "; ".join(p.get("commands") or [])[:300]))
+    last_fix = mem.get("last_fix") or {}
+    if last_fix and last_fix.get("held") is False:
+        lines.append("NOTE: the last fix did NOT hold — it recurred %s time(s) since."
+                     % last_fix.get("recurrences_since"))
+    return lines
+
+
+def build_messages(finding, ctx, sig=None, max_chars=CONTEXT_CHARS, memory=None):
+    """``memory`` (issue_memory of this finding's fp) replaces the NotifyBook
+    ``sig`` prior-proposal block; ``sig`` is only the read-through fallback when
+    the toolserver could not be reached."""
+    sig = {} if memory else (sig or {})
     f = finding
     lines = ["FINDING", "kind: %s  severity: %s  locus: %s  source: %s" % (
         f.get("kind"), f.get("severity"), f.get("locus"), f.get("source")),
@@ -188,6 +214,8 @@ def build_messages(finding, ctx, sig=None, max_chars=CONTEXT_CHARS):
                 "; ".join(p.get("commands") or [])[:300]))
     if sig.get("disposition") == "rejected" and sig.get("reason"):
         lines.append("keeper's last rejection: %s" % sig["reason"])
+    if memory:
+        lines += memory_block(memory)
     body = "\n".join(lines)
     src = []
     for c in ctx or []:
@@ -278,16 +306,24 @@ def novelty(p, priors):
 
 # ── delivery shape ─────────────────────────────────────────────────────────────────────
 def fmt_board(p, finding, origin):
+    """(text, note) of B's fix proposal in the BOARD-ITEM-FORMAT.md proposal
+    shape (PROBLEM / OPTIONS / REC / DECISION / SKETCH) — the toolserver refuses
+    a proposal without it. The disposition paragraph stays LAST: the keeper's
+    close line after it is what parse_disposition reads."""
     text = ("[B proposal] " + p["summary"])[:500]
     cmds = "\n".join(p.get("commands") or []) or "# (no commands proposed)"
     files = "\n".join("- %s:%s" % (f["path"], f["line"]) for f in p.get("files") or []) or "- (none named)"
-    note = ("**likely cause** (%s confidence%s)\n%s\n\n**proposed fix**\n%s\n\n```bash\n%s\n```\n\n**files**\n%s\n\n"
-            "finding %s · signature %s · origin %s\n`%s`\n\n"
+    conf = "%s confidence%s" % (p.get("confidence"), ", needs privilege" if p.get("needs_privilege") else "")
+    note = ("PROBLEM: %s (%s)\nfinding %s · signature %s · origin %s\n`%s`\n\n"
+            "OPTIONS:\nA) apply B's fix: %s — + addresses the likely cause / − B's diagnosis, not yet verified\n"
+            "B) reject or mark inert — + no change / − the finding keeps recurring\n\n"
+            "REC: A once the keeper has verified the cause (%s).\n\n"
+            "DECISION: pending (keeper: disposition line below)\n\n"
+            "SKETCH:\n```bash\n%s\n```\n\nfiles:\n%s\n\n"
             "close with a disposition line: `accept`, `reject: <reason>`, or `inert: <reason>` — B's next "
-            "proposal for this signature must differ from this one; inert silences it until it materially changes."
-            ) % (p.get("confidence"), ", needs privilege" if p.get("needs_privilege") else "",
-                 p.get("likely_cause") or "—", p.get("proposed_fix"), cmds, files,
-                 finding.get("key"), finding.get("sigkey"), origin, finding.get("signature") or "")
+            "proposal for this signature must differ from this one; inert lowers its priority (still reported, t4178)."
+            ) % (p.get("likely_cause") or "—", conf, finding.get("key"), finding.get("sigkey"), origin,
+                 finding.get("signature") or "", p.get("proposed_fix"), conf, cmds, files)
     return text, note[:4000]
 
 

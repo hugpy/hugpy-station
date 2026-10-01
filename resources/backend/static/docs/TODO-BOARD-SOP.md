@@ -20,8 +20,8 @@ Choose the type first; it decides the tab, the id-prefix, and the note shape.
 | `todo` | queue · ☑ | `t<N>` | a unit of work on YOUR queue — incl. anything the operator MIGHT want done. NOT for asks the operator must action (that is `operator`). | `text`, `status`, `by` | `SCOPE: … — DONE: …` |
 | `request` | queue · ✋ | `t<N>` | an ask directed AT the keeper (operator or a peer filed it). NOT a self-note — that is a `todo`. | `text`, `by` | `ASK <who>: … — DONE: …` |
 | `bookmark` | 🔖 | `bm<N>` | a checkpoint at every stable build / shipped commit / verified state. NOT a wish or a plan. | `text`, `note` (id + receipt), `by` | `SHIPPED <UTC>: … — VERIFIED: … — ROLLBACK: …` |
-| `operator` | ⚑ | `o<N>` | ONE concrete action only the operator can take — behind a privilege you lack (root/sudo, a credential, a physical/account step), with a copyable `cmd`. NOT the operator's wish-list (those are `todo`). | `text`, `worker`, `task`, `cmd`, `by` | `@worker: … task: … ` + `cmd:` block |
-| `proposal` | ⚖ | `p<N>` | a decision you want FROM the operator, with pros/cons/rec. NOT something you may decide yourself. | `text`, `pros`, `cons`, `rec`, `by` | `PROBLEM: … / OPTIONS: A) … B) … / REC: …` |
+| `operator` | ⚑ | `o<N>` | ONE concrete action only the operator can take — behind a privilege you lack (root/sudo, a credential, a physical/account step), with a copyable `cmd`. NOT the operator's wish-list (those are `todo`). | `text`, `note`, `by` | title `[root]\|[OP] …` + `WHY/WHO/GATE/DO/VERIFY/EXPECT/RUN(/ROLLBACK)` — [BOARD-ITEM-FORMAT.md](BOARD-ITEM-FORMAT.md) |
+| `proposal` | ⚖ | `p<N>` | a decision you want FROM the operator, with pros/cons/rec. NOT something you may decide yourself. | `text`, `note`, `by` | `PROBLEM/OPTIONS/REC/DECISION/SKETCH` — [BOARD-ITEM-FORMAT.md](BOARD-ITEM-FORMAT.md) |
 | `direction` | queue · 🧭 | `d<N>` | a standing ruling / invariant from the operator — a determination that governs later work ("always X", "never Y"). NOT a one-off task and NOT your own opinion; only the operator's word becomes a direction. | `text`, `note` (the ruling), `status`, `by` | `RULING (<who, date>): "<quote>" — STATE: <APPLIED\|FOLDED\|CLOSED where>` |
 
 `direction` has no dedicated console tab today; it renders in the **queue**
@@ -40,20 +40,13 @@ peer, or you after a restart) gets the whole picture from the note alone.
   > `ASK hugpy-keeper: rebuild the model index — DONE: /health lists all 6 models`
 - **bookmark** — `SHIPPED <UTC>: <build/commit id> — VERIFIED: <evidence> — ROLLBACK: <prev id/path>`
   > `SHIPPED 2026-09-18T06:20Z: station 1.0.106 (a1b2c3d) — VERIFIED: deb installs, /health 200 — ROLLBACK: 1.0.105 (9f8e7d6)`
-- **operator** — `@worker: <box/acct>  task: <INSPECT|APPLY|VERIFY|…>` then a copy-paste `cmd:` block; `#` lines are caveats (not copied).
-  > ```
-  > @worker: ae (root)  task: APPLY
-  > cmd:
-  >   systemctl restart hugpy-station-web@hugpy
-  > # only after the 1.0.106 deb is in place
-  > ```
-- **proposal** — `PROBLEM: <one line> / OPTIONS: A) … B) … / REC: <pick + why>`
-  > `PROBLEM: cert renewal is manual and drifts / OPTIONS: A) cron certbot B) hosted ACME / REC: A — no new dependency, we already run certbot`
+- **operator** — the sectioned shape in [BOARD-ITEM-FORMAT.md](BOARD-ITEM-FORMAT.md) §1 (title `[root]|[OP] …`; `WHY` `WHO` `GATE` `DO` `VERIFY` `EXPECT` `RUN` `ROLLBACK`, one fenced ```bash block per action and `RUN` = one complete copy-paste script). The toolserver refuses an operator item without it.
+- **proposal** — [BOARD-ITEM-FORMAT.md](BOARD-ITEM-FORMAT.md) §2: `PROBLEM` `OPTIONS` (`A) … — + pro / − con`) `REC` `DECISION: pending (operator)` `SKETCH` (fenced). `pros`/`cons`/`rec` fields, where a board carries them, mirror the note.
 - **direction** — `RULING (<operator determination, date>): "<quote>" — STATE: <APPLIED|FOLDED|CLOSED where>`
   > `RULING (operator, 2026-08-27): "keepers always sign <locus>-keeper" — STATE: APPLIED in TODO-BOARD-SOP §3`
 
-*(A non-blocking note-format lint — warn when a note doesn't match its type's
-template — is a proposed future enhancement, not yet implemented.)*
+*(Operator items and proposals are checked on write by the toolserver — see
+BOARD-ITEM-FORMAT.md §5. The other types are not checked.)*
 
 ## 3. Signing — who wrote it
 

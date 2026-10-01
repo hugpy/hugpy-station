@@ -1,0 +1,63 @@
+{
+  "url": "http://127.0.0.1:7002/",
+  "filter": {
+    "domains": [
+      "127.0.0.1:7002"
+    ],
+    "routes": [
+      "/api/readiness",
+      "/api/auth/config"
+    ],
+    "methods": [
+      "GET"
+    ],
+    "types": [
+      "XHR",
+      "Fetch"
+    ],
+    "action": ""
+  },
+  "log": [
+    "toggle default (fresh userData, env=unset): enabled=false",
+    "toggle after setEnabled(true): enabled=true",
+    "loaded http://127.0.0.1:7002/ capture.active=true"
+  ],
+  "blocked": [],
+  "hops": [
+    {
+      "traceId": "obs-55b3fae2e8ba6cad",
+      "req": "GET /api/auth/config",
+      "type": "Fetch",
+      "hop1_action": null,
+      "hop2_initiator": "script: fetch < Ct | async: await[Jt,(anon)]",
+      "header_on_wire": "obs-55b3fae2e8ba6cad",
+      "hop3_server_request": "no console_trace request row for this trace id (header not honored, or the write was dropped); flask dispatch_request not in spans; handler is the first application frame (heuristic)",
+      "hop4_handler": null,
+      "hop4_callees": [],
+      "hop5_output": [],
+      "hop5_raised": null,
+      "hop5_handler_exit_line": null,
+      "hop6_response": "200 application/json 259B 638ms"
+    },
+    {
+      "traceId": "obs-8d2abdc8e3968542",
+      "req": "GET /api/readiness",
+      "type": "Fetch",
+      "hop1_action": null,
+      "hop2_initiator": "script: fetch < Ct | async: await[Et,(anon)]",
+      "header_on_wire": "obs-8d2abdc8e3968542",
+      "hop3_server_request": "no console_trace request row for this trace id (header not honored, or the write was dropped); flask dispatch_request not in spans; handler is the first application frame (heuristic)",
+      "hop4_handler": null,
+      "hop4_callees": [],
+      "hop5_output": [],
+      "hop5_raised": null,
+      "hop5_handler_exit_line": null,
+      "hop6_response": "200 application/json 597B 639ms"
+    }
+  ],
+  "console": [
+    "[warning] %cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy  @ warnAboutInsecureCSP",
+    "[warning] %cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy  @ warnAboutInsecureCSP"
+  ],
+  "export": "/srv/vm_mgr/tmp/obs-evidence/live7002-b/obs-2026-10-01T11-28-07-740Z.json"
+}

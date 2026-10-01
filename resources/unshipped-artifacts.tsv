@@ -37,8 +37,8 @@
 /srv/vm_mgr/bin/apply-steward-tabs-keeper.py	authored	7e6fc62ce41212cbeed7d07803fca6f0	ACK	one-off operator tool, not on any serving path.
 /srv/vm_mgr/bin/deploy-mct-v2.sh	authored	52a532c3f397bc01593688a97e6c1578	ACK	one-off deploy helper.
 /srv/vm_mgr/bin/handoff-roll	authored	6922eec5d9bebbcf0d1a3196479af3ec	ACK	driven by handoff-roll.service/.timer below.
-/srv/vm_mgr/hugpy-station/ac-loci.json	authored	c948eeda17d472fcd04c0811c038d283	ACK	small locus registry; no installer seeds it.
-/srv/vm_mgr/.config/systemd/user/7006_hugpy_station.service	authored	451b46a6b622d93cc851783fb7d9f8f9	ACK	no reference anywhere in station-app.
+/srv/vm_mgr/hugpy-station/ac-loci.json	authored	8a80554c91d9fca8acb82f023de02f11	ACK	small locus registry; no installer seeds it. 2026-10-01: stale hugpy->:9125 pin cleared to {} (hugpy serve retired 2026-09-30 phase3).
+/srv/vm_mgr/.config/systemd/user/7006_hugpy_station.service	authored	668d59dd5cfa06082f301ae83bc186d6	ACK	no reference anywhere in station-app. Re-acked 2026-10-01: running unit as edited 2026-09-30 15:09 (1.0.140 work).
 /srv/vm_mgr/.config/systemd/user/handoff-roll.service	authored	08ab322c2b9177aa9b1de2e07009bffb	ACK	no reference anywhere in station-app.
 /srv/vm_mgr/.config/systemd/user/handoff-roll.timer	authored	4a8834f4fdea3c423159df044569c18e	ACK	no reference anywhere in station-app.
 /srv/vm_mgr/.config/systemd/user/hugpy-station-web.service	authored	d9c6b437170a75e34816080f5d3f7532	ACK	deliberate vm_mgr-sovereign replacement for the shipped hugpy-station-web@.service template (says so in its own header).

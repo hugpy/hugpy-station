@@ -1,0 +1,1732 @@
+{
+  "exported_at": "2026-10-01T11:30:51.831Z",
+  "url": "http://127.0.0.1:7391/",
+  "filter": {
+    "domains": [
+      "127.0.0.1:7391"
+    ],
+    "routes": [
+      "/api/*"
+    ],
+    "methods": [
+      "GET"
+    ],
+    "types": [
+      "XHR",
+      "Fetch"
+    ],
+    "action": ""
+  },
+  "inference": "summary",
+  "traces": [
+    {
+      "key": "373379.4",
+      "requestId": "373379.4",
+      "traceId": "obs-a2590881f65d2b92",
+      "injected": true,
+      "pageTagged": false,
+      "pageTraceId": null,
+      "url": "http://127.0.0.1:7391/api/items?n=3",
+      "path": "/api/items?n=3",
+      "method": "GET",
+      "resourceType": "Fetch",
+      "wallTime": 1790854243.309057,
+      "t0": 5401.435266,
+      "documentURL": "http://127.0.0.1:7391/",
+      "initiator": {
+        "type": "script",
+        "url": "",
+        "stack": [
+          {
+            "functionName": "loadItems",
+            "url": "http://127.0.0.1:7391/static/app.js",
+            "lineNumber": 2,
+            "columnNumber": 18
+          },
+          {
+            "functionName": "onLoadClick",
+            "url": "http://127.0.0.1:7391/static/app.js",
+            "lineNumber": 6,
+            "columnNumber": 21
+          }
+        ],
+        "asyncParents": []
+      },
+      "action": {
+        "id": 1,
+        "action": "click",
+        "ts": 1790854243308,
+        "trusted": true,
+        "target": {
+          "tag": "button",
+          "id": "load",
+          "name": "",
+          "role": "",
+          "type": "",
+          "text": "Load items",
+          "selector": "button#load"
+        },
+        "deltaMs": 1,
+        "join": "immediate"
+      },
+      "redirects": [],
+      "sentHeaders": {
+        "Host": "127.0.0.1:7391",
+        "Referer": "http://127.0.0.1:7391/",
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-a2590881f65d2b92"
+      },
+      "response": {
+        "status": 200,
+        "statusText": "OK",
+        "mimeType": "application/json",
+        "protocol": "http/1.1",
+        "remote": "127.0.0.1:7391",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "fromCache": false,
+        "receivedMs": 41,
+        "encodedDataLength": 252,
+        "totalMs": 40.390999999544874
+      },
+      "server": {
+        "supported": true,
+        "reached": true,
+        "request": {
+          "browser": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.243 Electron/30.5.1 Safari/537.36",
+          "duration_ms": 16.2506103515625,
+          "error": null,
+          "finished_at": 1790854243.3296423,
+          "id": "obs-a2590881f65d2b92",
+          "method": "GET",
+          "path": "/api/items",
+          "started_at": 1790854243.3133917,
+          "status": 200
+        },
+        "handler": {
+          "seq": 89,
+          "event": "call",
+          "depth": 1,
+          "function": "list_items",
+          "file": "/srv/vm_mgr/tmp/st-obs/station-app/observability/test/target_app.py",
+          "short": "observability/test/target_app.py",
+          "line": 93,
+          "at": 1790854243.329166,
+          "duration_ms": 0.3695487976074219,
+          "error": null,
+          "app": true,
+          "returned": true,
+          "method": "dispatch_request"
+        },
+        "output": [
+          {
+            "seq": 180,
+            "event": "return",
+            "depth": 1,
+            "function": "list_items",
+            "file": "/srv/vm_mgr/tmp/st-obs/station-app/observability/test/target_app.py",
+            "short": "observability/test/target_app.py",
+            "line": 96,
+            "at": 1790854243.3295355,
+            "duration_ms": 0.3695487976074219,
+            "error": null,
+            "app": true,
+            "role": "handler returned"
+          },
+          {
+            "seq": 182,
+            "event": "call",
+            "depth": 0,
+            "function": "finalize_request",
+            "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+            "short": "flask/app.py",
+            "line": 922,
+            "at": 1790854243.3295412,
+            "duration_ms": null,
+            "error": null,
+            "app": false,
+            "role": "response built"
+          },
+          {
+            "seq": 183,
+            "event": "call",
+            "depth": 1,
+            "function": "make_response",
+            "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+            "short": "flask/app.py",
+            "line": 1129,
+            "at": 1790854243.3295453,
+            "duration_ms": 0.007867813110351562,
+            "error": null,
+            "app": false,
+            "role": "response built"
+          },
+          {
+            "seq": 187,
+            "event": "call",
+            "depth": 1,
+            "function": "process_response",
+            "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+            "short": "flask/app.py",
+            "line": 1298,
+            "at": 1790854243.3295572,
+            "duration_ms": null,
+            "error": null,
+            "app": false,
+            "role": "response built"
+          },
+          {
+            "role": "status",
+            "function": "HTTP 200",
+            "duration_ms": 16.2506103515625
+          }
+        ],
+        "exceptions": [],
+        "raised": null,
+        "callees": [
+          {
+            "seq": 122,
+            "event": "call",
+            "depth": 2,
+            "function": "build_items",
+            "file": "/srv/vm_mgr/tmp/st-obs/station-app/observability/test/target_app.py",
+            "short": "observability/test/target_app.py",
+            "line": 79,
+            "at": 1790854243.3293004,
+            "duration_ms": 0.019073486328125,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 130,
+            "event": "call",
+            "depth": 2,
+            "function": "jsonify",
+            "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/json/__init__.py",
+            "short": "flask/json/__init__.py",
+            "line": 138,
+            "at": 1790854243.3293226,
+            "duration_ms": 0.21076202392578125,
+            "error": null,
+            "app": false
+          },
+          {
+            "seq": 96,
+            "event": "call",
+            "depth": 2,
+            "function": "__get__",
+            "file": "/srv/hugpy/venv/lib/python3.12/site-packages/werkzeug/utils.py",
+            "short": "werkzeug/utils.py",
+            "line": 88,
+            "at": 1790854243.3291821,
+            "duration_ms": 0.09560585021972656,
+            "error": null,
+            "app": false
+          },
+          {
+            "seq": 118,
+            "event": "call",
+            "depth": 2,
+            "function": "get",
+            "file": "/srv/hugpy/venv/lib/python3.12/site-packages/werkzeug/datastructures/structures.py",
+            "short": "werkzeug/datastructures/structures.py",
+            "line": 75,
+            "at": 1790854243.3292823,
+            "duration_ms": 0.01239776611328125,
+            "error": null,
+            "app": false
+          },
+          {
+            "seq": 90,
+            "event": "call",
+            "depth": 2,
+            "function": "__get__",
+            "file": "/srv/hugpy/venv/lib/python3.12/site-packages/werkzeug/local.py",
+            "short": "werkzeug/local.py",
+            "line": 310,
+            "at": 1790854243.3291686,
+            "duration_ms": 0.010013580322265625,
+            "error": null,
+            "app": false
+          }
+        ],
+        "tree": [
+          {
+            "seq": 22,
+            "event": "call",
+            "depth": 0,
+            "function": "_clean",
+            "file": "/srv/hugpy/src/hugpy/py/services/hugpy_server/src/hugpy_server/app/routes/console_trace_routes.py",
+            "short": "app/routes/console_trace_routes.py",
+            "line": 104,
+            "at": 1790854243.3134718,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 24,
+            "event": "call",
+            "depth": 0,
+            "function": "_write",
+            "file": "/srv/hugpy/src/hugpy/py/services/hugpy_server/src/hugpy_server/app/routes/console_trace_routes.py",
+            "short": "app/routes/console_trace_routes.py",
+            "line": 85,
+            "at": 1790854243.3134782,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 25,
+            "event": "call",
+            "depth": 1,
+            "function": "_db",
+            "file": "/srv/hugpy/src/hugpy/py/services/hugpy_server/src/hugpy_server/app/routes/console_trace_routes.py",
+            "short": "app/routes/console_trace_routes.py",
+            "line": 67,
+            "at": 1790854243.3134818,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 26,
+            "event": "call",
+            "depth": 2,
+            "function": "trace_db_path",
+            "file": "/srv/hugpy/src/hugpy/py/services/hugpy_server/src/hugpy_server/app/routes/console_trace_routes.py",
+            "short": "app/routes/console_trace_routes.py",
+            "line": 59,
+            "at": 1790854243.3134842,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 57,
+            "event": "call",
+            "depth": 1,
+            "function": "<lambda>",
+            "file": "/srv/hugpy/src/hugpy/py/services/hugpy_server/src/hugpy_server/app/routes/console_trace_routes.py",
+            "short": "app/routes/console_trace_routes.py",
+            "line": 159,
+            "at": 1790854243.314102,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 62,
+            "event": "call",
+            "depth": 0,
+            "function": "dispatch_request",
+            "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+            "short": "flask/app.py",
+            "line": 879,
+            "at": 1790854243.3290744,
+            "duration_ms": null,
+            "error": null,
+            "app": false
+          },
+          {
+            "seq": 89,
+            "event": "call",
+            "depth": 1,
+            "function": "list_items",
+            "file": "/srv/vm_mgr/tmp/st-obs/station-app/observability/test/target_app.py",
+            "short": "observability/test/target_app.py",
+            "line": 93,
+            "at": 1790854243.329166,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 122,
+            "event": "call",
+            "depth": 2,
+            "function": "build_items",
+            "file": "/srv/vm_mgr/tmp/st-obs/station-app/observability/test/target_app.py",
+            "short": "observability/test/target_app.py",
+            "line": 79,
+            "at": 1790854243.3293004,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 123,
+            "event": "call",
+            "depth": 3,
+            "function": "_fmt",
+            "file": "/srv/vm_mgr/tmp/st-obs/station-app/observability/test/target_app.py",
+            "short": "observability/test/target_app.py",
+            "line": 75,
+            "at": 1790854243.329306,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 125,
+            "event": "call",
+            "depth": 3,
+            "function": "_fmt",
+            "file": "/srv/vm_mgr/tmp/st-obs/station-app/observability/test/target_app.py",
+            "short": "observability/test/target_app.py",
+            "line": 75,
+            "at": 1790854243.3293126,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 127,
+            "event": "call",
+            "depth": 3,
+            "function": "_fmt",
+            "file": "/srv/vm_mgr/tmp/st-obs/station-app/observability/test/target_app.py",
+            "short": "observability/test/target_app.py",
+            "line": 75,
+            "at": 1790854243.3293161,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 222,
+            "event": "call",
+            "depth": 2,
+            "function": "_trace_after",
+            "file": "/srv/hugpy/src/hugpy/py/services/hugpy_server/src/hugpy_server/app/routes/console_trace_routes.py",
+            "short": "app/routes/console_trace_routes.py",
+            "line": 163,
+            "at": 1790854243.3296392,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          }
+        ],
+        "counts": {
+          "spans": 223,
+          "calls": 112,
+          "app_calls": 11,
+          "exceptions": 0
+        },
+        "notes": [],
+        "url": "http://127.0.0.1:7391/api/console/trace?trace_id=obs-a2590881f65d2b92"
+      },
+      "inference": {
+        "level": "summary",
+        "text": "1) click on button#load (\"Load items\") [immediate, +1 ms]\n2) GET /api/items?n=3 initiated by script from loadItems @ app.js:3\n3) reached Flask: GET /api/items (server 16 ms)\n4) handler list_items @ observability/test/target_app.py:93 ran 0.4 ms, 11 app calls\n5) output: list_items → finalize_request → make_response → process_response → HTTP 200\n6) browser received 200 application/json 252 B in 40 ms"
+      }
+    },
+    {
+      "key": "373379.5",
+      "requestId": "373379.5",
+      "traceId": "obs-579fe949b9c3c8e1",
+      "injected": true,
+      "pageTagged": false,
+      "pageTraceId": null,
+      "url": "http://127.0.0.1:7391/api/slow",
+      "path": "/api/slow",
+      "method": "GET",
+      "resourceType": "XHR",
+      "wallTime": 1790854244.212154,
+      "t0": 5402.33836,
+      "documentURL": "http://127.0.0.1:7391/",
+      "initiator": {
+        "type": "script",
+        "url": "",
+        "stack": [
+          {
+            "functionName": "onXhrClick",
+            "url": "http://127.0.0.1:7391/static/app.js",
+            "lineNumber": 14,
+            "columnNumber": 4
+          }
+        ],
+        "asyncParents": []
+      },
+      "action": {
+        "id": 2,
+        "action": "click",
+        "ts": 1790854244211,
+        "trusted": true,
+        "target": {
+          "tag": "button",
+          "id": "xhr",
+          "name": "",
+          "role": "",
+          "type": "",
+          "text": "XHR slow",
+          "selector": "button#xhr"
+        },
+        "deltaMs": 1,
+        "join": "immediate"
+      },
+      "redirects": [],
+      "sentHeaders": {
+        "Host": "127.0.0.1:7391",
+        "Referer": "http://127.0.0.1:7391/",
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-579fe949b9c3c8e1"
+      },
+      "response": {
+        "status": 200,
+        "statusText": "OK",
+        "mimeType": "application/json",
+        "protocol": "http/1.1",
+        "remote": "127.0.0.1:7391",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "fromCache": false,
+        "receivedMs": 94,
+        "encodedDataLength": 185,
+        "totalMs": 92.75500000057946
+      },
+      "server": {
+        "supported": true,
+        "reached": true,
+        "request": {
+          "browser": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.243 Electron/30.5.1 Safari/537.36",
+          "duration_ms": 64.56637382507324,
+          "error": null,
+          "finished_at": 1790854244.2797806,
+          "id": "obs-579fe949b9c3c8e1",
+          "method": "GET",
+          "path": "/api/slow",
+          "started_at": 1790854244.2152143,
+          "status": 200
+        },
+        "handler": {
+          "seq": 89,
+          "event": "call",
+          "depth": 1,
+          "function": "slow",
+          "file": "/srv/vm_mgr/tmp/st-obs/station-app/observability/test/target_app.py",
+          "short": "observability/test/target_app.py",
+          "line": 109,
+          "at": 1790854244.2293108,
+          "duration_ms": 50.348758697509766,
+          "error": null,
+          "app": true,
+          "returned": true,
+          "method": "dispatch_request"
+        },
+        "output": [
+          {
+            "seq": 142,
+            "event": "return",
+            "depth": 1,
+            "function": "slow",
+            "file": "/srv/vm_mgr/tmp/st-obs/station-app/observability/test/target_app.py",
+            "short": "observability/test/target_app.py",
+            "line": 111,
+            "at": 1790854244.2796595,
+            "duration_ms": 50.348758697509766,
+            "error": null,
+            "app": true,
+            "role": "handler returned"
+          },
+          {
+            "seq": 144,
+            "event": "call",
+            "depth": 0,
+            "function": "finalize_request",
+            "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+            "short": "flask/app.py",
+            "line": 922,
+            "at": 1790854244.2796679,
+            "duration_ms": null,
+            "error": null,
+            "app": false,
+            "role": "response built"
+          },
+          {
+            "seq": 145,
+            "event": "call",
+            "depth": 1,
+            "function": "make_response",
+            "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+            "short": "flask/app.py",
+            "line": 1129,
+            "at": 1790854244.2796717,
+            "duration_ms": 0.00858306884765625,
+            "error": null,
+            "app": false,
+            "role": "response built"
+          },
+          {
+            "seq": 149,
+            "event": "call",
+            "depth": 1,
+            "function": "process_response",
+            "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+            "short": "flask/app.py",
+            "line": 1298,
+            "at": 1790854244.2796848,
+            "duration_ms": null,
+            "error": null,
+            "app": false,
+            "role": "response built"
+          },
+          {
+            "role": "status",
+            "function": "HTTP 200",
+            "duration_ms": 64.56637382507324
+          }
+        ],
+        "exceptions": [],
+        "raised": null,
+        "callees": [
+          {
+            "seq": 90,
+            "event": "call",
+            "depth": 2,
+            "function": "_slow_work",
+            "file": "/srv/vm_mgr/tmp/st-obs/station-app/observability/test/target_app.py",
+            "short": "observability/test/target_app.py",
+            "line": 104,
+            "at": 1790854244.229314,
+            "duration_ms": 50.08816719055176,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 92,
+            "event": "call",
+            "depth": 2,
+            "function": "jsonify",
+            "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/json/__init__.py",
+            "short": "flask/json/__init__.py",
+            "line": 138,
+            "at": 1790854244.2794275,
+            "duration_ms": 0.22983551025390625,
+            "error": null,
+            "app": false
+          }
+        ],
+        "tree": [
+          {
+            "seq": 22,
+            "event": "call",
+            "depth": 0,
+            "function": "_clean",
+            "file": "/srv/hugpy/src/hugpy/py/services/hugpy_server/src/hugpy_server/app/routes/console_trace_routes.py",
+            "short": "app/routes/console_trace_routes.py",
+            "line": 104,
+            "at": 1790854244.2152934,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 24,
+            "event": "call",
+            "depth": 0,
+            "function": "_write",
+            "file": "/srv/hugpy/src/hugpy/py/services/hugpy_server/src/hugpy_server/app/routes/console_trace_routes.py",
+            "short": "app/routes/console_trace_routes.py",
+            "line": 85,
+            "at": 1790854244.2152996,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 25,
+            "event": "call",
+            "depth": 1,
+            "function": "_db",
+            "file": "/srv/hugpy/src/hugpy/py/services/hugpy_server/src/hugpy_server/app/routes/console_trace_routes.py",
+            "short": "app/routes/console_trace_routes.py",
+            "line": 67,
+            "at": 1790854244.2153025,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 26,
+            "event": "call",
+            "depth": 2,
+            "function": "trace_db_path",
+            "file": "/srv/hugpy/src/hugpy/py/services/hugpy_server/src/hugpy_server/app/routes/console_trace_routes.py",
+            "short": "app/routes/console_trace_routes.py",
+            "line": 59,
+            "at": 1790854244.2153041,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 57,
+            "event": "call",
+            "depth": 1,
+            "function": "<lambda>",
+            "file": "/srv/hugpy/src/hugpy/py/services/hugpy_server/src/hugpy_server/app/routes/console_trace_routes.py",
+            "short": "app/routes/console_trace_routes.py",
+            "line": 159,
+            "at": 1790854244.215867,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 62,
+            "event": "call",
+            "depth": 0,
+            "function": "dispatch_request",
+            "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+            "short": "flask/app.py",
+            "line": 879,
+            "at": 1790854244.2292266,
+            "duration_ms": null,
+            "error": null,
+            "app": false
+          },
+          {
+            "seq": 89,
+            "event": "call",
+            "depth": 1,
+            "function": "slow",
+            "file": "/srv/vm_mgr/tmp/st-obs/station-app/observability/test/target_app.py",
+            "short": "observability/test/target_app.py",
+            "line": 109,
+            "at": 1790854244.2293108,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 90,
+            "event": "call",
+            "depth": 2,
+            "function": "_slow_work",
+            "file": "/srv/vm_mgr/tmp/st-obs/station-app/observability/test/target_app.py",
+            "short": "observability/test/target_app.py",
+            "line": 104,
+            "at": 1790854244.229314,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 184,
+            "event": "call",
+            "depth": 2,
+            "function": "_trace_after",
+            "file": "/srv/hugpy/src/hugpy/py/services/hugpy_server/src/hugpy_server/app/routes/console_trace_routes.py",
+            "short": "app/routes/console_trace_routes.py",
+            "line": 163,
+            "at": 1790854244.2797775,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          }
+        ],
+        "counts": {
+          "spans": 185,
+          "calls": 93,
+          "app_calls": 8,
+          "exceptions": 0
+        },
+        "notes": [],
+        "url": "http://127.0.0.1:7391/api/console/trace?trace_id=obs-579fe949b9c3c8e1"
+      },
+      "inference": {
+        "level": "summary",
+        "text": "1) click on button#xhr (\"XHR slow\") [immediate, +1 ms]\n2) GET /api/slow initiated by script from onXhrClick @ app.js:15\n3) reached Flask: GET /api/slow (server 65 ms)\n4) handler slow @ observability/test/target_app.py:109 ran 50.3 ms, 8 app calls\n5) output: slow → finalize_request → make_response → process_response → HTTP 200\n6) browser received 200 application/json 185 B in 93 ms"
+      }
+    },
+    {
+      "key": "373379.7",
+      "requestId": "373379.7",
+      "traceId": "obs-c27ff10f2d469a8b",
+      "injected": true,
+      "pageTagged": false,
+      "pageTraceId": null,
+      "url": "http://127.0.0.1:7391/api/boom",
+      "path": "/api/boom",
+      "method": "GET",
+      "resourceType": "Fetch",
+      "wallTime": 1790854246.622117,
+      "t0": 5404.748341,
+      "documentURL": "http://127.0.0.1:7391/",
+      "initiator": {
+        "type": "script",
+        "url": "",
+        "stack": [
+          {
+            "functionName": "onBoomClick",
+            "url": "http://127.0.0.1:7391/static/app.js",
+            "lineNumber": 20,
+            "columnNumber": 2
+          }
+        ],
+        "asyncParents": []
+      },
+      "action": {
+        "id": 3,
+        "action": "click",
+        "ts": 1790854246621,
+        "trusted": true,
+        "target": {
+          "tag": "button",
+          "id": "boom",
+          "name": "",
+          "role": "",
+          "type": "",
+          "text": "Boom (500)",
+          "selector": "button#boom"
+        },
+        "deltaMs": 1,
+        "join": "immediate"
+      },
+      "redirects": [],
+      "sentHeaders": {
+        "Host": "127.0.0.1:7391",
+        "Referer": "http://127.0.0.1:7391/",
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-c27ff10f2d469a8b"
+      },
+      "response": {
+        "status": 500,
+        "statusText": "INTERNAL SERVER ERROR",
+        "mimeType": "text/html",
+        "protocol": "http/1.1",
+        "remote": "127.0.0.1:7391",
+        "headers": {
+          "Content-Type": "text/html; charset=utf-8"
+        },
+        "fromCache": false,
+        "receivedMs": 48,
+        "encodedDataLength": 458,
+        "totalMs": 47.7019999998447
+      },
+      "server": {
+        "supported": true,
+        "reached": true,
+        "request": {
+          "browser": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.243 Electron/30.5.1 Safari/537.36",
+          "duration_ms": 21.596670150756836,
+          "error": null,
+          "finished_at": 1790854246.6456287,
+          "id": "obs-c27ff10f2d469a8b",
+          "method": "GET",
+          "path": "/api/boom",
+          "started_at": 1790854246.624032,
+          "status": 500
+        },
+        "handler": {
+          "seq": 89,
+          "event": "call",
+          "depth": 1,
+          "function": "boom",
+          "file": "/srv/vm_mgr/tmp/st-obs/station-app/observability/test/target_app.py",
+          "short": "observability/test/target_app.py",
+          "line": 118,
+          "at": 1790854246.643138,
+          "duration_ms": 0.0095367431640625,
+          "error": null,
+          "app": true,
+          "returned": true,
+          "method": "dispatch_request"
+        },
+        "output": [
+          {
+            "seq": 92,
+            "event": "return",
+            "depth": 1,
+            "function": "boom",
+            "file": "/srv/vm_mgr/tmp/st-obs/station-app/observability/test/target_app.py",
+            "short": "observability/test/target_app.py",
+            "line": 120,
+            "at": 1790854246.6431475,
+            "duration_ms": 0.0095367431640625,
+            "error": null,
+            "app": true,
+            "role": "handler unwound (raised)"
+          },
+          {
+            "seq": 94,
+            "event": "call",
+            "depth": 0,
+            "function": "handle_user_exception",
+            "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+            "short": "flask/app.py",
+            "line": 779,
+            "at": 1790854246.6431534,
+            "duration_ms": 0.0457763671875,
+            "error": null,
+            "app": false,
+            "role": "error handling"
+          },
+          {
+            "seq": 113,
+            "event": "call",
+            "depth": 0,
+            "function": "handle_exception",
+            "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+            "short": "flask/app.py",
+            "line": 811,
+            "at": 1790854246.6432056,
+            "duration_ms": null,
+            "error": null,
+            "app": false,
+            "role": "error handling"
+          },
+          {
+            "seq": 122,
+            "event": "call",
+            "depth": 1,
+            "function": "log_exception",
+            "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+            "short": "flask/app.py",
+            "line": 864,
+            "at": 1790854246.643237,
+            "duration_ms": 1.6384124755859375,
+            "error": null,
+            "app": false,
+            "role": "error handling"
+          },
+          {
+            "seq": 698,
+            "event": "call",
+            "depth": 1,
+            "function": "finalize_request",
+            "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+            "short": "flask/app.py",
+            "line": 922,
+            "at": 1790854246.6449678,
+            "duration_ms": null,
+            "error": null,
+            "app": false,
+            "role": "response built"
+          },
+          {
+            "seq": 699,
+            "event": "call",
+            "depth": 2,
+            "function": "make_response",
+            "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+            "short": "flask/app.py",
+            "line": 1129,
+            "at": 1790854246.644973,
+            "duration_ms": 0.5803108215332031,
+            "error": null,
+            "app": false,
+            "role": "response built"
+          },
+          {
+            "seq": 921,
+            "event": "call",
+            "depth": 2,
+            "function": "process_response",
+            "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+            "short": "flask/app.py",
+            "line": 1298,
+            "at": 1790854246.645558,
+            "duration_ms": null,
+            "error": null,
+            "app": false,
+            "role": "response built"
+          },
+          {
+            "role": "status",
+            "function": "HTTP 500",
+            "duration_ms": 21.596670150756836
+          }
+        ],
+        "exceptions": [],
+        "raised": {
+          "via": "handle_user_exception",
+          "method": "reconstructed from return lines (setprofile has no exception events)",
+          "traceback": [
+            {
+              "seq": 93,
+              "event": "return",
+              "depth": 0,
+              "function": "dispatch_request",
+              "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+              "short": "flask/app.py",
+              "line": 902,
+              "at": 1790854246.6431499,
+              "duration_ms": 0.09489059448242188,
+              "error": null,
+              "app": false
+            },
+            {
+              "seq": 92,
+              "event": "return",
+              "depth": 1,
+              "function": "boom",
+              "file": "/srv/vm_mgr/tmp/st-obs/station-app/observability/test/target_app.py",
+              "short": "observability/test/target_app.py",
+              "line": 120,
+              "at": 1790854246.6431475,
+              "duration_ms": 0.0095367431640625,
+              "error": null,
+              "app": true
+            },
+            {
+              "seq": 91,
+              "event": "return",
+              "depth": 2,
+              "function": "_explode",
+              "file": "/srv/vm_mgr/tmp/st-obs/station-app/observability/test/target_app.py",
+              "short": "observability/test/target_app.py",
+              "line": 115,
+              "at": 1790854246.6431453,
+              "duration_ms": 0.0045299530029296875,
+              "error": null,
+              "app": true
+            }
+          ]
+        },
+        "callees": [
+          {
+            "seq": 90,
+            "event": "call",
+            "depth": 2,
+            "function": "_explode",
+            "file": "/srv/vm_mgr/tmp/st-obs/station-app/observability/test/target_app.py",
+            "short": "observability/test/target_app.py",
+            "line": 114,
+            "at": 1790854246.6431408,
+            "duration_ms": 0.0045299530029296875,
+            "error": null,
+            "app": true
+          }
+        ],
+        "tree": [
+          {
+            "seq": 22,
+            "event": "call",
+            "depth": 0,
+            "function": "_clean",
+            "file": "/srv/hugpy/src/hugpy/py/services/hugpy_server/src/hugpy_server/app/routes/console_trace_routes.py",
+            "short": "app/routes/console_trace_routes.py",
+            "line": 104,
+            "at": 1790854246.624094,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 24,
+            "event": "call",
+            "depth": 0,
+            "function": "_write",
+            "file": "/srv/hugpy/src/hugpy/py/services/hugpy_server/src/hugpy_server/app/routes/console_trace_routes.py",
+            "short": "app/routes/console_trace_routes.py",
+            "line": 85,
+            "at": 1790854246.624098,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 25,
+            "event": "call",
+            "depth": 1,
+            "function": "_db",
+            "file": "/srv/hugpy/src/hugpy/py/services/hugpy_server/src/hugpy_server/app/routes/console_trace_routes.py",
+            "short": "app/routes/console_trace_routes.py",
+            "line": 67,
+            "at": 1790854246.6241004,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 26,
+            "event": "call",
+            "depth": 2,
+            "function": "trace_db_path",
+            "file": "/srv/hugpy/src/hugpy/py/services/hugpy_server/src/hugpy_server/app/routes/console_trace_routes.py",
+            "short": "app/routes/console_trace_routes.py",
+            "line": 59,
+            "at": 1790854246.6241019,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 57,
+            "event": "call",
+            "depth": 1,
+            "function": "<lambda>",
+            "file": "/srv/hugpy/src/hugpy/py/services/hugpy_server/src/hugpy_server/app/routes/console_trace_routes.py",
+            "short": "app/routes/console_trace_routes.py",
+            "line": 159,
+            "at": 1790854246.6246405,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 62,
+            "event": "call",
+            "depth": 0,
+            "function": "dispatch_request",
+            "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+            "short": "flask/app.py",
+            "line": 879,
+            "at": 1790854246.643055,
+            "duration_ms": null,
+            "error": null,
+            "app": false
+          },
+          {
+            "seq": 89,
+            "event": "call",
+            "depth": 1,
+            "function": "boom",
+            "file": "/srv/vm_mgr/tmp/st-obs/station-app/observability/test/target_app.py",
+            "short": "observability/test/target_app.py",
+            "line": 118,
+            "at": 1790854246.643138,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 90,
+            "event": "call",
+            "depth": 2,
+            "function": "_explode",
+            "file": "/srv/vm_mgr/tmp/st-obs/station-app/observability/test/target_app.py",
+            "short": "observability/test/target_app.py",
+            "line": 114,
+            "at": 1790854246.6431408,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 956,
+            "event": "call",
+            "depth": 3,
+            "function": "_trace_after",
+            "file": "/srv/hugpy/src/hugpy/py/services/hugpy_server/src/hugpy_server/app/routes/console_trace_routes.py",
+            "short": "app/routes/console_trace_routes.py",
+            "line": 163,
+            "at": 1790854246.6456263,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          }
+        ],
+        "counts": {
+          "spans": 957,
+          "calls": 479,
+          "app_calls": 8,
+          "exceptions": 0
+        },
+        "notes": [],
+        "url": "http://127.0.0.1:7391/api/console/trace?trace_id=obs-c27ff10f2d469a8b"
+      },
+      "inference": {
+        "level": "summary",
+        "text": "1) click on button#boom (\"Boom (500)\") [immediate, +1 ms]\n2) GET /api/boom initiated by script from onBoomClick @ app.js:21\n3) reached Flask: GET /api/boom (server 22 ms)\n4) handler boom @ observability/test/target_app.py:118 ran 0.0 ms, 8 app calls\n5) output: boom → handle_user_exception → handle_exception → log_exception → finalize_request → make_response → process_response → HTTP 500; RAISED via handle_user_exception: dispatch_request:902 → boom:120 → _explode:115\n6) browser received 500 text/html 458 B in 48 ms"
+      }
+    },
+    {
+      "key": "373379.8",
+      "requestId": "373379.8",
+      "traceId": "obs-f24206309f1ed016",
+      "injected": true,
+      "pageTagged": false,
+      "pageTraceId": null,
+      "url": "http://127.0.0.1:7391/api/items?n=1",
+      "path": "/api/items?n=1",
+      "method": "GET",
+      "resourceType": "Fetch",
+      "wallTime": 1790854247.535202,
+      "t0": 5405.661419,
+      "documentURL": "http://127.0.0.1:7391/",
+      "initiator": {
+        "type": "script",
+        "url": "",
+        "stack": [
+          {
+            "functionName": "loadItems",
+            "url": "http://127.0.0.1:7391/static/app.js",
+            "lineNumber": 2,
+            "columnNumber": 18
+          },
+          {
+            "functionName": "onChainClick",
+            "url": "http://127.0.0.1:7391/static/app.js",
+            "lineNumber": 25,
+            "columnNumber": 21
+          }
+        ],
+        "asyncParents": []
+      },
+      "action": {
+        "id": 4,
+        "action": "click",
+        "ts": 1790854247524,
+        "trusted": true,
+        "target": {
+          "tag": "button",
+          "id": "chain",
+          "name": "",
+          "role": "",
+          "type": "",
+          "text": "Async chain",
+          "selector": "button#chain"
+        },
+        "deltaMs": 11,
+        "join": "immediate"
+      },
+      "redirects": [],
+      "sentHeaders": {
+        "Host": "127.0.0.1:7391",
+        "Referer": "http://127.0.0.1:7391/",
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-f24206309f1ed016"
+      },
+      "response": {
+        "status": 200,
+        "statusText": "OK",
+        "mimeType": "application/json",
+        "protocol": "http/1.1",
+        "remote": "127.0.0.1:7391",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "fromCache": false,
+        "receivedMs": 44,
+        "encodedDataLength": 202,
+        "totalMs": 43.23599999952421
+      },
+      "server": {
+        "supported": true,
+        "reached": true,
+        "request": {
+          "browser": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.243 Electron/30.5.1 Safari/537.36",
+          "duration_ms": 17.25149154663086,
+          "error": null,
+          "finished_at": 1790854247.5548937,
+          "id": "obs-f24206309f1ed016",
+          "method": "GET",
+          "path": "/api/items",
+          "started_at": 1790854247.5376422,
+          "status": 200
+        },
+        "handler": {
+          "seq": 89,
+          "event": "call",
+          "depth": 1,
+          "function": "list_items",
+          "file": "/srv/vm_mgr/tmp/st-obs/station-app/observability/test/target_app.py",
+          "short": "observability/test/target_app.py",
+          "line": 93,
+          "at": 1790854247.5545087,
+          "duration_ms": 0.2932548522949219,
+          "error": null,
+          "app": true,
+          "returned": true,
+          "method": "dispatch_request"
+        },
+        "output": [
+          {
+            "seq": 176,
+            "event": "return",
+            "depth": 1,
+            "function": "list_items",
+            "file": "/srv/vm_mgr/tmp/st-obs/station-app/observability/test/target_app.py",
+            "short": "observability/test/target_app.py",
+            "line": 96,
+            "at": 1790854247.554802,
+            "duration_ms": 0.2932548522949219,
+            "error": null,
+            "app": true,
+            "role": "handler returned"
+          },
+          {
+            "seq": 178,
+            "event": "call",
+            "depth": 0,
+            "function": "finalize_request",
+            "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+            "short": "flask/app.py",
+            "line": 922,
+            "at": 1790854247.554808,
+            "duration_ms": null,
+            "error": null,
+            "app": false,
+            "role": "response built"
+          },
+          {
+            "seq": 179,
+            "event": "call",
+            "depth": 1,
+            "function": "make_response",
+            "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+            "short": "flask/app.py",
+            "line": 1129,
+            "at": 1790854247.5548115,
+            "duration_ms": 0.007152557373046875,
+            "error": null,
+            "app": false,
+            "role": "response built"
+          },
+          {
+            "seq": 183,
+            "event": "call",
+            "depth": 1,
+            "function": "process_response",
+            "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+            "short": "flask/app.py",
+            "line": 1298,
+            "at": 1790854247.5548227,
+            "duration_ms": null,
+            "error": null,
+            "app": false,
+            "role": "response built"
+          },
+          {
+            "role": "status",
+            "function": "HTTP 200",
+            "duration_ms": 17.25149154663086
+          }
+        ],
+        "exceptions": [],
+        "raised": null,
+        "callees": [
+          {
+            "seq": 122,
+            "event": "call",
+            "depth": 2,
+            "function": "build_items",
+            "file": "/srv/vm_mgr/tmp/st-obs/station-app/observability/test/target_app.py",
+            "short": "observability/test/target_app.py",
+            "line": 79,
+            "at": 1790854247.554615,
+            "duration_ms": 0.00762939453125,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 126,
+            "event": "call",
+            "depth": 2,
+            "function": "jsonify",
+            "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/json/__init__.py",
+            "short": "flask/json/__init__.py",
+            "line": 138,
+            "at": 1790854247.554625,
+            "duration_ms": 0.17499923706054688,
+            "error": null,
+            "app": false
+          },
+          {
+            "seq": 96,
+            "event": "call",
+            "depth": 2,
+            "function": "__get__",
+            "file": "/srv/hugpy/venv/lib/python3.12/site-packages/werkzeug/utils.py",
+            "short": "werkzeug/utils.py",
+            "line": 88,
+            "at": 1790854247.5545244,
+            "duration_ms": 0.0743865966796875,
+            "error": null,
+            "app": false
+          },
+          {
+            "seq": 90,
+            "event": "call",
+            "depth": 2,
+            "function": "__get__",
+            "file": "/srv/hugpy/venv/lib/python3.12/site-packages/werkzeug/local.py",
+            "short": "werkzeug/local.py",
+            "line": 310,
+            "at": 1790854247.5545113,
+            "duration_ms": 0.009059906005859375,
+            "error": null,
+            "app": false
+          },
+          {
+            "seq": 118,
+            "event": "call",
+            "depth": 2,
+            "function": "get",
+            "file": "/srv/hugpy/venv/lib/python3.12/site-packages/werkzeug/datastructures/structures.py",
+            "short": "werkzeug/datastructures/structures.py",
+            "line": 75,
+            "at": 1790854247.5546029,
+            "duration_ms": 0.008106231689453125,
+            "error": null,
+            "app": false
+          }
+        ],
+        "tree": [
+          {
+            "seq": 22,
+            "event": "call",
+            "depth": 0,
+            "function": "_clean",
+            "file": "/srv/hugpy/src/hugpy/py/services/hugpy_server/src/hugpy_server/app/routes/console_trace_routes.py",
+            "short": "app/routes/console_trace_routes.py",
+            "line": 104,
+            "at": 1790854247.5377245,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 24,
+            "event": "call",
+            "depth": 0,
+            "function": "_write",
+            "file": "/srv/hugpy/src/hugpy/py/services/hugpy_server/src/hugpy_server/app/routes/console_trace_routes.py",
+            "short": "app/routes/console_trace_routes.py",
+            "line": 85,
+            "at": 1790854247.5377302,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 25,
+            "event": "call",
+            "depth": 1,
+            "function": "_db",
+            "file": "/srv/hugpy/src/hugpy/py/services/hugpy_server/src/hugpy_server/app/routes/console_trace_routes.py",
+            "short": "app/routes/console_trace_routes.py",
+            "line": 67,
+            "at": 1790854247.5377333,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 26,
+            "event": "call",
+            "depth": 2,
+            "function": "trace_db_path",
+            "file": "/srv/hugpy/src/hugpy/py/services/hugpy_server/src/hugpy_server/app/routes/console_trace_routes.py",
+            "short": "app/routes/console_trace_routes.py",
+            "line": 59,
+            "at": 1790854247.537736,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 57,
+            "event": "call",
+            "depth": 1,
+            "function": "<lambda>",
+            "file": "/srv/hugpy/src/hugpy/py/services/hugpy_server/src/hugpy_server/app/routes/console_trace_routes.py",
+            "short": "app/routes/console_trace_routes.py",
+            "line": 159,
+            "at": 1790854247.5384562,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 62,
+            "event": "call",
+            "depth": 0,
+            "function": "dispatch_request",
+            "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+            "short": "flask/app.py",
+            "line": 879,
+            "at": 1790854247.554431,
+            "duration_ms": null,
+            "error": null,
+            "app": false
+          },
+          {
+            "seq": 89,
+            "event": "call",
+            "depth": 1,
+            "function": "list_items",
+            "file": "/srv/vm_mgr/tmp/st-obs/station-app/observability/test/target_app.py",
+            "short": "observability/test/target_app.py",
+            "line": 93,
+            "at": 1790854247.5545087,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 122,
+            "event": "call",
+            "depth": 2,
+            "function": "build_items",
+            "file": "/srv/vm_mgr/tmp/st-obs/station-app/observability/test/target_app.py",
+            "short": "observability/test/target_app.py",
+            "line": 79,
+            "at": 1790854247.554615,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 123,
+            "event": "call",
+            "depth": 3,
+            "function": "_fmt",
+            "file": "/srv/vm_mgr/tmp/st-obs/station-app/observability/test/target_app.py",
+            "short": "observability/test/target_app.py",
+            "line": 75,
+            "at": 1790854247.5546181,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          },
+          {
+            "seq": 218,
+            "event": "call",
+            "depth": 2,
+            "function": "_trace_after",
+            "file": "/srv/hugpy/src/hugpy/py/services/hugpy_server/src/hugpy_server/app/routes/console_trace_routes.py",
+            "short": "app/routes/console_trace_routes.py",
+            "line": 163,
+            "at": 1790854247.5548916,
+            "duration_ms": null,
+            "error": null,
+            "app": true
+          }
+        ],
+        "counts": {
+          "spans": 219,
+          "calls": 110,
+          "app_calls": 9,
+          "exceptions": 0
+        },
+        "notes": [],
+        "url": "http://127.0.0.1:7391/api/console/trace?trace_id=obs-f24206309f1ed016"
+      },
+      "inference": {
+        "level": "summary",
+        "text": "1) click on button#chain (\"Async chain\") [immediate, +11 ms]\n2) GET /api/items?n=1 initiated by script from loadItems @ app.js:3\n3) reached Flask: GET /api/items (server 17 ms)\n4) handler list_items @ observability/test/target_app.py:93 ran 0.3 ms, 9 app calls\n5) output: list_items → finalize_request → make_response → process_response → HTTP 200\n6) browser received 200 application/json 202 B in 43 ms"
+      }
+    },
+    {
+      "key": "373379.9",
+      "requestId": "373379.9",
+      "traceId": null,
+      "injected": false,
+      "pageTagged": false,
+      "pageTraceId": null,
+      "url": "http://127.0.0.1:7391/api/items",
+      "path": "/api/items",
+      "method": "POST",
+      "resourceType": "Fetch",
+      "wallTime": 1790854248.427235,
+      "t0": 5406.553453,
+      "documentURL": "http://127.0.0.1:7391/",
+      "initiator": {
+        "type": "script",
+        "url": "",
+        "stack": [
+          {
+            "functionName": "onSaveClick",
+            "url": "http://127.0.0.1:7391/static/app.js",
+            "lineNumber": 17,
+            "columnNumber": 2
+          }
+        ],
+        "asyncParents": []
+      },
+      "action": {
+        "id": 5,
+        "action": "click",
+        "ts": 1790854248426,
+        "trusted": true,
+        "target": {
+          "tag": "button",
+          "id": "save",
+          "name": "",
+          "role": "",
+          "type": "",
+          "text": "Save (POST)",
+          "selector": "button#save"
+        },
+        "deltaMs": 1,
+        "join": "immediate"
+      },
+      "redirects": [],
+      "sentHeaders": {
+        "Content-Type": "application/json",
+        "Host": "127.0.0.1:7391",
+        "Origin": "http://127.0.0.1:7391",
+        "Referer": "http://127.0.0.1:7391/"
+      },
+      "response": {
+        "status": 201,
+        "statusText": "CREATED",
+        "mimeType": "application/json",
+        "protocol": "http/1.1",
+        "remote": "127.0.0.1:7391",
+        "headers": {
+          "Content-Type": "application/json"
+        },
+        "fromCache": false,
+        "receivedMs": 3,
+        "encodedDataLength": 207,
+        "totalMs": 3.105999999206688
+      },
+      "server": null,
+      "inference": {
+        "level": "summary",
+        "text": "1) click on button#save (\"Save (POST)\") [immediate, +1 ms]\n2) POST /api/items initiated by script from onSaveClick @ app.js:18\n3-5) not trace-tagged (outside the inject filter): no server spans requested\n6) browser received 201 application/json 207 B in 3 ms"
+      }
+    }
+  ],
+  "actions": [
+    {
+      "id": 1,
+      "action": "click",
+      "ts": 1790854243308,
+      "trusted": true,
+      "target": {
+        "tag": "button",
+        "id": "load",
+        "name": "",
+        "role": "",
+        "type": "",
+        "text": "Load items",
+        "selector": "button#load"
+      }
+    },
+    {
+      "id": 2,
+      "action": "click",
+      "ts": 1790854244211,
+      "trusted": true,
+      "target": {
+        "tag": "button",
+        "id": "xhr",
+        "name": "",
+        "role": "",
+        "type": "",
+        "text": "XHR slow",
+        "selector": "button#xhr"
+      }
+    },
+    {
+      "id": 3,
+      "action": "click",
+      "ts": 1790854246621,
+      "trusted": true,
+      "target": {
+        "tag": "button",
+        "id": "boom",
+        "name": "",
+        "role": "",
+        "type": "",
+        "text": "Boom (500)",
+        "selector": "button#boom"
+      }
+    },
+    {
+      "id": 4,
+      "action": "click",
+      "ts": 1790854247524,
+      "trusted": true,
+      "target": {
+        "tag": "button",
+        "id": "chain",
+        "name": "",
+        "role": "",
+        "type": "",
+        "text": "Async chain",
+        "selector": "button#chain"
+      }
+    },
+    {
+      "id": 5,
+      "action": "click",
+      "ts": 1790854248426,
+      "trusted": true,
+      "target": {
+        "tag": "button",
+        "id": "save",
+        "name": "",
+        "role": "",
+        "type": "",
+        "text": "Save (POST)",
+        "selector": "button#save"
+      }
+    }
+  ],
+  "console": [
+    {
+      "level": "warning",
+      "ts": 1790854242449.801,
+      "text": "%cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy with \"unsafe-eval\" enabled. This exposes users of\n  this app to unnecessary security risks.\n\nFor more information and help, consult\nhttps://electronjs.org/docs/tutorial/security.\nThis warning will not show up\nonce the app is packaged.",
+      "stack": [
+        {
+          "functionName": "warnAboutInsecureCSP",
+          "url": "node:electron/js2c/sandbox_bundle",
+          "lineNumber": 1,
+          "columnNumber": 54701
+        }
+      ]
+    },
+    {
+      "level": "warning",
+      "ts": 1790854242498.904,
+      "text": "%cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy with \"unsafe-eval\" enabled. This exposes users of\n  this app to unnecessary security risks.\n\nFor more information and help, consult\nhttps://electronjs.org/docs/tutorial/security.\nThis warning will not show up\nonce the app is packaged.",
+      "stack": [
+        {
+          "functionName": "warnAboutInsecureCSP",
+          "url": "node:electron/js2c/sandbox_bundle",
+          "lineNumber": 1,
+          "columnNumber": 54701
+        },
+        {
+          "functionName": "logSecurityWarnings",
+          "url": "node:electron/js2c/sandbox_bundle",
+          "lineNumber": 1,
+          "columnNumber": 56865
+        },
+        {
+          "functionName": "",
+          "url": "node:electron/js2c/sandbox_bundle",
+          "lineNumber": 1,
+          "columnNumber": 58072
+        }
+      ]
+    },
+    {
+      "level": "log",
+      "ts": 1790854243351.34,
+      "text": "items loaded 3",
+      "stack": [
+        {
+          "functionName": "onLoadClick",
+          "url": "http://127.0.0.1:7391/static/app.js",
+          "lineNumber": 8,
+          "columnNumber": 10
+        }
+      ]
+    },
+    {
+      "level": "error",
+      "ts": 1790854246670.586,
+      "text": "boom failed Error: boom status 500\n    at http://127.0.0.1:7391/static/app.js:21:51",
+      "stack": [
+        {
+          "functionName": "",
+          "url": "http://127.0.0.1:7391/static/app.js",
+          "lineNumber": 21,
+          "columnNumber": 24
+        }
+      ]
+    }
+  ]
+}

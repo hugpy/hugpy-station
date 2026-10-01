@@ -149,6 +149,10 @@ def test_delivery_shape():
     text, note = bp.fmt_board(p, {"key": "f1", "sigkey": "s1", "signature": "sig"}, "ae-hugpy")
     assert text.startswith("[B proposal] ") and "```bash\nsudo -n -u hugpy" in note
     assert "- server.py:7540" in note and "origin ae-hugpy" in note and "reject: <reason>" in note
+    # BOARD-ITEM-FORMAT.md proposal shape, disposition paragraph last
+    for sec in ("PROBLEM: ", "OPTIONS:\nA) ", "\nB) ", "REC: ", "DECISION: pending", "SKETCH:\n```bash"):
+        assert sec in note, sec
+    assert note.index("SKETCH:") < note.rindex("close with a disposition line")
     s = {}
     e = bp.record(s, p, "delivered", now=T0, bid="p9")
     assert s["disposition"] == "proposed" and e["id"] == "p9" and e["disposition"] == "open"

@@ -1,0 +1,350 @@
+{
+ "pending": false,
+ "request": {
+  "browser": "curl/8.5.0",
+  "duration_ms": 2.124793998518726,
+  "endpoint": "boom",
+  "error": "ValueError: config key 'model_path' is missing",
+  "exception": {
+   "message": "config key 'model_path' is missing",
+   "traceback": [
+    {
+     "app": false,
+     "code": "response = self.full_dispatch_request()",
+     "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+     "function": "wsgi_app",
+     "line": 1511
+    },
+    {
+     "app": false,
+     "code": "rv = self.handle_user_exception(e)",
+     "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+     "function": "full_dispatch_request",
+     "line": 919
+    },
+    {
+     "app": false,
+     "code": "rv = self.dispatch_request()",
+     "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+     "function": "full_dispatch_request",
+     "line": 917
+    },
+    {
+     "app": false,
+     "code": "return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)  # type: ignore[no-any-return]",
+     "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+     "function": "dispatch_request",
+     "line": 902
+    },
+    {
+     "app": true,
+     "code": "return jsonify(_load_config(\"model_path\"))",
+     "file": "/fixture/app/stub_server.py",
+     "function": "boom",
+     "line": 202
+    },
+    {
+     "app": true,
+     "code": "return _explode(key)",
+     "file": "/fixture/app/stub_server.py",
+     "function": "_load_config",
+     "line": 197
+    },
+    {
+     "app": true,
+     "code": "raise ValueError(f\"config key {key!r} is missing\")",
+     "file": "/fixture/app/stub_server.py",
+     "function": "_explode",
+     "line": 193
+    }
+   ],
+   "type": "ValueError"
+  },
+  "finished_at": 1790880555.627168,
+  "id": "fx2-boom",
+  "method": "GET",
+  "path": "/api/boom",
+  "pid": 1926364,
+  "requested_id": "fx2-boom",
+  "schema": 2,
+  "session_id": "fx-session",
+  "span_count": 22,
+  "spans_level": "app",
+  "spans_truncated": 0,
+  "started_at": 1790880555.6250432,
+  "status": 500,
+  "view": {
+   "file": "/fixture/app/stub_server.py",
+   "function": "boom",
+   "line": 200,
+   "module": "__main__"
+  }
+ },
+ "schema": 2,
+ "spans": [
+  {
+   "at": 1790880555.625129,
+   "depth": 0,
+   "duration_ms": null,
+   "error": null,
+   "event": "call",
+   "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+   "function": "dispatch_request",
+   "line": 879,
+   "module": "flask.app",
+   "seq": 0
+  },
+  {
+   "at": 1790880555.6251674,
+   "depth": 1,
+   "duration_ms": null,
+   "error": null,
+   "event": "call",
+   "file": "/fixture/app/stub_server.py",
+   "function": "boom",
+   "line": 200,
+   "module": "__main__",
+   "seq": 1
+  },
+  {
+   "at": 1790880555.6251738,
+   "depth": 2,
+   "duration_ms": null,
+   "error": null,
+   "event": "call",
+   "file": "/fixture/app/stub_server.py",
+   "function": "_load_config",
+   "line": 196,
+   "module": "__main__",
+   "seq": 2
+  },
+  {
+   "at": 1790880555.6251788,
+   "depth": 3,
+   "duration_ms": null,
+   "error": null,
+   "event": "call",
+   "file": "/fixture/app/stub_server.py",
+   "function": "_explode",
+   "line": 192,
+   "module": "__main__",
+   "seq": 3
+  },
+  {
+   "at": 1790880555.6251872,
+   "depth": 3,
+   "duration_ms": null,
+   "error": "ValueError: config key 'model_path' is missing",
+   "event": "exception",
+   "file": "/fixture/app/stub_server.py",
+   "function": "_explode",
+   "line": 193,
+   "module": "__main__",
+   "seq": 4
+  },
+  {
+   "at": 1790880555.6251922,
+   "depth": 3,
+   "duration_ms": 0.010769999789772555,
+   "error": "unwound: ValueError: config key 'model_path' is missing",
+   "event": "return",
+   "file": "/fixture/app/stub_server.py",
+   "function": "_explode",
+   "line": 193,
+   "module": "__main__",
+   "seq": 5
+  },
+  {
+   "at": 1790880555.6251967,
+   "depth": 2,
+   "duration_ms": null,
+   "error": "ValueError: config key 'model_path' is missing",
+   "event": "exception",
+   "file": "/fixture/app/stub_server.py",
+   "function": "_load_config",
+   "line": 197,
+   "module": "__main__",
+   "seq": 6
+  },
+  {
+   "at": 1790880555.6252,
+   "depth": 2,
+   "duration_ms": 0.024687000404810533,
+   "error": "unwound: ValueError: config key 'model_path' is missing",
+   "event": "return",
+   "file": "/fixture/app/stub_server.py",
+   "function": "_load_config",
+   "line": 197,
+   "module": "__main__",
+   "seq": 7
+  },
+  {
+   "at": 1790880555.625203,
+   "depth": 1,
+   "duration_ms": null,
+   "error": "ValueError: config key 'model_path' is missing",
+   "event": "exception",
+   "file": "/fixture/app/stub_server.py",
+   "function": "boom",
+   "line": 202,
+   "module": "__main__",
+   "seq": 8
+  },
+  {
+   "at": 1790880555.6252058,
+   "depth": 1,
+   "duration_ms": 0.03658800051198341,
+   "error": "unwound: ValueError: config key 'model_path' is missing",
+   "event": "return",
+   "file": "/fixture/app/stub_server.py",
+   "function": "boom",
+   "line": 202,
+   "module": "__main__",
+   "seq": 9
+  },
+  {
+   "at": 1790880555.6252086,
+   "depth": 0,
+   "duration_ms": null,
+   "error": "ValueError: config key 'model_path' is missing",
+   "event": "exception",
+   "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+   "function": "dispatch_request",
+   "line": 902,
+   "module": "flask.app",
+   "seq": 10
+  },
+  {
+   "at": 1790880555.6252115,
+   "depth": 0,
+   "duration_ms": 0.08035099745029584,
+   "error": "unwound: ValueError: config key 'model_path' is missing",
+   "event": "return",
+   "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+   "function": "dispatch_request",
+   "line": 902,
+   "module": "flask.app",
+   "seq": 11
+  },
+  {
+   "at": 1790880555.6252186,
+   "depth": 0,
+   "duration_ms": null,
+   "error": null,
+   "event": "call",
+   "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+   "function": "handle_user_exception",
+   "line": 779,
+   "module": "flask.app",
+   "seq": 12
+  },
+  {
+   "at": 1790880555.6252565,
+   "depth": 0,
+   "duration_ms": 0.0359779987775255,
+   "error": null,
+   "event": "return",
+   "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+   "function": "handle_user_exception",
+   "line": 807,
+   "module": "flask.app",
+   "seq": 13
+  },
+  {
+   "at": 1790880555.6252646,
+   "depth": 0,
+   "duration_ms": null,
+   "error": null,
+   "event": "call",
+   "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+   "function": "handle_exception",
+   "line": 811,
+   "module": "flask.app",
+   "seq": 14
+  },
+  {
+   "at": 1790880555.6267998,
+   "depth": 1,
+   "duration_ms": null,
+   "error": null,
+   "event": "call",
+   "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+   "function": "finalize_request",
+   "line": 922,
+   "module": "flask.app",
+   "seq": 15
+  },
+  {
+   "at": 1790880555.6268024,
+   "depth": 2,
+   "duration_ms": null,
+   "error": null,
+   "event": "call",
+   "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+   "function": "make_response",
+   "line": 1129,
+   "module": "flask.app",
+   "seq": 16
+  },
+  {
+   "at": 1790880555.6270165,
+   "depth": 2,
+   "duration_ms": 0.21072700110380538,
+   "error": null,
+   "event": "return",
+   "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+   "function": "make_response",
+   "line": 1269,
+   "module": "flask.app",
+   "seq": 17
+  },
+  {
+   "at": 1790880555.6270187,
+   "depth": 2,
+   "duration_ms": null,
+   "error": null,
+   "event": "call",
+   "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+   "function": "process_response",
+   "line": 1298,
+   "module": "flask.app",
+   "seq": 18
+  },
+  {
+   "at": 1790880555.6270614,
+   "depth": 2,
+   "duration_ms": 0.041127001168206334,
+   "error": null,
+   "event": "return",
+   "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+   "function": "process_response",
+   "line": 1324,
+   "module": "flask.app",
+   "seq": 19
+  },
+  {
+   "at": 1790880555.6270661,
+   "depth": 1,
+   "duration_ms": 0.26460700246389024,
+   "error": null,
+   "event": "return",
+   "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+   "function": "finalize_request",
+   "line": 951,
+   "module": "flask.app",
+   "seq": 20
+  },
+  {
+   "at": 1790880555.6270678,
+   "depth": 0,
+   "duration_ms": 1.7984500009333715,
+   "error": null,
+   "event": "return",
+   "file": "/srv/hugpy/venv/lib/python3.12/site-packages/flask/app.py",
+   "function": "handle_exception",
+   "line": 862,
+   "module": "flask.app",
+   "seq": 21
+  }
+ ]
+}

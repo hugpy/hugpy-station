@@ -1,0 +1,73 @@
+{
+  "url": "http://127.0.0.1:7002/",
+  "filter": {
+    "domains": [
+      "127.0.0.1:7002"
+    ],
+    "routes": [
+      "/api/readiness",
+      "/api/auth/config"
+    ],
+    "methods": [
+      "GET"
+    ],
+    "types": [
+      "XHR",
+      "Fetch"
+    ],
+    "action": ""
+  },
+  "log": [
+    "toggle default (fresh userData, env=unset): enabled=false",
+    "toggle after setEnabled(true): enabled=true",
+    "loaded http://127.0.0.1:7002/ capture.active=true"
+  ],
+  "blocked": [],
+  "hops": [
+    {
+      "traceId": "obs-0ee51f7ca7177073",
+      "req": "GET /api/auth/config",
+      "type": "Fetch",
+      "hop1_action": null,
+      "hop2_initiator": "script: fetch < Ct | async: await[Jt,(anon)]",
+      "header_on_wire": "obs-0ee51f7ca7177073",
+      "hop3_server_request": "nothing stored for this trace id: header not honored, or every write was dropped (best-effort store); flask dispatch_request not in spans; handler is the first application frame (heuristic)",
+      "hop4_handler": null,
+      "hop4_callees": [],
+      "hop5_output": [],
+      "hop5_raised": null,
+      "hop5_handler_exit_line": null,
+      "pageTraceId": null,
+      "inference": {
+        "level": "summary",
+        "text": "1) no user action attributed (page-initiated)\n2) GET /api/auth/config initiated by script from fetch @ main.4301e1a28d93f986493d.js:2 (async via await)\n3) nothing stored server-side for this trace id\n4) handler not identified\n5) output: ?\n6) browser received 200 application/json 259 B in 1046 ms"
+      },
+      "hop6_response": "200 application/json 259B 1046ms"
+    },
+    {
+      "traceId": "obs-c0ecd46f722279c3",
+      "req": "GET /api/readiness",
+      "type": "Fetch",
+      "hop1_action": null,
+      "hop2_initiator": "script: fetch < Ct | async: await[Et,(anon)]",
+      "header_on_wire": "obs-c0ecd46f722279c3",
+      "hop3_server_request": "nothing stored for this trace id: header not honored, or every write was dropped (best-effort store); flask dispatch_request not in spans; handler is the first application frame (heuristic)",
+      "hop4_handler": null,
+      "hop4_callees": [],
+      "hop5_output": [],
+      "hop5_raised": null,
+      "hop5_handler_exit_line": null,
+      "pageTraceId": null,
+      "inference": {
+        "level": "summary",
+        "text": "1) no user action attributed (page-initiated)\n2) GET /api/readiness initiated by script from fetch @ main.4301e1a28d93f986493d.js:2 (async via await)\n3) nothing stored server-side for this trace id\n4) handler not identified\n5) output: ?\n6) browser received 200 application/json 597 B in 1108 ms"
+      },
+      "hop6_response": "200 application/json 597B 1108ms"
+    }
+  ],
+  "console": [
+    "[warning] %cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy  @ warnAboutInsecureCSP",
+    "[warning] %cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy  @ warnAboutInsecureCSP"
+  ],
+  "export": "/srv/vm_mgr/tmp/obs-evidence/final-live7002/obs-2026-10-01T11-30-59-624Z.json"
+}

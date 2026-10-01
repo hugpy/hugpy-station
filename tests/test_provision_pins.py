@@ -27,7 +27,7 @@ def _pins():
 
 def test_serve_modules_are_pinned_to_the_published_versions():
     p = _pins()
-    assert p["abstract-claude"] == "0.1.64" and p["abstract-serve-core"] == "0.1.4"
+    assert p["abstract-claude"] == "0.1.70" and p["abstract-serve-core"] == "0.1.10"
 
 
 def test_no_local_wheels_ship():

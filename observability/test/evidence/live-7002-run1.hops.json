@@ -1,0 +1,57 @@
+{
+  "url": "http://127.0.0.1:7002/",
+  "filter": {
+    "domains": [
+      "127.0.0.1:7002"
+    ],
+    "routes": [
+      "/api/readiness"
+    ],
+    "methods": [
+      "GET"
+    ],
+    "types": [
+      "XHR",
+      "Fetch"
+    ],
+    "action": ""
+  },
+  "log": [
+    "toggle default (fresh userData, env=unset): enabled=false",
+    "toggle after setEnabled(true): enabled=true",
+    "loaded http://127.0.0.1:7002/ capture.active=true"
+  ],
+  "blocked": [],
+  "hops": [
+    {
+      "traceId": "obs-7d569b28f9813597",
+      "req": "GET /api/readiness",
+      "type": "Fetch",
+      "hop1_action": null,
+      "hop2_initiator": "script: fetch < Ct | async: await[Et,(anon)]",
+      "header_on_wire": "obs-7d569b28f9813597",
+      "hop3_server_request": "no console_trace request row for this trace id (header not honored, or the write was dropped)",
+      "hop4_handler": "readiness app/routes/welcome_routes.py:96 [dispatch_request]",
+      "hop4_callees": [
+        "_storage_state",
+        "_serving_state",
+        "_console_state",
+        "_central_version"
+      ],
+      "hop5_output": [
+        "readiness",
+        "finalize_request",
+        "make_response",
+        "process_response"
+      ],
+      "hop5_raised": null,
+      "hop5_handler_exit_line": "handler returned @ line 112",
+      "hop6_response": "200 application/json 597B 1013ms"
+    }
+  ],
+  "console": [
+    "[warning] %cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy  @ warnAboutInsecureCSP",
+    "[warning] %cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy  @ warnAboutInsecureCSP"
+  ],
+  "export": "/srv/vm_mgr/tmp/obs-evidence/live7002/obs-2026-10-01T11-27-25-357Z.json"
+}

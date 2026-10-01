@@ -53,7 +53,8 @@ usage: hugpy-station [--version] [--help] [electron/chromium switches...]
 Needs a graphical session (\$DISPLAY or \$WAYLAND_DISPLAY). Launch log:
   \${XDG_CACHE_HOME:-~/.cache}/hugpy-station-launch.log
 Environment:
-  CONSOLE_PORT            backend port (default 8899)
+  CONSOLE_PORT            backend port (default 8899; when it is held by something
+                          that is not a stale station backend, the next free port)
   HUGPY_STATION_PYTHON    interpreter for the backend (must import aiohttp)
   FLEETVIEW_TERM_CMD, KEEPER_DEFAULT_BACKEND   see station docs
 EOF
@@ -121,22 +122,125 @@ if ! "$PY" -c 'import aiohttp' >/dev/null 2>&1; then
 fi
 
 # --- from here on, everything goes to the launch log -------------------------
+# fd 3 keeps the caller's stderr for the few messages a person must see.
+exec 3>&2
 LOG_DIR="${XDG_CACHE_HOME:-$HOME/.cache}"
 mkdir -p "$LOG_DIR" 2>/dev/null
 exec >>"$LOG_DIR/hugpy-station-launch.log" 2>&1
-echo "=== launch $(date '+%F %T') === version $(station_version) python $PY"
+echo "=== launch $(date '+%F %T') === version $(station_version) python $PY args: $*"
 
+# --- mode --------------------------------------------------------------------
+# `hugpy-station --serve [claude|gpt|hugpy]` is a CLIENT of serve (main.js hands
+# it to resources/serve-app: join this user's running serve, else start serve
+# only). It runs no backend and binds no station port, so it has no business
+# with the station port at all: nothing below may touch any process in that mode.
+SERVE_MODE=0
+for _a in "$@"; do
+    case "$_a" in --serve|--serve=*) SERVE_MODE=1 ;; esac
+done
+
+# --- station port: join / pick another port, NEVER a blind kill (1.0.139) ----
+# Until 1.0.138 a busy port meant `pkill -f hugpy-station/hugpy-station`,
+# `pkill -f resources/backend/server.py` and `fuser -k -9 <port>/tcp`: every
+# same-user station, every headless hugpy-station-web@ backend (whatever its
+# port; its clean exit left Restart=on-failure down) and whoever held the port.
+# serve-core's auto-open ran `hugpy-station --serve claude` from the station's
+# own serve, so ~1 station launch in 3 killed itself. Now only the LISTENER on
+# the station port is examined, and:
+#   * a live Station of this user owns it   -> exec Electron anyway: main.js
+#     holds the single-instance lock, so the new process focuses the running
+#     window and quits (a stopped (^Z) one cannot answer: say so, exit 4);
+#   * a backend whose desktop Station is gone (HUGPY_STATION_DESKTOP_PID in its
+#     env names a dead pid — main.js sets it) -> stale: that ONE pid is reaped;
+#   * anything else (the headless hugpy-station-web@ unit, another user, a
+#     hand-run server.py, a station older than 1.0.139) is left alone and this
+#     Station takes the next free port.
 PORT="${CONSOLE_PORT:-8899}"
-if ss -ltn 2>/dev/null | grep -q ":$PORT "; then
-    echo "port $PORT busy — reaping stale hugpy-station instance(s)"
-    pkill -f "hugpy-station/hugpy-station" 2>/dev/null
-    pkill -f "resources/backend/server.py" 2>/dev/null
-    sleep 1
-    # a suspended (^Z) holder survives SIGTERM-by-name; force-kill by port
-    if ss -ltn 2>/dev/null | grep -q ":$PORT "; then
-        fuser -k -9 "$PORT/tcp" 2>/dev/null
-        sleep 1
+
+port_busy() { ss -ltn "sport = :$1" 2>/dev/null | grep -q '^LISTEN'; }
+port_pids() {  # same-user listener pids on $1 (other users' are not visible)
+    ss -ltnp "sport = :$1" 2>/dev/null | grep '^LISTEN' | grep -o 'pid=[0-9]*' | cut -d= -f2 | sort -un
+}
+proc_argv0() { tr '\0' '\n' < "/proc/$1/cmdline" 2>/dev/null | head -1; }
+proc_state() { sed -n 's/^State:[[:space:]]*\([A-Za-z]\).*/\1/p' "/proc/$1/status" 2>/dev/null; }
+proc_ppid()  { sed -n 's/^PPid:[[:space:]]*//p' "/proc/$1/status" 2>/dev/null; }
+proc_env()   { tr '\0' '\n' < "/proc/$1/environ" 2>/dev/null | sed -n "s/^$2=//p" | head -1; }
+is_backend() { tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null | grep -q 'resources/backend/server\.py'; }
+# a Station Electron MAIN process: its binary (or argv[0]) is .../hugpy-station,
+# not a --type= helper, not a --serve client. NB Chromium rewrites the main
+# process's /proc/<pid>/cmdline into ONE space-joined string
+# ("/opt/hugpy-station/hugpy-station --disable-gpu ... --no-sandbox"), so argv[0]
+# is cut at the first space and the flags are split on NULs AND spaces. Without
+# that a live Station was not recognised and its own backend was reaped as
+# "stale" (1.0.139 VM test, caught before release).
+is_station() {
+    [ -n "$1" ] && [ -r "/proc/$1/cmdline" ] || return 1
+    local exe a0
+    exe="$(basename "$(readlink "/proc/$1/exe" 2>/dev/null)" 2>/dev/null)"
+    a0="$(basename "$(proc_argv0 "$1" | cut -d' ' -f1)" 2>/dev/null)"
+    [ "$exe" = hugpy-station ] || [ "$a0" = hugpy-station ] || return 1
+    ! tr '\0 ' '\n\n' < "/proc/$1/cmdline" 2>/dev/null | grep -qE '^--(type=|serve$|serve=)'
+}
+next_free_port() {
+    local p=$(( $1 + 1 )) last=$(( $1 + 40 ))
+    while [ "$p" -le "$last" ]; do
+        port_busy "$p" || { echo "$p"; return 0; }
+        p=$(( p + 1 ))
+    done
+    return 1
+}
+say_user() { echo "hugpy-station: $*"; echo "hugpy-station: $*" >&3; }
+
+if [ "$SERVE_MODE" = 1 ]; then
+    echo "serve mode: client of this user's serve — the station port and every running process are left alone"
+elif port_busy "$PORT"; then
+    pids="$(port_pids "$PORT")"
+    [ -n "$pids" ] || echo "port $PORT is held by a listener this user cannot see (another user / root) — left alone"
+    for pid in $pids; do
+        ppid="$(proc_ppid "$pid")"
+        if is_station "$pid"; then
+            holder="$pid"
+        elif is_backend "$pid" && is_station "$ppid"; then
+            holder="$ppid"
+        else
+            holder=""
+        fi
+        if [ -n "$holder" ]; then
+            if [ "$(proc_state "$holder")" = T ]; then
+                say_user "a hugpy Station (pid $holder) is already running but STOPPED (^Z) — resume it (kill -CONT $holder) or close it; not starting a second one."
+                command -v notify-send >/dev/null 2>&1 && notify-send "hugpy Station" \
+                    "Station pid $holder is stopped (^Z). Resume it (kill -CONT $holder) or close it." >/dev/null 2>&1
+                exit 4
+            fi
+            echo "port $PORT: hugpy Station pid $holder is running — handing off to it (single-instance: the new window focuses the running one)"
+            continue
+        fi
+        if is_backend "$pid"; then
+            dpid="$(proc_env "$pid" HUGPY_STATION_DESKTOP_PID)"
+            if [ -n "$dpid" ] && ! is_station "$dpid"; then
+                echo "port $PORT: pid $pid is a stale station backend (its desktop Station $dpid is gone) — reaping that one pid"
+                kill -TERM "$pid" 2>/dev/null
+                for _ in 1 2 3 4 5 6; do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+                if kill -0 "$pid" 2>/dev/null; then   # a stopped (^Z) holder ignores TERM
+                    kill -CONT "$pid" 2>/dev/null; kill -KILL "$pid" 2>/dev/null; sleep 0.5
+                fi
+                continue
+            fi
+            echo "port $PORT: pid $pid is a station backend NOT owned by a desktop Station (headless hugpy-station-web@ / hand-run / pre-1.0.139) — left alone"
+        else
+            echo "port $PORT: held by pid $pid ($(proc_argv0 "$pid")) — not a station process, left alone"
+        fi
+    done
+    if port_busy "$PORT"; then
+        if np="$(next_free_port "$PORT")"; then
+            echo "port $PORT stays in use — this Station's backend takes port $np"
+            PORT="$np"
+        else
+            say_user "port $PORT and the 40 ports above it are in use — set CONSOLE_PORT to a free port."
+            exit 5
+        fi
     fi
+    export CONSOLE_PORT="$PORT"
 fi
 
 export LIBGL_ALWAYS_SOFTWARE="${LIBGL_ALWAYS_SOFTWARE:-1}"

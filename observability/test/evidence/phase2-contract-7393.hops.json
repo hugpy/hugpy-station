@@ -1,0 +1,2398 @@
+{
+  "url": "http://127.0.0.1:7393/",
+  "scenario": "contract",
+  "session": "obs-s-a9e17dcc5ca7c62c",
+  "filter": {
+    "domains": [
+      "127.0.0.1:7393"
+    ],
+    "routes": [
+      "/api/*"
+    ],
+    "methods": [],
+    "types": [
+      "XHR",
+      "Fetch"
+    ],
+    "action": "",
+    "tagWhen": "armed"
+  },
+  "server": {
+    "spans": "app",
+    "modules": ""
+  },
+  "log": [
+    "PASS feature OFF by default (fresh userData, env unset)",
+    "loaded http://127.0.0.1:7393/ capture.active=true session=obs-s-a9e17dcc5ca7c62c",
+    "clicked #load at 61,66",
+    "clicked #save at 161,66",
+    "PASS DevTools coexists with the CDP capture",
+    "clicked #chain at 264,66",
+    "clicked #boom at 363,66",
+    "clicked #handled at 467,66",
+    "clicked #xhr at 57,95",
+    "clicked #noop at 652,66",
+    "clicked #burst at 564,66",
+    "PASS all tagged requests settled (response + server join)",
+    "PASS GET: all 6 hops joined — {\"key\":\"1957454.6\",\"traceId\":\"obs-10bc37b4a1234c50\",\"serverTraceId\":\"obs-10bc37b4a1234c50\",\"req\":\"GET /api/items?n=3\",\"type\":\"Fetch\",\"hop1_action\":\"click button#load (trusted=true)\",\"hop1_listener\":\"click → dispatchRootClick on div#root\",\"hop1_join\":\"listener-stack (sync in listener)\",\"hop2_stack\":\"script: api < load < dispatchRootClick\",\"request_headers_on_wire\":{\"X-Hugpy-Trace\":\"1\",\"X-Hugpy-Trace-Id\":\"obs-10bc37b4a1234c50\",\"X-Hugpy-Trace-Session\":\"obs-s-a9e17dcc5ca7c62c\",\"X-Hugpy-Trace-Spans\":\"app\"},\"request_body\":null,\"hop3_server\":\"GET /api/items -> 200 endpoint=list_items session=obs-s-a9e17dcc5ca7c62c spans=app(18)\",\"hop4_handler\":\"list_items test/contract/stub_server.py:152 [server view (url_rule)]\",\"hop4_callees\":[\"build_items\"],\"hop5_output\":[\"handler returned: list_items\",\"response built: finalize_request\",\"response built: make_response\",\"response built: process_response\",\"status: HTTP 200\"],\"hop5_raised\":null,\"hop5_exception_spans\":[],\"hop5_handled\":[],\"hop6_response\":\"200 application/json 342B 3ms console_trace/2; spans=app\",\"hop6_body\":\"{\\\"items\\\":[{\\\"id\\\":1,\\\"name\\\":\\\"item-1\\\"},{\\\"id\\\":2,\\\"name\\\":\\\"item-2\\\"},{\\\"id\\\":3,\\\"name\\\":\\\"item-3\\\"}]}\\n\",\"hop6_consumers\":[\"[log] items loaded 3 via load (stack)\"],\"hop6_dom\":[\"childList pre#out +61ms (timing (≤300 ms after response))\"]}",
+    "PASS GET: listener is the delegated root listener",
+    "PASS GET: response consumed by page code (stack join)",
+    "PASS POST: all 6 hops joined — {\"key\":\"1957454.7\",\"traceId\":\"obs-a3de1bea05e5b20a\",\"serverTraceId\":\"obs-a3de1bea05e5b20a\",\"req\":\"POST /api/items\",\"type\":\"Fetch\",\"hop1_action\":\"click button#save (trusted=true)\",\"hop1_listener\":\"click → dispatchRootClick on div#root\",\"hop1_join\":\"listener-stack (sync in listener)\",\"hop2_stack\":\"script: api < save < dispatchRootClick\",\"request_headers_on_wire\":{\"X-Hugpy-Trace\":\"1\",\"X-Hugpy-Trace-Id\":\"obs-a3de1bea05e5b20a\",\"X-Hugpy-Trace-Session\":\"obs-s-a9e17dcc5ca7c62c\",\"X-Hugpy-Trace-Spans\":\"app\"},\"request_body\":\"{\\\"name\\\":\\\"widget\\\",\\\"qty\\\":2}\",\"hop3_server\":\"POST /api/items -> 201 endpoint=create_item session=obs-s-a9e17dcc5ca7c62c spans=app(14)\",\"hop4_handler\":\"create_item test/contract/stub_server.py:170 [server view (url_rule)]\",\"hop4_callees\":[\"_validate\",\"_store\"],\"hop5_output\":[\"handler returned: create_item\",\"response built: finalize_request\",\"response built: make_response\",\"response built: process_response\",\"status: HTTP 201\"],\"hop5_raised\":null,\"hop5_exception_spans\":[],\"hop5_handled\":[],\"hop6_response\":\"201 application/json 305B 3ms console_trace/2; spans=app\",\"hop6_body\":\"{\\\"item\\\":{\\\"id\\\":1000,\\\"name\\\":\\\"widget\\\",\\\"qty\\\":2}}\\n\",\"hop6_consumers\":[\"[log] saved item 1000 via save (stack)\"],\"hop6_dom\":[\"childList pre#out +61ms (timing (≤300 ms after response))\"]}",
+    "PASS POST: request body preview + handler callees",
+    "PASS await chain: 2 requests, both linked through async parents — [{\"key\":\"1957454.11\",\"traceId\":\"obs-351d3d5385778cbc\",\"serverTraceId\":\"obs-351d3d5385778cbc\",\"req\":\"GET /api/items?n=1\",\"type\":\"Fetch\",\"hop1_action\":\"click button#chain (trusted=true)\",\"hop1_listener\":\"click → dispatchRootClick on div#root\",\"hop1_join\":\"listener-stack (async chain)\",\"hop2_stack\":\"script: api < chain | await[dispatchRootClick]\",\"request_headers_on_wire\":{\"X-Hugpy-Trace\":\"1\",\"X-Hugpy-Trace-Id\":\"obs-351d3d5385778cbc\",\"X-Hugpy-Trace-Session\":\"obs-s-a9e17dcc5ca7c62c\",\"X-Hugpy-Trace-Spans\":\"app\"},\"request_body\":null,\"hop3_server\":\"GET /api/items -> 200 endpoint=list_items session=obs-s-a9e17dcc5ca7c62c spans=app(14)\",\"hop4_handler\":\"list_items test/contract/stub_server.py:152 [server view (url_rule)]\",\"hop4_callees\":[\"build_items\"],\"hop5_output\":[\"handler returned: list_items\",\"response built: finalize_request\",\"response built: make_response\",\"response built: process_response\",\"status: HTTP 200\"],\"hop5_raised\":null,\"hop5_exception_spans\":[],\"hop5_handled\":[],\"hop6_response\":\"200 application/json 292B 3ms console_trace/2; spans=app\",\"hop6_body\":\"{\\\"items\\\":[{\\\"id\\\":1,\\\"name\\\":\\\"item-1\\\"}]}\\n\",\"hop6_consumers\":[\"[log] chain done item-1 via chain (stack)\"],\"hop6_dom\":[\"childList pre#out +66ms (timing (≤300 ms after response))\"]},{\"key\":\"1957454.12\",\"traceId\":\"obs-8e320a01340598b3\",\"serverTraceId\":\"obs-8e320a01340598b3\",\"req\":\"GET /api/items/1\",\"type\":\"Fetch\",\"hop1_action\":\"click button#chain (trusted=true)\",\"hop1_listener\":\"click → dispatchRootClick on div#root\",\"hop1_join\":\"listener-stack (async chain)\",\"hop2_stack\":\"script: api < chain | await[dispatchRootClick]\",\"request_headers_on_wire\":{\"X-Hugpy-Trace\":\"1\",\"X-Hugpy-Trace-Id\":\"obs-8e320a01340598b3\",\"X-Hugpy-Trace-Session\":\"obs-s-a9e17dcc5ca7c62c\",\"X-Hugpy-Trace-Spans\":\"app\"},\"request_body\":null,\"hop3_server\":\"GET /api/items/1 -> 200 endpoint=get_item session=obs-s-a9e17dcc5ca7c62c spans=app(12)\",\"hop4_handler\":\"get_item test/contract/stub_server.py:176 [server view (url_rule)]\",\"hop4_callees\":[\"_fmt\"],\"hop5_output\":[\"handler returned: get_item\",\"response built: finalize_request\",\"response built: make_response\",\"response built: process_response\",\"status: HTTP 200\"],\"hop5_raised\":null,\"hop5_exception_spans\":[],\"hop5_handled\":[],\"hop6_response\":\"200 application/json 289B 5ms console_trace/2; spans=app\",\"hop6_body\":\"{\\\"item\\\":{\\\"id\\\":1,\\\"name\\\":\\\"item-1\\\"}}\\n\",\"hop6_consumers\":[\"[log] chain done item-1 via chain (stack)\"],\"hop6_dom\":[\"childList pre#out +60ms (timing (≤300 ms after response))\"]}]",
+    "PASS await chain: handlers list_items then get_item",
+    "PASS raise: all 6 hops joined, 500 — {\"key\":\"1957454.14\",\"traceId\":\"obs-72f011d533c35e81\",\"serverTraceId\":\"obs-72f011d533c35e81\",\"req\":\"GET /api/boom\",\"type\":\"Fetch\",\"hop1_action\":\"click button#boom (trusted=true)\",\"hop1_listener\":\"click → dispatchRootClick on div#root\",\"hop1_join\":\"listener-stack (sync in listener)\",\"hop2_stack\":\"script: api < boom < dispatchRootClick\",\"request_headers_on_wire\":{\"X-Hugpy-Trace\":\"1\",\"X-Hugpy-Trace-Id\":\"obs-72f011d533c35e81\",\"X-Hugpy-Trace-Session\":\"obs-s-a9e17dcc5ca7c62c\",\"X-Hugpy-Trace-Spans\":\"app\"},\"request_body\":null,\"hop3_server\":\"GET /api/boom -> 500 endpoint=boom session=obs-s-a9e17dcc5ca7c62c spans=app(22)\",\"hop4_handler\":\"boom test/contract/stub_server.py:200 [server view (url_rule)]\",\"hop4_callees\":[\"_load_config(raised)\"],\"hop5_output\":[\"handler unwound (raised): boom\",\"error handling: handle_user_exception\",\"error handling: handle_exception\",\"response built: finalize_request\",\"response built: make_response\",\"response built: process_response\",\"status: HTTP 500\"],\"hop5_raised\":\"ValueError: config key 'model_path' is missing | server traceback (schema 2) | boom:202 -> _load_config:197 -> _explode:193\",\"hop5_exception_spans\":[\"_explode:193 ValueError: config key 'model_path' is missing\",\"_load_config:197 ValueError: config key 'model_path' is missing\",\"boom:202 ValueError: config key 'model_path' is missing\",\"dispatch_request:902 ValueError: config key 'model_path' is missing\"],\"hop5_handled\":[],\"hop6_response\":\"500 text/html 548B 4ms console_trace/2; spans=app\",\"hop6_body\":\"<!doctype html>\\n<html lang=en>\\n<title>500 Internal Server Error</title>\\n<h1>Internal Server Error</h1>\\n<p>The server encountered an internal error and was unabl\",\"hop6_consumers\":[\"[error] boom failed /api/boom -> HTTP 500 via boom (stack)\"],\"hop6_dom\":[\"childList pre#out +60ms (timing (≤300 ms after response))\"]}",
+    "PASS raise: real server traceback boom → _load_config → _explode",
+    "PASS raise: exception span events (not reconstructed)",
+    "PASS raise: consumer is the page catch (console.error)",
+    "PASS handled raise: shown as handled, not as an error",
+    "PASS XHR from a direct listener: linked sync",
+    "PASS poller requests are NOT attributed to actions — [\"timer-driven (setInterval)\",\"timer-driven (setInterval)\",\"timer-driven (setInterval)\",\"timer-driven (setInterval)\",\"timer-driven (setInterval)\",\"timer-driven (setInterval)\",\"timer-driven (setInterval)\",\"timer-driven (setInterval)\"]",
+    "PASS burst: 20 distinct per-request trace ids — {\"requests\":20,\"ids\":20}",
+    "PASS burst: 20 complete traces (row final + handler + spans) — {\"complete\":20}",
+    "PASS server: zero dropped trace writes — {\"batches\":27,\"db\":\"/srv/vm_mgr/tmp/obs-evidence2/stub/trace.sqlite3\",\"db_bytes\":4096,\"dropped\":{\"queue_full\":0,\"write_error\":0},\"enabled\":true,\"enqueued\":70,\"keep\":2000,\"last_error\":null,\"pid\":1957202,\"pruned_requests\":0,\"queue_max\":4000,\"queued\":0,\"requests_written\":35,\"retries\":0,\"schema\":2,\"spans_written\":427,\"written\":70}",
+    "PASS burst: all grouped under the window session id",
+    "PASS explain refused at level \"summary\" and no model call — {\"ok\":false,\"error\":\"inference level is not \\\"explain\\\"\"}",
+    "PASS explain at level \"explain\": exactly one model call — {\"text\":\"STUB EXPLANATION (deterministic stub, not a model): received a trace of 3810 chars; it begins: TRACE: | { |  \\\"summary\\\": \\\"1) click on button#boom (\\\\\\\"Boom (500)\\\\\\\") → click listener dispatchRootClick on div#root [joined by listener-stack, sent synchronously in the listener]\\\\n2) GET /api/boom initiated by script from api @ app.js:4\\\\n3) reached Flask: GET /api/boom [boom] (server 2 ms, spans app)\\\\\",\"model\":\"stub-explainer\",\"endpoint\":\"http://127.0.0.1:7393/v1/chat/completions\",\"ms\":2,\"at\":\"2026-10-01T18:53:55.226Z\"}",
+    "PASS save: artifact written + provenance event — {\"ok\":true,\"file\":\"/tmp/obs-e2e-8hXfZW/observability/traces/2026-10-01T18-53-55-977Z-obs-72f011d533c35e81.json\",\"saved_at\":\"2026-10-01T18:53:55.977Z\",\"label\":\"\",\"reason\":\"manual\",\"count\":1,\"session\":\"obs-s-a9e17dcc5ca7c62c\",\"traces\":[{\"traceId\":\"obs-72f011d533c35e81\",\"method\":\"GET\",\"url\":\"http://127.0.0.1:7393/api/boom\",\"status\":500,\"action\":\"click button#boom\",\"link\":\"listener-stack\",\"handler\":\"boom test/contract/stub_server.py:200\",\"raised\":\"ValueError: config key 'model_path' is missing\"}],\"provenance\":{\"ok\":true,\"status\":200,\"event_id\":1}}",
+    "clicked #load at 61,66",
+    "clicked #boom at 363,66",
+    "PASS armed: \"trace next 2 actions\" auto-saved a bundle of the linked traces — {\"file\":\"/tmp/obs-e2e-8hXfZW/observability/traces/2026-10-01T18-53-59-397Z-next-2-actions-2.json\",\"saved_at\":\"2026-10-01T18:53:59.397Z\",\"label\":\"next-2-actions\",\"reason\":\"armed\",\"count\":2,\"session\":\"obs-s-a9e17dcc5ca7c62c\",\"traces\":[{\"traceId\":\"obs-dec1bc840cda0ef2\",\"method\":\"GET\",\"url\":\"http://127.0.0.1:7393/api/items?n=3\",\"status\":200,\"action\":\"click button#load\",\"link\":\"listener-stack\",\"handler\":\"list_items test/contract/stub_server.py:152\",\"raised\":null},{\"traceId\":\"obs-6655d8f9f8e6940d\",\"method\":\"GET\",\"url\":\"http://127.0.0.1:7393/api/boom\",\"status\":500,\"action\":\"click button#boom\",\"link\":\"listener-stack\",\"handler\":\"boom test/contract/stub_server.py:200\",\"raised\":\"ValueError: config key 'model_path' is missing\"}],\"provenance\":{\"ok\":true,\"status\":200,\"event_id\":2}}",
+    "PASS armed: after the run, tagging stops (tagWhen=armed) — [null,null]",
+    "PASS saved tab lists the artifacts — [\"/tmp/obs-e2e-8hXfZW/observability/traces/2026-10-01T18-53-59-397Z-next-2-actions-2.json\",\"/tmp/obs-e2e-8hXfZW/observability/traces/2026-10-01T18-53-55-977Z-obs-72f011d533c35e81.json\"]",
+    "PASS provenance ledger has observability_trace events with server file items — [{\"id\":1,\"artifact\":\"/tmp/obs-e2e-8hXfZW/observability/traces/2026-10-01T18-53-55-977Z-obs-72f011d533c35e81.json\",\"items\":[\"/tmp/obs-e2e-8hXfZW/observability/traces/2026-10-01T18-53-55-977Z-obs-72f011d533c35e81.json:null\",\"//127.0.0.1:7393\",\"/srv/vm_mgr/tmp/st-obs2/station-app/observability/test/contract/stub_server.py:200\",\" test/contract/stub_server.py:200\"]},{\"id\":2,\"artifact\":\"/tmp/obs-e2e-8hXfZW/observability/traces/2026-10-01T18-53-59-397Z-next-2-actions-2.json\",\"items\":[\"/tmp/obs-e2e-8hXfZW/observability/traces/2026-10-01T18-53-59-397Z-next-2-actions-2.json:null\",\"//127.0.0.1:7393\",\"/srv/vm_mgr/tmp/st-obs2/station-app/observability/test/contract/stub_server.py:152\",\" test/contract/stub_server.py:152\"]}]"
+  ],
+  "blocked": [],
+  "checks": [
+    {
+      "name": "feature OFF by default (fresh userData, env unset)",
+      "ok": true
+    },
+    {
+      "name": "DevTools coexists with the CDP capture",
+      "ok": true
+    },
+    {
+      "name": "all tagged requests settled (response + server join)",
+      "ok": true
+    },
+    {
+      "name": "GET: all 6 hops joined",
+      "ok": true,
+      "detail": {
+        "key": "1957454.6",
+        "traceId": "obs-10bc37b4a1234c50",
+        "serverTraceId": "obs-10bc37b4a1234c50",
+        "req": "GET /api/items?n=3",
+        "type": "Fetch",
+        "hop1_action": "click button#load (trusted=true)",
+        "hop1_listener": "click → dispatchRootClick on div#root",
+        "hop1_join": "listener-stack (sync in listener)",
+        "hop2_stack": "script: api < load < dispatchRootClick",
+        "request_headers_on_wire": {
+          "X-Hugpy-Trace": "1",
+          "X-Hugpy-Trace-Id": "obs-10bc37b4a1234c50",
+          "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+          "X-Hugpy-Trace-Spans": "app"
+        },
+        "request_body": null,
+        "hop3_server": "GET /api/items -> 200 endpoint=list_items session=obs-s-a9e17dcc5ca7c62c spans=app(18)",
+        "hop4_handler": "list_items test/contract/stub_server.py:152 [server view (url_rule)]",
+        "hop4_callees": [
+          "build_items"
+        ],
+        "hop5_output": [
+          "handler returned: list_items",
+          "response built: finalize_request",
+          "response built: make_response",
+          "response built: process_response",
+          "status: HTTP 200"
+        ],
+        "hop5_raised": null,
+        "hop5_exception_spans": [],
+        "hop5_handled": [],
+        "hop6_response": "200 application/json 342B 3ms console_trace/2; spans=app",
+        "hop6_body": "{\"items\":[{\"id\":1,\"name\":\"item-1\"},{\"id\":2,\"name\":\"item-2\"},{\"id\":3,\"name\":\"item-3\"}]}\n",
+        "hop6_consumers": [
+          "[log] items loaded 3 via load (stack)"
+        ],
+        "hop6_dom": [
+          "childList pre#out +61ms (timing (≤300 ms after response))"
+        ]
+      }
+    },
+    {
+      "name": "GET: listener is the delegated root listener",
+      "ok": true
+    },
+    {
+      "name": "GET: response consumed by page code (stack join)",
+      "ok": true
+    },
+    {
+      "name": "POST: all 6 hops joined",
+      "ok": true,
+      "detail": {
+        "key": "1957454.7",
+        "traceId": "obs-a3de1bea05e5b20a",
+        "serverTraceId": "obs-a3de1bea05e5b20a",
+        "req": "POST /api/items",
+        "type": "Fetch",
+        "hop1_action": "click button#save (trusted=true)",
+        "hop1_listener": "click → dispatchRootClick on div#root",
+        "hop1_join": "listener-stack (sync in listener)",
+        "hop2_stack": "script: api < save < dispatchRootClick",
+        "request_headers_on_wire": {
+          "X-Hugpy-Trace": "1",
+          "X-Hugpy-Trace-Id": "obs-a3de1bea05e5b20a",
+          "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+          "X-Hugpy-Trace-Spans": "app"
+        },
+        "request_body": "{\"name\":\"widget\",\"qty\":2}",
+        "hop3_server": "POST /api/items -> 201 endpoint=create_item session=obs-s-a9e17dcc5ca7c62c spans=app(14)",
+        "hop4_handler": "create_item test/contract/stub_server.py:170 [server view (url_rule)]",
+        "hop4_callees": [
+          "_validate",
+          "_store"
+        ],
+        "hop5_output": [
+          "handler returned: create_item",
+          "response built: finalize_request",
+          "response built: make_response",
+          "response built: process_response",
+          "status: HTTP 201"
+        ],
+        "hop5_raised": null,
+        "hop5_exception_spans": [],
+        "hop5_handled": [],
+        "hop6_response": "201 application/json 305B 3ms console_trace/2; spans=app",
+        "hop6_body": "{\"item\":{\"id\":1000,\"name\":\"widget\",\"qty\":2}}\n",
+        "hop6_consumers": [
+          "[log] saved item 1000 via save (stack)"
+        ],
+        "hop6_dom": [
+          "childList pre#out +61ms (timing (≤300 ms after response))"
+        ]
+      }
+    },
+    {
+      "name": "POST: request body preview + handler callees",
+      "ok": true
+    },
+    {
+      "name": "await chain: 2 requests, both linked through async parents",
+      "ok": true,
+      "detail": [
+        {
+          "key": "1957454.11",
+          "traceId": "obs-351d3d5385778cbc",
+          "serverTraceId": "obs-351d3d5385778cbc",
+          "req": "GET /api/items?n=1",
+          "type": "Fetch",
+          "hop1_action": "click button#chain (trusted=true)",
+          "hop1_listener": "click → dispatchRootClick on div#root",
+          "hop1_join": "listener-stack (async chain)",
+          "hop2_stack": "script: api < chain | await[dispatchRootClick]",
+          "request_headers_on_wire": {
+            "X-Hugpy-Trace": "1",
+            "X-Hugpy-Trace-Id": "obs-351d3d5385778cbc",
+            "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+            "X-Hugpy-Trace-Spans": "app"
+          },
+          "request_body": null,
+          "hop3_server": "GET /api/items -> 200 endpoint=list_items session=obs-s-a9e17dcc5ca7c62c spans=app(14)",
+          "hop4_handler": "list_items test/contract/stub_server.py:152 [server view (url_rule)]",
+          "hop4_callees": [
+            "build_items"
+          ],
+          "hop5_output": [
+            "handler returned: list_items",
+            "response built: finalize_request",
+            "response built: make_response",
+            "response built: process_response",
+            "status: HTTP 200"
+          ],
+          "hop5_raised": null,
+          "hop5_exception_spans": [],
+          "hop5_handled": [],
+          "hop6_response": "200 application/json 292B 3ms console_trace/2; spans=app",
+          "hop6_body": "{\"items\":[{\"id\":1,\"name\":\"item-1\"}]}\n",
+          "hop6_consumers": [
+            "[log] chain done item-1 via chain (stack)"
+          ],
+          "hop6_dom": [
+            "childList pre#out +66ms (timing (≤300 ms after response))"
+          ]
+        },
+        {
+          "key": "1957454.12",
+          "traceId": "obs-8e320a01340598b3",
+          "serverTraceId": "obs-8e320a01340598b3",
+          "req": "GET /api/items/1",
+          "type": "Fetch",
+          "hop1_action": "click button#chain (trusted=true)",
+          "hop1_listener": "click → dispatchRootClick on div#root",
+          "hop1_join": "listener-stack (async chain)",
+          "hop2_stack": "script: api < chain | await[dispatchRootClick]",
+          "request_headers_on_wire": {
+            "X-Hugpy-Trace": "1",
+            "X-Hugpy-Trace-Id": "obs-8e320a01340598b3",
+            "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+            "X-Hugpy-Trace-Spans": "app"
+          },
+          "request_body": null,
+          "hop3_server": "GET /api/items/1 -> 200 endpoint=get_item session=obs-s-a9e17dcc5ca7c62c spans=app(12)",
+          "hop4_handler": "get_item test/contract/stub_server.py:176 [server view (url_rule)]",
+          "hop4_callees": [
+            "_fmt"
+          ],
+          "hop5_output": [
+            "handler returned: get_item",
+            "response built: finalize_request",
+            "response built: make_response",
+            "response built: process_response",
+            "status: HTTP 200"
+          ],
+          "hop5_raised": null,
+          "hop5_exception_spans": [],
+          "hop5_handled": [],
+          "hop6_response": "200 application/json 289B 5ms console_trace/2; spans=app",
+          "hop6_body": "{\"item\":{\"id\":1,\"name\":\"item-1\"}}\n",
+          "hop6_consumers": [
+            "[log] chain done item-1 via chain (stack)"
+          ],
+          "hop6_dom": [
+            "childList pre#out +60ms (timing (≤300 ms after response))"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "await chain: handlers list_items then get_item",
+      "ok": true
+    },
+    {
+      "name": "raise: all 6 hops joined, 500",
+      "ok": true,
+      "detail": {
+        "key": "1957454.14",
+        "traceId": "obs-72f011d533c35e81",
+        "serverTraceId": "obs-72f011d533c35e81",
+        "req": "GET /api/boom",
+        "type": "Fetch",
+        "hop1_action": "click button#boom (trusted=true)",
+        "hop1_listener": "click → dispatchRootClick on div#root",
+        "hop1_join": "listener-stack (sync in listener)",
+        "hop2_stack": "script: api < boom < dispatchRootClick",
+        "request_headers_on_wire": {
+          "X-Hugpy-Trace": "1",
+          "X-Hugpy-Trace-Id": "obs-72f011d533c35e81",
+          "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+          "X-Hugpy-Trace-Spans": "app"
+        },
+        "request_body": null,
+        "hop3_server": "GET /api/boom -> 500 endpoint=boom session=obs-s-a9e17dcc5ca7c62c spans=app(22)",
+        "hop4_handler": "boom test/contract/stub_server.py:200 [server view (url_rule)]",
+        "hop4_callees": [
+          "_load_config(raised)"
+        ],
+        "hop5_output": [
+          "handler unwound (raised): boom",
+          "error handling: handle_user_exception",
+          "error handling: handle_exception",
+          "response built: finalize_request",
+          "response built: make_response",
+          "response built: process_response",
+          "status: HTTP 500"
+        ],
+        "hop5_raised": "ValueError: config key 'model_path' is missing | server traceback (schema 2) | boom:202 -> _load_config:197 -> _explode:193",
+        "hop5_exception_spans": [
+          "_explode:193 ValueError: config key 'model_path' is missing",
+          "_load_config:197 ValueError: config key 'model_path' is missing",
+          "boom:202 ValueError: config key 'model_path' is missing",
+          "dispatch_request:902 ValueError: config key 'model_path' is missing"
+        ],
+        "hop5_handled": [],
+        "hop6_response": "500 text/html 548B 4ms console_trace/2; spans=app",
+        "hop6_body": "<!doctype html>\n<html lang=en>\n<title>500 Internal Server Error</title>\n<h1>Internal Server Error</h1>\n<p>The server encountered an internal error and was unabl",
+        "hop6_consumers": [
+          "[error] boom failed /api/boom -> HTTP 500 via boom (stack)"
+        ],
+        "hop6_dom": [
+          "childList pre#out +60ms (timing (≤300 ms after response))"
+        ]
+      }
+    },
+    {
+      "name": "raise: real server traceback boom → _load_config → _explode",
+      "ok": true
+    },
+    {
+      "name": "raise: exception span events (not reconstructed)",
+      "ok": true
+    },
+    {
+      "name": "raise: consumer is the page catch (console.error)",
+      "ok": true
+    },
+    {
+      "name": "handled raise: shown as handled, not as an error",
+      "ok": true
+    },
+    {
+      "name": "XHR from a direct listener: linked sync",
+      "ok": true
+    },
+    {
+      "name": "poller requests are NOT attributed to actions",
+      "ok": true,
+      "detail": [
+        "timer-driven (setInterval)",
+        "timer-driven (setInterval)",
+        "timer-driven (setInterval)",
+        "timer-driven (setInterval)",
+        "timer-driven (setInterval)",
+        "timer-driven (setInterval)",
+        "timer-driven (setInterval)",
+        "timer-driven (setInterval)"
+      ]
+    },
+    {
+      "name": "burst: 20 distinct per-request trace ids",
+      "ok": true,
+      "detail": {
+        "requests": 20,
+        "ids": 20
+      }
+    },
+    {
+      "name": "burst: 20 complete traces (row final + handler + spans)",
+      "ok": true,
+      "detail": {
+        "complete": 20
+      }
+    },
+    {
+      "name": "server: zero dropped trace writes",
+      "ok": true,
+      "detail": {
+        "batches": 27,
+        "db": "/srv/vm_mgr/tmp/obs-evidence2/stub/trace.sqlite3",
+        "db_bytes": 4096,
+        "dropped": {
+          "queue_full": 0,
+          "write_error": 0
+        },
+        "enabled": true,
+        "enqueued": 70,
+        "keep": 2000,
+        "last_error": null,
+        "pid": 1957202,
+        "pruned_requests": 0,
+        "queue_max": 4000,
+        "queued": 0,
+        "requests_written": 35,
+        "retries": 0,
+        "schema": 2,
+        "spans_written": 427,
+        "written": 70
+      }
+    },
+    {
+      "name": "burst: all grouped under the window session id",
+      "ok": true
+    },
+    {
+      "name": "explain refused at level \"summary\" and no model call",
+      "ok": true,
+      "detail": {
+        "ok": false,
+        "error": "inference level is not \"explain\""
+      }
+    },
+    {
+      "name": "explain at level \"explain\": exactly one model call",
+      "ok": true,
+      "detail": {
+        "text": "STUB EXPLANATION (deterministic stub, not a model): received a trace of 3810 chars; it begins: TRACE: | { |  \"summary\": \"1) click on button#boom (\\\"Boom (500)\\\") → click listener dispatchRootClick on div#root [joined by listener-stack, sent synchronously in the listener]\\n2) GET /api/boom initiated by script from api @ app.js:4\\n3) reached Flask: GET /api/boom [boom] (server 2 ms, spans app)\\",
+        "model": "stub-explainer",
+        "endpoint": "http://127.0.0.1:7393/v1/chat/completions",
+        "ms": 2,
+        "at": "2026-10-01T18:53:55.226Z"
+      }
+    },
+    {
+      "name": "save: artifact written + provenance event",
+      "ok": true,
+      "detail": {
+        "ok": true,
+        "file": "/tmp/obs-e2e-8hXfZW/observability/traces/2026-10-01T18-53-55-977Z-obs-72f011d533c35e81.json",
+        "saved_at": "2026-10-01T18:53:55.977Z",
+        "label": "",
+        "reason": "manual",
+        "count": 1,
+        "session": "obs-s-a9e17dcc5ca7c62c",
+        "traces": [
+          {
+            "traceId": "obs-72f011d533c35e81",
+            "method": "GET",
+            "url": "http://127.0.0.1:7393/api/boom",
+            "status": 500,
+            "action": "click button#boom",
+            "link": "listener-stack",
+            "handler": "boom test/contract/stub_server.py:200",
+            "raised": "ValueError: config key 'model_path' is missing"
+          }
+        ],
+        "provenance": {
+          "ok": true,
+          "status": 200,
+          "event_id": 1
+        }
+      }
+    },
+    {
+      "name": "armed: \"trace next 2 actions\" auto-saved a bundle of the linked traces",
+      "ok": true,
+      "detail": {
+        "file": "/tmp/obs-e2e-8hXfZW/observability/traces/2026-10-01T18-53-59-397Z-next-2-actions-2.json",
+        "saved_at": "2026-10-01T18:53:59.397Z",
+        "label": "next-2-actions",
+        "reason": "armed",
+        "count": 2,
+        "session": "obs-s-a9e17dcc5ca7c62c",
+        "traces": [
+          {
+            "traceId": "obs-dec1bc840cda0ef2",
+            "method": "GET",
+            "url": "http://127.0.0.1:7393/api/items?n=3",
+            "status": 200,
+            "action": "click button#load",
+            "link": "listener-stack",
+            "handler": "list_items test/contract/stub_server.py:152",
+            "raised": null
+          },
+          {
+            "traceId": "obs-6655d8f9f8e6940d",
+            "method": "GET",
+            "url": "http://127.0.0.1:7393/api/boom",
+            "status": 500,
+            "action": "click button#boom",
+            "link": "listener-stack",
+            "handler": "boom test/contract/stub_server.py:200",
+            "raised": "ValueError: config key 'model_path' is missing"
+          }
+        ],
+        "provenance": {
+          "ok": true,
+          "status": 200,
+          "event_id": 2
+        }
+      }
+    },
+    {
+      "name": "armed: after the run, tagging stops (tagWhen=armed)",
+      "ok": true,
+      "detail": [
+        null,
+        null
+      ]
+    },
+    {
+      "name": "saved tab lists the artifacts",
+      "ok": true,
+      "detail": [
+        "/tmp/obs-e2e-8hXfZW/observability/traces/2026-10-01T18-53-59-397Z-next-2-actions-2.json",
+        "/tmp/obs-e2e-8hXfZW/observability/traces/2026-10-01T18-53-55-977Z-obs-72f011d533c35e81.json"
+      ]
+    },
+    {
+      "name": "provenance ledger has observability_trace events with server file items",
+      "ok": true,
+      "detail": [
+        {
+          "id": 1,
+          "artifact": "/tmp/obs-e2e-8hXfZW/observability/traces/2026-10-01T18-53-55-977Z-obs-72f011d533c35e81.json",
+          "items": [
+            "/tmp/obs-e2e-8hXfZW/observability/traces/2026-10-01T18-53-55-977Z-obs-72f011d533c35e81.json:null",
+            "//127.0.0.1:7393",
+            "/srv/vm_mgr/tmp/st-obs2/station-app/observability/test/contract/stub_server.py:200",
+            " test/contract/stub_server.py:200"
+          ]
+        },
+        {
+          "id": 2,
+          "artifact": "/tmp/obs-e2e-8hXfZW/observability/traces/2026-10-01T18-53-59-397Z-next-2-actions-2.json",
+          "items": [
+            "/tmp/obs-e2e-8hXfZW/observability/traces/2026-10-01T18-53-59-397Z-next-2-actions-2.json:null",
+            "//127.0.0.1:7393",
+            "/srv/vm_mgr/tmp/st-obs2/station-app/observability/test/contract/stub_server.py:152",
+            " test/contract/stub_server.py:152"
+          ]
+        }
+      ]
+    }
+  ],
+  "hops": [
+    {
+      "key": "1957454.4",
+      "traceId": "obs-67c558ffaca7e0b5",
+      "serverTraceId": "obs-67c558ffaca7e0b5",
+      "req": "GET /api/poll",
+      "type": "Fetch",
+      "hop1_action": null,
+      "hop1_listener": null,
+      "hop1_join": "unlinked: timer-driven (setInterval)",
+      "hop2_stack": "script: pollStatus | setInterval[(anon)]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-67c558ffaca7e0b5",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/poll -> 200 endpoint=poll session=obs-s-a9e17dcc5ca7c62c spans=app(10)",
+      "hop4_handler": "poll test/contract/stub_server.py:218 [server view (url_rule)]",
+      "hop4_callees": [],
+      "hop5_output": [
+        "handler returned: poll",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 290B 4ms console_trace/2; spans=app",
+      "hop6_body": "{\"at\":1790880822.044182,\"ok\":true}\n",
+      "hop6_consumers": [],
+      "hop6_dom": []
+    },
+    {
+      "key": "1957454.5",
+      "traceId": "obs-133c977932a7467f",
+      "serverTraceId": "obs-133c977932a7467f",
+      "req": "GET /api/poll",
+      "type": "Fetch",
+      "hop1_action": null,
+      "hop1_listener": null,
+      "hop1_join": "unlinked: timer-driven (setInterval)",
+      "hop2_stack": "script: pollStatus | setInterval[(anon)]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-133c977932a7467f",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/poll -> 200 endpoint=poll session=obs-s-a9e17dcc5ca7c62c spans=app(10)",
+      "hop4_handler": "poll test/contract/stub_server.py:218 [server view (url_rule)]",
+      "hop4_callees": [],
+      "hop5_output": [
+        "handler returned: poll",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 290B 3ms console_trace/2; spans=app",
+      "hop6_body": "{\"at\":1790880823.543126,\"ok\":true}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList pre#out +272ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1957454.6",
+      "traceId": "obs-10bc37b4a1234c50",
+      "serverTraceId": "obs-10bc37b4a1234c50",
+      "req": "GET /api/items?n=3",
+      "type": "Fetch",
+      "hop1_action": "click button#load (trusted=true)",
+      "hop1_listener": "click → dispatchRootClick on div#root",
+      "hop1_join": "listener-stack (sync in listener)",
+      "hop2_stack": "script: api < load < dispatchRootClick",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-10bc37b4a1234c50",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/items -> 200 endpoint=list_items session=obs-s-a9e17dcc5ca7c62c spans=app(18)",
+      "hop4_handler": "list_items test/contract/stub_server.py:152 [server view (url_rule)]",
+      "hop4_callees": [
+        "build_items"
+      ],
+      "hop5_output": [
+        "handler returned: list_items",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 342B 3ms console_trace/2; spans=app",
+      "hop6_body": "{\"items\":[{\"id\":1,\"name\":\"item-1\"},{\"id\":2,\"name\":\"item-2\"},{\"id\":3,\"name\":\"item-3\"}]}\n",
+      "hop6_consumers": [
+        "[log] items loaded 3 via load (stack)"
+      ],
+      "hop6_dom": [
+        "childList pre#out +61ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1957454.7",
+      "traceId": "obs-a3de1bea05e5b20a",
+      "serverTraceId": "obs-a3de1bea05e5b20a",
+      "req": "POST /api/items",
+      "type": "Fetch",
+      "hop1_action": "click button#save (trusted=true)",
+      "hop1_listener": "click → dispatchRootClick on div#root",
+      "hop1_join": "listener-stack (sync in listener)",
+      "hop2_stack": "script: api < save < dispatchRootClick",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-a3de1bea05e5b20a",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": "{\"name\":\"widget\",\"qty\":2}",
+      "hop3_server": "POST /api/items -> 201 endpoint=create_item session=obs-s-a9e17dcc5ca7c62c spans=app(14)",
+      "hop4_handler": "create_item test/contract/stub_server.py:170 [server view (url_rule)]",
+      "hop4_callees": [
+        "_validate",
+        "_store"
+      ],
+      "hop5_output": [
+        "handler returned: create_item",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 201"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "201 application/json 305B 3ms console_trace/2; spans=app",
+      "hop6_body": "{\"item\":{\"id\":1000,\"name\":\"widget\",\"qty\":2}}\n",
+      "hop6_consumers": [
+        "[log] saved item 1000 via save (stack)"
+      ],
+      "hop6_dom": [
+        "childList pre#out +61ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1957454.8",
+      "traceId": "obs-f054c6f3368db20b",
+      "serverTraceId": "obs-f054c6f3368db20b",
+      "req": "GET /api/poll",
+      "type": "Fetch",
+      "hop1_action": null,
+      "hop1_listener": null,
+      "hop1_join": "unlinked: timer-driven (setInterval)",
+      "hop2_stack": "script: pollStatus | setInterval[(anon)]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-f054c6f3368db20b",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/poll -> 200 endpoint=poll session=obs-s-a9e17dcc5ca7c62c spans=app(10)",
+      "hop4_handler": "poll test/contract/stub_server.py:218 [server view (url_rule)]",
+      "hop4_callees": [],
+      "hop5_output": [
+        "handler returned: poll",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 290B 4ms console_trace/2; spans=app",
+      "hop6_body": "{\"at\":1790880825.043156,\"ok\":true}\n",
+      "hop6_consumers": [],
+      "hop6_dom": []
+    },
+    {
+      "key": "1957454.10",
+      "traceId": "obs-f00b3959dcebba8a",
+      "serverTraceId": "obs-f00b3959dcebba8a",
+      "req": "GET /api/poll",
+      "type": "Fetch",
+      "hop1_action": null,
+      "hop1_listener": null,
+      "hop1_join": "unlinked: timer-driven (setInterval)",
+      "hop2_stack": "script: pollStatus | setInterval[(anon)]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-f00b3959dcebba8a",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/poll -> 200 endpoint=poll session=obs-s-a9e17dcc5ca7c62c spans=app(10)",
+      "hop4_handler": "poll test/contract/stub_server.py:218 [server view (url_rule)]",
+      "hop4_callees": [],
+      "hop5_output": [
+        "handler returned: poll",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 291B 3ms console_trace/2; spans=app",
+      "hop6_body": "{\"at\":1790880826.5430768,\"ok\":true}\n",
+      "hop6_consumers": [],
+      "hop6_dom": []
+    },
+    {
+      "key": "1957454.11",
+      "traceId": "obs-351d3d5385778cbc",
+      "serverTraceId": "obs-351d3d5385778cbc",
+      "req": "GET /api/items?n=1",
+      "type": "Fetch",
+      "hop1_action": "click button#chain (trusted=true)",
+      "hop1_listener": "click → dispatchRootClick on div#root",
+      "hop1_join": "listener-stack (async chain)",
+      "hop2_stack": "script: api < chain | await[dispatchRootClick]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-351d3d5385778cbc",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/items -> 200 endpoint=list_items session=obs-s-a9e17dcc5ca7c62c spans=app(14)",
+      "hop4_handler": "list_items test/contract/stub_server.py:152 [server view (url_rule)]",
+      "hop4_callees": [
+        "build_items"
+      ],
+      "hop5_output": [
+        "handler returned: list_items",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 292B 3ms console_trace/2; spans=app",
+      "hop6_body": "{\"items\":[{\"id\":1,\"name\":\"item-1\"}]}\n",
+      "hop6_consumers": [
+        "[log] chain done item-1 via chain (stack)"
+      ],
+      "hop6_dom": [
+        "childList pre#out +66ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1957454.12",
+      "traceId": "obs-8e320a01340598b3",
+      "serverTraceId": "obs-8e320a01340598b3",
+      "req": "GET /api/items/1",
+      "type": "Fetch",
+      "hop1_action": "click button#chain (trusted=true)",
+      "hop1_listener": "click → dispatchRootClick on div#root",
+      "hop1_join": "listener-stack (async chain)",
+      "hop2_stack": "script: api < chain | await[dispatchRootClick]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-8e320a01340598b3",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/items/1 -> 200 endpoint=get_item session=obs-s-a9e17dcc5ca7c62c spans=app(12)",
+      "hop4_handler": "get_item test/contract/stub_server.py:176 [server view (url_rule)]",
+      "hop4_callees": [
+        "_fmt"
+      ],
+      "hop5_output": [
+        "handler returned: get_item",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 289B 5ms console_trace/2; spans=app",
+      "hop6_body": "{\"item\":{\"id\":1,\"name\":\"item-1\"}}\n",
+      "hop6_consumers": [
+        "[log] chain done item-1 via chain (stack)"
+      ],
+      "hop6_dom": [
+        "childList pre#out +60ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1957454.13",
+      "traceId": "obs-24266c9fd3dfb03e",
+      "serverTraceId": "obs-24266c9fd3dfb03e",
+      "req": "GET /api/poll",
+      "type": "Fetch",
+      "hop1_action": null,
+      "hop1_listener": null,
+      "hop1_join": "unlinked: timer-driven (setInterval)",
+      "hop2_stack": "script: pollStatus | setInterval[(anon)]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-24266c9fd3dfb03e",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/poll -> 200 endpoint=poll session=obs-s-a9e17dcc5ca7c62c spans=app(10)",
+      "hop4_handler": "poll test/contract/stub_server.py:218 [server view (url_rule)]",
+      "hop4_callees": [],
+      "hop5_output": [
+        "handler returned: poll",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 290B 3ms console_trace/2; spans=app",
+      "hop6_body": "{\"at\":1790880828.042844,\"ok\":true}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList pre#out +281ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1957454.14",
+      "traceId": "obs-72f011d533c35e81",
+      "serverTraceId": "obs-72f011d533c35e81",
+      "req": "GET /api/boom",
+      "type": "Fetch",
+      "hop1_action": "click button#boom (trusted=true)",
+      "hop1_listener": "click → dispatchRootClick on div#root",
+      "hop1_join": "listener-stack (sync in listener)",
+      "hop2_stack": "script: api < boom < dispatchRootClick",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-72f011d533c35e81",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/boom -> 500 endpoint=boom session=obs-s-a9e17dcc5ca7c62c spans=app(22)",
+      "hop4_handler": "boom test/contract/stub_server.py:200 [server view (url_rule)]",
+      "hop4_callees": [
+        "_load_config(raised)"
+      ],
+      "hop5_output": [
+        "handler unwound (raised): boom",
+        "error handling: handle_user_exception",
+        "error handling: handle_exception",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 500"
+      ],
+      "hop5_raised": "ValueError: config key 'model_path' is missing | server traceback (schema 2) | boom:202 -> _load_config:197 -> _explode:193",
+      "hop5_exception_spans": [
+        "_explode:193 ValueError: config key 'model_path' is missing",
+        "_load_config:197 ValueError: config key 'model_path' is missing",
+        "boom:202 ValueError: config key 'model_path' is missing",
+        "dispatch_request:902 ValueError: config key 'model_path' is missing"
+      ],
+      "hop5_handled": [],
+      "hop6_response": "500 text/html 548B 4ms console_trace/2; spans=app",
+      "hop6_body": "<!doctype html>\n<html lang=en>\n<title>500 Internal Server Error</title>\n<h1>Internal Server Error</h1>\n<p>The server encountered an internal error and was unabl",
+      "hop6_consumers": [
+        "[error] boom failed /api/boom -> HTTP 500 via boom (stack)"
+      ],
+      "hop6_dom": [
+        "childList pre#out +60ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1957454.15",
+      "traceId": "obs-e811a9121fa86ef4",
+      "serverTraceId": "obs-e811a9121fa86ef4",
+      "req": "GET /api/handled",
+      "type": "Fetch",
+      "hop1_action": "click button#handled (trusted=true)",
+      "hop1_listener": "click → dispatchRootClick on div#root",
+      "hop1_join": "listener-stack (sync in listener)",
+      "hop2_stack": "script: api < handled < dispatchRootClick",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-e811a9121fa86ef4",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/handled -> 200 endpoint=handled session=obs-s-a9e17dcc5ca7c62c spans=app(15)",
+      "hop4_handler": "handled test/contract/stub_server.py:209 [server view (url_rule)]",
+      "hop4_callees": [
+        "_risky(raised)"
+      ],
+      "hop5_output": [
+        "handler returned: handled",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [
+        "_risky:206 KeyError: 'cache-miss'",
+        "handled:212 KeyError: 'cache-miss'"
+      ],
+      "hop5_handled": [
+        "handled:213"
+      ],
+      "hop6_response": "200 application/json 278B 3ms console_trace/2; spans=app",
+      "hop6_body": "{\"fallback\":\"default\"}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList pre#out +60ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1957454.16",
+      "traceId": "obs-0ddfa1f6f6e755b4",
+      "serverTraceId": "obs-0ddfa1f6f6e755b4",
+      "req": "GET /api/poll",
+      "type": "Fetch",
+      "hop1_action": null,
+      "hop1_listener": null,
+      "hop1_join": "unlinked: timer-driven (setInterval)",
+      "hop2_stack": "script: pollStatus | setInterval[(anon)]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-0ddfa1f6f6e755b4",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/poll -> 200 endpoint=poll session=obs-s-a9e17dcc5ca7c62c spans=app(10)",
+      "hop4_handler": "poll test/contract/stub_server.py:218 [server view (url_rule)]",
+      "hop4_callees": [],
+      "hop5_output": [
+        "handler returned: poll",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 291B 3ms console_trace/2; spans=app",
+      "hop6_body": "{\"at\":1790880829.5424993,\"ok\":true}\n",
+      "hop6_consumers": [],
+      "hop6_dom": []
+    },
+    {
+      "key": "1957454.17",
+      "traceId": "obs-bf7c3818d4d09c8e",
+      "serverTraceId": "obs-bf7c3818d4d09c8e",
+      "req": "GET /api/slow",
+      "type": "XHR",
+      "hop1_action": "click button#xhr (trusted=true)",
+      "hop1_listener": "click → onXhrClick on button#xhr",
+      "hop1_join": "listener-stack (sync in listener)",
+      "hop2_stack": "script: onXhrClick",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-bf7c3818d4d09c8e",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/slow -> 200 endpoint=slow session=obs-s-a9e17dcc5ca7c62c spans=app(12)",
+      "hop4_handler": "slow test/contract/stub_server.py:187 [server view (url_rule)]",
+      "hop4_callees": [
+        "_slow_work"
+      ],
+      "hop5_output": [
+        "handler returned: slow",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 275B 53ms console_trace/2; spans=app",
+      "hop6_body": "{\"msg\":\"slow done\"}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList pre#out +60ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1957454.18",
+      "traceId": "obs-95b52308c2fd8e00",
+      "serverTraceId": "obs-95b52308c2fd8e00",
+      "req": "GET /api/poll",
+      "type": "Fetch",
+      "hop1_action": null,
+      "hop1_listener": null,
+      "hop1_join": "unlinked: timer-driven (setInterval)",
+      "hop2_stack": "script: pollStatus | setInterval[(anon)]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-95b52308c2fd8e00",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/poll -> 200 endpoint=poll session=obs-s-a9e17dcc5ca7c62c spans=app(10)",
+      "hop4_handler": "poll test/contract/stub_server.py:218 [server view (url_rule)]",
+      "hop4_callees": [],
+      "hop5_output": [
+        "handler returned: poll",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 291B 4ms console_trace/2; spans=app",
+      "hop6_body": "{\"at\":1790880831.0433438,\"ok\":true}\n",
+      "hop6_consumers": [],
+      "hop6_dom": []
+    },
+    {
+      "key": "1957454.19",
+      "traceId": "obs-30513efae9616ebb",
+      "serverTraceId": "obs-30513efae9616ebb",
+      "req": "GET /api/items/1",
+      "type": "Fetch",
+      "hop1_action": "click button#burst (trusted=true)",
+      "hop1_listener": "click → dispatchRootClick on div#root",
+      "hop1_join": "listener-stack (sync in listener)",
+      "hop2_stack": "script: api < (anon) < burst < dispatchRootClick",
+      "request_headers_on_wire": {},
+      "request_body": null,
+      "hop3_server": "GET /api/items/1 -> 200 endpoint=get_item session=obs-s-a9e17dcc5ca7c62c spans=app(12)",
+      "hop4_handler": "get_item test/contract/stub_server.py:176 [server view (url_rule)]",
+      "hop4_callees": [
+        "_fmt"
+      ],
+      "hop5_output": [
+        "handler returned: get_item",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 289B 6ms console_trace/2; spans=app",
+      "hop6_body": "{\"item\":{\"id\":1,\"name\":\"item-1\"}}\n",
+      "hop6_consumers": [
+        "[log] burst done 20 via burst (stack)"
+      ],
+      "hop6_dom": [
+        "childList pre#out +91ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1957454.20",
+      "traceId": "obs-cd4c29dcb7e491b0",
+      "serverTraceId": "obs-cd4c29dcb7e491b0",
+      "req": "GET /api/items/2",
+      "type": "Fetch",
+      "hop1_action": "click button#burst (trusted=true)",
+      "hop1_listener": "click → dispatchRootClick on div#root",
+      "hop1_join": "listener-stack (sync in listener)",
+      "hop2_stack": "script: api < (anon) < burst < dispatchRootClick",
+      "request_headers_on_wire": {},
+      "request_body": null,
+      "hop3_server": "GET /api/items/2 -> 200 endpoint=get_item session=obs-s-a9e17dcc5ca7c62c spans=app(12)",
+      "hop4_handler": "get_item test/contract/stub_server.py:176 [server view (url_rule)]",
+      "hop4_callees": [
+        "_fmt"
+      ],
+      "hop5_output": [
+        "handler returned: get_item",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 289B 11ms console_trace/2; spans=app",
+      "hop6_body": "{\"item\":{\"id\":2,\"name\":\"item-2\"}}\n",
+      "hop6_consumers": [
+        "[log] burst done 20 via burst (stack)"
+      ],
+      "hop6_dom": [
+        "childList pre#out +86ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1957454.21",
+      "traceId": "obs-dc9c0235a3ab08a4",
+      "serverTraceId": "obs-dc9c0235a3ab08a4",
+      "req": "GET /api/items/3",
+      "type": "Fetch",
+      "hop1_action": "click button#burst (trusted=true)",
+      "hop1_listener": "click → dispatchRootClick on div#root",
+      "hop1_join": "listener-stack (sync in listener)",
+      "hop2_stack": "script: api < (anon) < burst < dispatchRootClick",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-dc9c0235a3ab08a4",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/items/3 -> 200 endpoint=get_item session=obs-s-a9e17dcc5ca7c62c spans=app(12)",
+      "hop4_handler": "get_item test/contract/stub_server.py:176 [server view (url_rule)]",
+      "hop4_callees": [
+        "_fmt"
+      ],
+      "hop5_output": [
+        "handler returned: get_item",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 289B 11ms console_trace/2; spans=app",
+      "hop6_body": "{\"item\":{\"id\":3,\"name\":\"item-3\"}}\n",
+      "hop6_consumers": [
+        "[log] burst done 20 via burst (stack)"
+      ],
+      "hop6_dom": [
+        "childList pre#out +86ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1957454.22",
+      "traceId": "obs-00b54ee6df51296f",
+      "serverTraceId": "obs-00b54ee6df51296f",
+      "req": "GET /api/items/4",
+      "type": "Fetch",
+      "hop1_action": "click button#burst (trusted=true)",
+      "hop1_listener": "click → dispatchRootClick on div#root",
+      "hop1_join": "listener-stack (sync in listener)",
+      "hop2_stack": "script: api < (anon) < burst < dispatchRootClick",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-00b54ee6df51296f",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/items/4 -> 200 endpoint=get_item session=obs-s-a9e17dcc5ca7c62c spans=app(12)",
+      "hop4_handler": "get_item test/contract/stub_server.py:176 [server view (url_rule)]",
+      "hop4_callees": [
+        "_fmt"
+      ],
+      "hop5_output": [
+        "handler returned: get_item",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 289B 11ms console_trace/2; spans=app",
+      "hop6_body": "{\"item\":{\"id\":4,\"name\":\"item-4\"}}\n",
+      "hop6_consumers": [
+        "[log] burst done 20 via burst (stack)"
+      ],
+      "hop6_dom": [
+        "childList pre#out +86ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1957454.23",
+      "traceId": "obs-87f63117242b7c30",
+      "serverTraceId": "obs-87f63117242b7c30",
+      "req": "GET /api/items/5",
+      "type": "Fetch",
+      "hop1_action": "click button#burst (trusted=true)",
+      "hop1_listener": "click → dispatchRootClick on div#root",
+      "hop1_join": "listener-stack (sync in listener)",
+      "hop2_stack": "script: api < (anon) < burst < dispatchRootClick",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-87f63117242b7c30",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/items/5 -> 200 endpoint=get_item session=obs-s-a9e17dcc5ca7c62c spans=app(12)",
+      "hop4_handler": "get_item test/contract/stub_server.py:176 [server view (url_rule)]",
+      "hop4_callees": [
+        "_fmt"
+      ],
+      "hop5_output": [
+        "handler returned: get_item",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 289B 11ms console_trace/2; spans=app",
+      "hop6_body": "{\"item\":{\"id\":5,\"name\":\"item-5\"}}\n",
+      "hop6_consumers": [
+        "[log] burst done 20 via burst (stack)"
+      ],
+      "hop6_dom": [
+        "childList pre#out +86ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1957454.24",
+      "traceId": "obs-d742748a2457daf5",
+      "serverTraceId": "obs-d742748a2457daf5",
+      "req": "GET /api/items/6",
+      "type": "Fetch",
+      "hop1_action": "click button#burst (trusted=true)",
+      "hop1_listener": "click → dispatchRootClick on div#root",
+      "hop1_join": "listener-stack (sync in listener)",
+      "hop2_stack": "script: api < (anon) < burst < dispatchRootClick",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-d742748a2457daf5",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/items/6 -> 200 endpoint=get_item session=obs-s-a9e17dcc5ca7c62c spans=app(12)",
+      "hop4_handler": "get_item test/contract/stub_server.py:176 [server view (url_rule)]",
+      "hop4_callees": [
+        "_fmt"
+      ],
+      "hop5_output": [
+        "handler returned: get_item",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 289B 11ms console_trace/2; spans=app",
+      "hop6_body": "{\"item\":{\"id\":6,\"name\":\"item-6\"}}\n",
+      "hop6_consumers": [
+        "[log] burst done 20 via burst (stack)"
+      ],
+      "hop6_dom": [
+        "childList pre#out +85ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1957454.25",
+      "traceId": "obs-925d5b50bee9b389",
+      "serverTraceId": "obs-925d5b50bee9b389",
+      "req": "GET /api/items/7",
+      "type": "Fetch",
+      "hop1_action": "click button#burst (trusted=true)",
+      "hop1_listener": "click → dispatchRootClick on div#root",
+      "hop1_join": "listener-stack (sync in listener)",
+      "hop2_stack": "script: api < (anon) < burst < dispatchRootClick",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-925d5b50bee9b389",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/items/7 -> 200 endpoint=get_item session=obs-s-a9e17dcc5ca7c62c spans=app(12)",
+      "hop4_handler": "get_item test/contract/stub_server.py:176 [server view (url_rule)]",
+      "hop4_callees": [
+        "_fmt"
+      ],
+      "hop5_output": [
+        "handler returned: get_item",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 289B 17ms console_trace/2; spans=app",
+      "hop6_body": "{\"item\":{\"id\":7,\"name\":\"item-7\"}}\n",
+      "hop6_consumers": [
+        "[log] burst done 20 via burst (stack)"
+      ],
+      "hop6_dom": [
+        "childList pre#out +79ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1957454.26",
+      "traceId": "obs-299fc3a35641e70e",
+      "serverTraceId": "obs-299fc3a35641e70e",
+      "req": "GET /api/items/8",
+      "type": "Fetch",
+      "hop1_action": "click button#burst (trusted=true)",
+      "hop1_listener": "click → dispatchRootClick on div#root",
+      "hop1_join": "listener-stack (sync in listener)",
+      "hop2_stack": "script: api < (anon) < burst < dispatchRootClick",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-299fc3a35641e70e",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/items/8 -> 200 endpoint=get_item session=obs-s-a9e17dcc5ca7c62c spans=app(12)",
+      "hop4_handler": "get_item test/contract/stub_server.py:176 [server view (url_rule)]",
+      "hop4_callees": [
+        "_fmt"
+      ],
+      "hop5_output": [
+        "handler returned: get_item",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 289B 18ms console_trace/2; spans=app",
+      "hop6_body": "{\"item\":{\"id\":8,\"name\":\"item-8\"}}\n",
+      "hop6_consumers": [
+        "[log] burst done 20 via burst (stack)"
+      ],
+      "hop6_dom": [
+        "childList pre#out +78ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1957454.27",
+      "traceId": "obs-71ab6e75b6cb1228",
+      "serverTraceId": "obs-71ab6e75b6cb1228",
+      "req": "GET /api/items/9",
+      "type": "Fetch",
+      "hop1_action": "click button#burst (trusted=true)",
+      "hop1_listener": "click → dispatchRootClick on div#root",
+      "hop1_join": "listener-stack (sync in listener)",
+      "hop2_stack": "script: api < (anon) < burst < dispatchRootClick",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-71ab6e75b6cb1228",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/items/9 -> 200 endpoint=get_item session=obs-s-a9e17dcc5ca7c62c spans=app(12)",
+      "hop4_handler": "get_item test/contract/stub_server.py:176 [server view (url_rule)]",
+      "hop4_callees": [
+        "_fmt"
+      ],
+      "hop5_output": [
+        "handler returned: get_item",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 289B 19ms console_trace/2; spans=app",
+      "hop6_body": "{\"item\":{\"id\":9,\"name\":\"item-9\"}}\n",
+      "hop6_consumers": [
+        "[log] burst done 20 via burst (stack)"
+      ],
+      "hop6_dom": [
+        "childList pre#out +77ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1957454.28",
+      "traceId": "obs-577f6dfc64d50127",
+      "serverTraceId": "obs-577f6dfc64d50127",
+      "req": "GET /api/items/10",
+      "type": "Fetch",
+      "hop1_action": "click button#burst (trusted=true)",
+      "hop1_listener": "click → dispatchRootClick on div#root",
+      "hop1_join": "listener-stack (sync in listener)",
+      "hop2_stack": "script: api < (anon) < burst < dispatchRootClick",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-577f6dfc64d50127",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/items/10 -> 200 endpoint=get_item session=obs-s-a9e17dcc5ca7c62c spans=app(12)",
+      "hop4_handler": "get_item test/contract/stub_server.py:176 [server view (url_rule)]",
+      "hop4_callees": [
+        "_fmt"
+      ],
+      "hop5_output": [
+        "handler returned: get_item",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 291B 19ms console_trace/2; spans=app",
+      "hop6_body": "{\"item\":{\"id\":10,\"name\":\"item-10\"}}\n",
+      "hop6_consumers": [
+        "[log] burst done 20 via burst (stack)"
+      ],
+      "hop6_dom": [
+        "childList pre#out +77ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1957454.29",
+      "traceId": "obs-4840445b781f582f",
+      "serverTraceId": "obs-4840445b781f582f",
+      "req": "GET /api/items/11",
+      "type": "Fetch",
+      "hop1_action": "click button#burst (trusted=true)",
+      "hop1_listener": "click → dispatchRootClick on div#root",
+      "hop1_join": "listener-stack (sync in listener)",
+      "hop2_stack": "script: api < (anon) < burst < dispatchRootClick",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-4840445b781f582f",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/items/11 -> 200 endpoint=get_item session=obs-s-a9e17dcc5ca7c62c spans=app(12)",
+      "hop4_handler": "get_item test/contract/stub_server.py:176 [server view (url_rule)]",
+      "hop4_callees": [
+        "_fmt"
+      ],
+      "hop5_output": [
+        "handler returned: get_item",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 291B 19ms console_trace/2; spans=app",
+      "hop6_body": "{\"item\":{\"id\":11,\"name\":\"item-11\"}}\n",
+      "hop6_consumers": [
+        "[log] burst done 20 via burst (stack)"
+      ],
+      "hop6_dom": [
+        "childList pre#out +77ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1957454.30",
+      "traceId": "obs-4c2fa70af52d997b",
+      "serverTraceId": "obs-4c2fa70af52d997b",
+      "req": "GET /api/items/12",
+      "type": "Fetch",
+      "hop1_action": "click button#burst (trusted=true)",
+      "hop1_listener": "click → dispatchRootClick on div#root",
+      "hop1_join": "listener-stack (sync in listener)",
+      "hop2_stack": "script: api < (anon) < burst < dispatchRootClick",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-4c2fa70af52d997b",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/items/12 -> 200 endpoint=get_item session=obs-s-a9e17dcc5ca7c62c spans=app(12)",
+      "hop4_handler": "get_item test/contract/stub_server.py:176 [server view (url_rule)]",
+      "hop4_callees": [
+        "_fmt"
+      ],
+      "hop5_output": [
+        "handler returned: get_item",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 291B 19ms console_trace/2; spans=app",
+      "hop6_body": "{\"item\":{\"id\":12,\"name\":\"item-12\"}}\n",
+      "hop6_consumers": [
+        "[log] burst done 20 via burst (stack)"
+      ],
+      "hop6_dom": [
+        "childList pre#out +76ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1957454.31",
+      "traceId": "obs-bab35a0742fe9773",
+      "serverTraceId": "obs-bab35a0742fe9773",
+      "req": "GET /api/items/13",
+      "type": "Fetch",
+      "hop1_action": "click button#burst (trusted=true)",
+      "hop1_listener": "click → dispatchRootClick on div#root",
+      "hop1_join": "listener-stack (sync in listener)",
+      "hop2_stack": "script: api < (anon) < burst < dispatchRootClick",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-bab35a0742fe9773",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/items/13 -> 200 endpoint=get_item session=obs-s-a9e17dcc5ca7c62c spans=app(12)",
+      "hop4_handler": "get_item test/contract/stub_server.py:176 [server view (url_rule)]",
+      "hop4_callees": [
+        "_fmt"
+      ],
+      "hop5_output": [
+        "handler returned: get_item",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 291B 28ms console_trace/2; spans=app",
+      "hop6_body": "{\"item\":{\"id\":13,\"name\":\"item-13\"}}\n",
+      "hop6_consumers": [
+        "[log] burst done 20 via burst (stack)"
+      ],
+      "hop6_dom": [
+        "childList pre#out +68ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1957454.32",
+      "traceId": "obs-7da09ac481e38997",
+      "serverTraceId": "obs-7da09ac481e38997",
+      "req": "GET /api/items/14",
+      "type": "Fetch",
+      "hop1_action": "click button#burst (trusted=true)",
+      "hop1_listener": "click → dispatchRootClick on div#root",
+      "hop1_join": "listener-stack (sync in listener)",
+      "hop2_stack": "script: api < (anon) < burst < dispatchRootClick",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-7da09ac481e38997",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/items/14 -> 200 endpoint=get_item session=obs-s-a9e17dcc5ca7c62c spans=app(12)",
+      "hop4_handler": "get_item test/contract/stub_server.py:176 [server view (url_rule)]",
+      "hop4_callees": [
+        "_fmt"
+      ],
+      "hop5_output": [
+        "handler returned: get_item",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 291B 28ms console_trace/2; spans=app",
+      "hop6_body": "{\"item\":{\"id\":14,\"name\":\"item-14\"}}\n",
+      "hop6_consumers": [
+        "[log] burst done 20 via burst (stack)"
+      ],
+      "hop6_dom": [
+        "childList pre#out +67ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1957454.33",
+      "traceId": "obs-410f2678d781c3a9",
+      "serverTraceId": "obs-410f2678d781c3a9",
+      "req": "GET /api/items/15",
+      "type": "Fetch",
+      "hop1_action": "click button#burst (trusted=true)",
+      "hop1_listener": "click → dispatchRootClick on div#root",
+      "hop1_join": "listener-stack (sync in listener)",
+      "hop2_stack": "script: api < (anon) < burst < dispatchRootClick",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-410f2678d781c3a9",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/items/15 -> 200 endpoint=get_item session=obs-s-a9e17dcc5ca7c62c spans=app(12)",
+      "hop4_handler": "get_item test/contract/stub_server.py:176 [server view (url_rule)]",
+      "hop4_callees": [
+        "_fmt"
+      ],
+      "hop5_output": [
+        "handler returned: get_item",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 291B 24ms console_trace/2; spans=app",
+      "hop6_body": "{\"item\":{\"id\":15,\"name\":\"item-15\"}}\n",
+      "hop6_consumers": [
+        "[log] burst done 20 via burst (stack)"
+      ],
+      "hop6_dom": [
+        "childList pre#out +72ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1957454.34",
+      "traceId": "obs-f55f0da77c171cc1",
+      "serverTraceId": "obs-f55f0da77c171cc1",
+      "req": "GET /api/items/16",
+      "type": "Fetch",
+      "hop1_action": "click button#burst (trusted=true)",
+      "hop1_listener": "click → dispatchRootClick on div#root",
+      "hop1_join": "listener-stack (sync in listener)",
+      "hop2_stack": "script: api < (anon) < burst < dispatchRootClick",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-f55f0da77c171cc1",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/items/16 -> 200 endpoint=get_item session=obs-s-a9e17dcc5ca7c62c spans=app(12)",
+      "hop4_handler": "get_item test/contract/stub_server.py:176 [server view (url_rule)]",
+      "hop4_callees": [
+        "_fmt"
+      ],
+      "hop5_output": [
+        "handler returned: get_item",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 291B 28ms console_trace/2; spans=app",
+      "hop6_body": "{\"item\":{\"id\":16,\"name\":\"item-16\"}}\n",
+      "hop6_consumers": [
+        "[log] burst done 20 via burst (stack)"
+      ],
+      "hop6_dom": [
+        "childList pre#out +67ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1957454.35",
+      "traceId": "obs-6b76b654eabf0e4a",
+      "serverTraceId": "obs-6b76b654eabf0e4a",
+      "req": "GET /api/items/17",
+      "type": "Fetch",
+      "hop1_action": "click button#burst (trusted=true)",
+      "hop1_listener": "click → dispatchRootClick on div#root",
+      "hop1_join": "listener-stack (sync in listener)",
+      "hop2_stack": "script: api < (anon) < burst < dispatchRootClick",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-6b76b654eabf0e4a",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/items/17 -> 200 endpoint=get_item session=obs-s-a9e17dcc5ca7c62c spans=app(12)",
+      "hop4_handler": "get_item test/contract/stub_server.py:176 [server view (url_rule)]",
+      "hop4_callees": [
+        "_fmt"
+      ],
+      "hop5_output": [
+        "handler returned: get_item",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 291B 25ms console_trace/2; spans=app",
+      "hop6_body": "{\"item\":{\"id\":17,\"name\":\"item-17\"}}\n",
+      "hop6_consumers": [
+        "[log] burst done 20 via burst (stack)"
+      ],
+      "hop6_dom": [
+        "childList pre#out +70ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1957454.36",
+      "traceId": "obs-65d5880560c76f96",
+      "serverTraceId": "obs-65d5880560c76f96",
+      "req": "GET /api/items/18",
+      "type": "Fetch",
+      "hop1_action": "click button#burst (trusted=true)",
+      "hop1_listener": "click → dispatchRootClick on div#root",
+      "hop1_join": "listener-stack (sync in listener)",
+      "hop2_stack": "script: api < (anon) < burst < dispatchRootClick",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-65d5880560c76f96",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/items/18 -> 200 endpoint=get_item session=obs-s-a9e17dcc5ca7c62c spans=app(12)",
+      "hop4_handler": "get_item test/contract/stub_server.py:176 [server view (url_rule)]",
+      "hop4_callees": [
+        "_fmt"
+      ],
+      "hop5_output": [
+        "handler returned: get_item",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 291B 25ms console_trace/2; spans=app",
+      "hop6_body": "{\"item\":{\"id\":18,\"name\":\"item-18\"}}\n",
+      "hop6_consumers": [
+        "[log] burst done 20 via burst (stack)"
+      ],
+      "hop6_dom": [
+        "childList pre#out +70ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1957454.37",
+      "traceId": "obs-078bfc03ac760698",
+      "serverTraceId": "obs-078bfc03ac760698",
+      "req": "GET /api/items/19",
+      "type": "Fetch",
+      "hop1_action": "click button#burst (trusted=true)",
+      "hop1_listener": "click → dispatchRootClick on div#root",
+      "hop1_join": "listener-stack (sync in listener)",
+      "hop2_stack": "script: api < (anon) < burst < dispatchRootClick",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-078bfc03ac760698",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/items/19 -> 200 endpoint=get_item session=obs-s-a9e17dcc5ca7c62c spans=app(12)",
+      "hop4_handler": "get_item test/contract/stub_server.py:176 [server view (url_rule)]",
+      "hop4_callees": [
+        "_fmt"
+      ],
+      "hop5_output": [
+        "handler returned: get_item",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 291B 31ms console_trace/2; spans=app",
+      "hop6_body": "{\"item\":{\"id\":19,\"name\":\"item-19\"}}\n",
+      "hop6_consumers": [
+        "[log] burst done 20 via burst (stack)"
+      ],
+      "hop6_dom": [
+        "childList pre#out +64ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1957454.38",
+      "traceId": "obs-e426c82c30814bd8",
+      "serverTraceId": "obs-e426c82c30814bd8",
+      "req": "GET /api/items/20",
+      "type": "Fetch",
+      "hop1_action": "click button#burst (trusted=true)",
+      "hop1_listener": "click → dispatchRootClick on div#root",
+      "hop1_join": "listener-stack (sync in listener)",
+      "hop2_stack": "script: api < (anon) < burst < dispatchRootClick",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-e426c82c30814bd8",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/items/20 -> 200 endpoint=get_item session=obs-s-a9e17dcc5ca7c62c spans=app(12)",
+      "hop4_handler": "get_item test/contract/stub_server.py:176 [server view (url_rule)]",
+      "hop4_callees": [
+        "_fmt"
+      ],
+      "hop5_output": [
+        "handler returned: get_item",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 291B 33ms console_trace/2; spans=app",
+      "hop6_body": "{\"item\":{\"id\":20,\"name\":\"item-20\"}}\n",
+      "hop6_consumers": [
+        "[log] burst done 20 via burst (stack)"
+      ],
+      "hop6_dom": [
+        "childList pre#out +62ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1957454.39",
+      "traceId": "obs-7bdfbcdd73923805",
+      "serverTraceId": "obs-7bdfbcdd73923805",
+      "req": "GET /api/poll",
+      "type": "Fetch",
+      "hop1_action": null,
+      "hop1_listener": null,
+      "hop1_join": "unlinked: timer-driven (setInterval)",
+      "hop2_stack": "script: pollStatus | setInterval[(anon)]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-7bdfbcdd73923805",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/poll -> 200 endpoint=poll session=obs-s-a9e17dcc5ca7c62c spans=app(10)",
+      "hop4_handler": "poll test/contract/stub_server.py:218 [server view (url_rule)]",
+      "hop4_callees": [],
+      "hop5_output": [
+        "handler returned: poll",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 291B 3ms console_trace/2; spans=app",
+      "hop6_body": "{\"at\":1790880832.5427334,\"ok\":true}\n",
+      "hop6_consumers": [],
+      "hop6_dom": []
+    },
+    {
+      "key": "1957454.40",
+      "traceId": "obs-a1793cc8d41d8965",
+      "serverTraceId": "obs-a1793cc8d41d8965",
+      "req": "GET /api/poll",
+      "type": "Fetch",
+      "hop1_action": null,
+      "hop1_listener": null,
+      "hop1_join": "unlinked: timer-driven (setInterval)",
+      "hop2_stack": "script: pollStatus | setInterval[(anon)]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-a1793cc8d41d8965",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/poll -> 200 endpoint=poll session=obs-s-a9e17dcc5ca7c62c spans=app(10)",
+      "hop4_handler": "poll test/contract/stub_server.py:218 [server view (url_rule)]",
+      "hop4_callees": [],
+      "hop5_output": [
+        "handler returned: poll",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 291B 3ms console_trace/2; spans=app",
+      "hop6_body": "{\"at\":1790880834.0427039,\"ok\":true}\n",
+      "hop6_consumers": [],
+      "hop6_dom": []
+    },
+    {
+      "key": "1957454.41",
+      "traceId": "obs-7fef14fafe5b1096",
+      "serverTraceId": "obs-7fef14fafe5b1096",
+      "req": "GET /api/poll",
+      "type": "Fetch",
+      "hop1_action": null,
+      "hop1_listener": null,
+      "hop1_join": "unlinked: timer-driven (setInterval)",
+      "hop2_stack": "script: pollStatus | setInterval[(anon)]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-7fef14fafe5b1096",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/poll -> 200 endpoint=poll session=obs-s-a9e17dcc5ca7c62c spans=app(10)",
+      "hop4_handler": "poll test/contract/stub_server.py:218 [server view (url_rule)]",
+      "hop4_callees": [],
+      "hop5_output": [
+        "handler returned: poll",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 291B 3ms console_trace/2; spans=app",
+      "hop6_body": "{\"at\":1790880835.5429997,\"ok\":true}\n",
+      "hop6_consumers": [],
+      "hop6_dom": []
+    },
+    {
+      "key": "1957454.42",
+      "traceId": "obs-dec1bc840cda0ef2",
+      "serverTraceId": "obs-dec1bc840cda0ef2",
+      "req": "GET /api/items?n=3",
+      "type": "Fetch",
+      "hop1_action": "click button#load (trusted=true)",
+      "hop1_listener": "click → dispatchRootClick on div#root",
+      "hop1_join": "listener-stack (sync in listener)",
+      "hop2_stack": "script: api < load < dispatchRootClick",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-dec1bc840cda0ef2",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/items -> 200 endpoint=list_items session=obs-s-a9e17dcc5ca7c62c spans=app(18)",
+      "hop4_handler": "list_items test/contract/stub_server.py:152 [server view (url_rule)]",
+      "hop4_callees": [
+        "build_items"
+      ],
+      "hop5_output": [
+        "handler returned: list_items",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 342B 3ms console_trace/2; spans=app",
+      "hop6_body": "{\"items\":[{\"id\":1,\"name\":\"item-1\"},{\"id\":2,\"name\":\"item-2\"},{\"id\":3,\"name\":\"item-3\"}]}\n",
+      "hop6_consumers": [
+        "[log] items loaded 3 via load (stack)"
+      ],
+      "hop6_dom": [
+        "childList pre#out +60ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1957454.43",
+      "traceId": "obs-6655d8f9f8e6940d",
+      "serverTraceId": "obs-6655d8f9f8e6940d",
+      "req": "GET /api/boom",
+      "type": "Fetch",
+      "hop1_action": "click button#boom (trusted=true)",
+      "hop1_listener": "click → dispatchRootClick on div#root",
+      "hop1_join": "listener-stack (sync in listener)",
+      "hop2_stack": "script: api < boom < dispatchRootClick",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-6655d8f9f8e6940d",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/boom -> 500 endpoint=boom session=obs-s-a9e17dcc5ca7c62c spans=app(22)",
+      "hop4_handler": "boom test/contract/stub_server.py:200 [server view (url_rule)]",
+      "hop4_callees": [
+        "_load_config(raised)"
+      ],
+      "hop5_output": [
+        "handler unwound (raised): boom",
+        "error handling: handle_user_exception",
+        "error handling: handle_exception",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 500"
+      ],
+      "hop5_raised": "ValueError: config key 'model_path' is missing | server traceback (schema 2) | boom:202 -> _load_config:197 -> _explode:193",
+      "hop5_exception_spans": [
+        "_explode:193 ValueError: config key 'model_path' is missing",
+        "_load_config:197 ValueError: config key 'model_path' is missing",
+        "boom:202 ValueError: config key 'model_path' is missing",
+        "dispatch_request:902 ValueError: config key 'model_path' is missing"
+      ],
+      "hop5_handled": [],
+      "hop6_response": "500 text/html 548B 4ms console_trace/2; spans=app",
+      "hop6_body": "<!doctype html>\n<html lang=en>\n<title>500 Internal Server Error</title>\n<h1>Internal Server Error</h1>\n<p>The server encountered an internal error and was unabl",
+      "hop6_consumers": [
+        "[error] boom failed /api/boom -> HTTP 500 via boom (stack)"
+      ],
+      "hop6_dom": [
+        "childList pre#out +60ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1957454.44",
+      "traceId": "obs-972f446e9829c1d8",
+      "serverTraceId": "obs-972f446e9829c1d8",
+      "req": "GET /api/poll",
+      "type": "Fetch",
+      "hop1_action": null,
+      "hop1_listener": null,
+      "hop1_join": "unlinked: timer-driven (setInterval)",
+      "hop2_stack": "script: pollStatus | setInterval[(anon)]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-972f446e9829c1d8",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/poll -> 200 endpoint=poll session=obs-s-a9e17dcc5ca7c62c spans=app(10)",
+      "hop4_handler": "poll test/contract/stub_server.py:218 [server view (url_rule)]",
+      "hop4_callees": [],
+      "hop5_output": [
+        "handler returned: poll",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 291B 3ms console_trace/2; spans=app",
+      "hop6_body": "{\"at\":1790880837.0429075,\"ok\":true}\n",
+      "hop6_consumers": [],
+      "hop6_dom": []
+    },
+    {
+      "key": "1957454.45",
+      "traceId": "obs-b877dbae515655d8",
+      "serverTraceId": "obs-b877dbae515655d8",
+      "req": "GET /api/poll",
+      "type": "Fetch",
+      "hop1_action": null,
+      "hop1_listener": null,
+      "hop1_join": "unlinked: timer-driven (setInterval)",
+      "hop2_stack": "script: pollStatus | setInterval[(anon)]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-b877dbae515655d8",
+        "X-Hugpy-Trace-Session": "obs-s-a9e17dcc5ca7c62c",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/poll -> 200 endpoint=poll session=obs-s-a9e17dcc5ca7c62c spans=app(10)",
+      "hop4_handler": "poll test/contract/stub_server.py:218 [server view (url_rule)]",
+      "hop4_callees": [],
+      "hop5_output": [
+        "handler returned: poll",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 291B 3ms console_trace/2; spans=app",
+      "hop6_body": "{\"at\":1790880838.5429301,\"ok\":true}\n",
+      "hop6_consumers": [],
+      "hop6_dom": []
+    },
+    {
+      "key": "1957454.46",
+      "traceId": null,
+      "serverTraceId": null,
+      "req": "GET /api/poll",
+      "type": "Fetch",
+      "hop1_action": null,
+      "hop1_listener": null,
+      "hop1_join": "unlinked: timer-driven (setInterval)",
+      "hop2_stack": "script: pollStatus | setInterval[(anon)]",
+      "request_headers_on_wire": {},
+      "request_body": null,
+      "hop3_server": null,
+      "hop4_handler": null,
+      "hop4_callees": null,
+      "hop5_output": null,
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 201B 3ms ",
+      "hop6_body": "{\"at\":1790880840.0427897,\"ok\":true}\n",
+      "hop6_consumers": [],
+      "hop6_dom": []
+    },
+    {
+      "key": "1957454.47",
+      "traceId": null,
+      "serverTraceId": null,
+      "req": "GET /api/poll",
+      "type": "Fetch",
+      "hop1_action": null,
+      "hop1_listener": null,
+      "hop1_join": "unlinked: timer-driven (setInterval)",
+      "hop2_stack": "script: pollStatus | setInterval[(anon)]",
+      "request_headers_on_wire": {},
+      "request_body": null,
+      "hop3_server": null,
+      "hop4_handler": null,
+      "hop4_callees": null,
+      "hop5_output": null,
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 201B 3ms ",
+      "hop6_body": "{\"at\":1790880841.5428128,\"ok\":true}\n",
+      "hop6_consumers": [],
+      "hop6_dom": []
+    }
+  ],
+  "actions": [
+    {
+      "id": 1,
+      "action": "click",
+      "target": "button#load",
+      "listeners": [
+        {
+          "type": "click",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 43,
+          "columnNumber": 26,
+          "name": "dispatchRootClick",
+          "node": "div#root",
+          "startColumn": 0,
+          "endLine": 46,
+          "endColumn": 1
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "action": "click",
+      "target": "button#save",
+      "listeners": [
+        {
+          "type": "click",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 43,
+          "columnNumber": 26,
+          "name": "dispatchRootClick",
+          "node": "div#root",
+          "startColumn": 0,
+          "endLine": 46,
+          "endColumn": 1
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "action": "click",
+      "target": "button#chain",
+      "listeners": [
+        {
+          "type": "click",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 43,
+          "columnNumber": 26,
+          "name": "dispatchRootClick",
+          "node": "div#root",
+          "startColumn": 0,
+          "endLine": 46,
+          "endColumn": 1
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "action": "click",
+      "target": "button#boom",
+      "listeners": [
+        {
+          "type": "click",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 43,
+          "columnNumber": 26,
+          "name": "dispatchRootClick",
+          "node": "div#root",
+          "startColumn": 0,
+          "endLine": 46,
+          "endColumn": 1
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "action": "click",
+      "target": "button#handled",
+      "listeners": [
+        {
+          "type": "click",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 43,
+          "columnNumber": 26,
+          "name": "dispatchRootClick",
+          "node": "div#root",
+          "startColumn": 0,
+          "endLine": 46,
+          "endColumn": 1
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "action": "click",
+      "target": "button#xhr",
+      "listeners": [
+        {
+          "type": "click",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 49,
+          "columnNumber": 19,
+          "name": "onXhrClick",
+          "node": "button#xhr",
+          "startColumn": 0,
+          "endLine": 54,
+          "endColumn": 1
+        }
+      ]
+    },
+    {
+      "id": 7,
+      "action": "click",
+      "target": "button#noop",
+      "listeners": [
+        {
+          "type": "click",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 43,
+          "columnNumber": 26,
+          "name": "dispatchRootClick",
+          "node": "div#root",
+          "startColumn": 0,
+          "endLine": 46,
+          "endColumn": 1
+        }
+      ]
+    },
+    {
+      "id": 8,
+      "action": "click",
+      "target": "button#burst",
+      "listeners": [
+        {
+          "type": "click",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 43,
+          "columnNumber": 26,
+          "name": "dispatchRootClick",
+          "node": "div#root",
+          "startColumn": 0,
+          "endLine": 46,
+          "endColumn": 1
+        }
+      ]
+    },
+    {
+      "id": 9,
+      "action": "click",
+      "target": "button#load",
+      "listeners": [
+        {
+          "type": "click",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 43,
+          "columnNumber": 26,
+          "name": "dispatchRootClick",
+          "node": "div#root",
+          "startColumn": 0,
+          "endLine": 46,
+          "endColumn": 1
+        }
+      ]
+    },
+    {
+      "id": 10,
+      "action": "click",
+      "target": "button#boom",
+      "listeners": [
+        {
+          "type": "click",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 43,
+          "columnNumber": 26,
+          "name": "dispatchRootClick",
+          "node": "div#root",
+          "startColumn": 0,
+          "endLine": 46,
+          "endColumn": 1
+        }
+      ]
+    }
+  ],
+  "export": "/srv/vm_mgr/tmp/obs-evidence2/contract/obs-2026-10-01T18-54-01-909Z.json"
+}

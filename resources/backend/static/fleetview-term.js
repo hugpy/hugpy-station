@@ -139,6 +139,13 @@
     "#fv-term-drag{position:absolute;top:0;bottom:0;right:-3px;width:7px;" +
     "cursor:ew-resize;z-index:3}" +
     "#fv-term-hide{margin-left:auto;cursor:pointer;color:#8b949e}" +
+    /* 1.0.143 ⌂ shell: a terminal on the CURRENT locus as its own user */
+    "#fv-shell{flex:none;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" +
+    "background:#0d1117;color:#8b949e;border:1px solid #30363d;border-radius:4px;" +
+    "font:12px system-ui,sans-serif;padding:1px 8px;cursor:pointer}" +
+    "#fv-shell:hover{color:#e6e9ef;background:#21262d}" +
+    "#fv-shell.on{color:#e6e9ef;background:#1f6feb;border-color:#388bfd}" +
+    "#fv-shell:disabled{opacity:.45;cursor:not-allowed}" +
     "#fv-term-host{flex:1;padding:4px;overflow:hidden;position:relative}" +
     ".fv-view{position:absolute;inset:4px;display:none}" +
     ".fv-view.on{display:block}" +
@@ -200,6 +207,7 @@
     '<span class="fv-lane hidden" id="fv-lane-todo" data-lane="todo: " title="mct CAPTURE lane: types todo: at the REPL prompt — no turn spent; the line is appended to the workspace todo.md">todo:</span>' +
     '<span class="dot" id="fv-dot"></span>' +
     '<span id="fv-status">terminal</span>' +
+    '<button type="button" id="fv-shell" title="open a shell on the selected locus as its own user">⌂ shell</button>' +
     '<span id="fv-term-hide" title="collapse">⇤ hide</span></div>' +
     '<div id="fv-roll-banner" title="rolling state — the fleet judge\'s derived objective for this locus\'s frontier seat">' +
     '<span class="fv-roll-k">🎯 rolling state</span>' +
@@ -225,8 +233,8 @@
     if (sessionModelChoicesLoaded) return;
     sessionModelChoicesLoaded = true;
     Promise.all([
-      fetch("/api/frontier/models", { credentials: "same-origin" }).then(function (r) { return r.ok ? r.json() : null; }),
-      fetch("/api/b/model", { credentials: "same-origin" }).then(function (r) { return r.ok ? r.json() : null; })
+      fetch("/api/frontier/models" + vmQ(), { credentials: "same-origin" }).then(function (r) { return r.ok ? r.json() : null; }),
+      fetch("/api/b/model" + vmQ(), { credentials: "same-origin" }).then(function (r) { return r.ok ? r.json() : null; })
     ]).then(function (docs) {
       var f = docs[0] || {}, b = docs[1] || {};
       sessionModelChoices.models = f.models || sessionModelChoices.models;
@@ -296,7 +304,7 @@
     var p = value.split("|"), provider = p[1], model = p.slice(2).join("|");
     var url, body;
     if (provider === "claude-code" || provider === "codex" || provider === "hugpy") {
-      url = provider === "codex" ? "/api/gpt" : "/api/frontier/models";
+      url = provider === "codex" ? "/api/gpt" : "/api/frontier/models" + vmQ();
       body = provider === "codex" ? { default_model: model } : { [provider]: model };
     } else return;
     fetch(url, { method: "POST", credentials: "same-origin",
@@ -368,7 +376,35 @@
       v.ws.send(JSON.stringify({ t: "size", rows: v.term.rows, cols: v.term.cols }));
   }
 
+  /* 1.0.143 ⌂ shell (operator 2026-10-01: "the shell button must come back").
+     One permanent button in the pane bar opens the SHELL surface on the
+     CURRENT locus as that locus's own user — the host's service user here
+     (e.g. vm_mgr@ae), an ssh locus's login user, an LXD guest's ubuntu. It is
+     the existing persistent shell (ws_hostterm surface=shell → tmux -L shell
+     in the locus via the 1.0.141 locus transport), not a new path. The label
+     is the server's own answer (/api/term/backends shell.who); a locus the
+     station cannot reach disables the button and the tooltip says why.
+     Clicking it again while on the shell goes back to the frontier surface. */
+  function shellInfo() { return (SURFACES && SURFACES.shell) || {}; }
+  function renderShellBtn() {
+    var b = document.getElementById("fv-shell");
+    if (!b) return;
+    var info = shellInfo(), who = info.who || "";
+    var where = acHostSeat() ? "this host" : activeVm;
+    var down = info.available === false;
+    var on = surface === "shell" && !down;
+    b.textContent = "⌂ " + (who || "shell");
+    b.className = on ? "on" : "";
+    b.disabled = down && surface !== "shell";
+    b.title = down
+      ? "shell unavailable on " + where + " — " + (info.reason || "the station cannot reach this locus")
+      : on ? "back to the frontier surface (the shell keeps running; reopen it here)"
+           : "open a terminal on " + where + (who ? " as " + who : "") +
+             " (persistent: tmux -L shell in the locus; Shift+drag selects inside mouse-mode apps)";
+  }
+
   function setStatus() {
+    renderShellBtn();
     var dot = document.getElementById("fv-dot");
     var st = document.getElementById("fv-status");
     if (acOn()) {   // t296: the serve console is its own surface — no PTY, no dot to lie about
@@ -383,8 +419,8 @@
     var shellName = (backendFor("shell") === "ssh"
                      && activeVm && activeVm !== "@keeper") ? "ssh" : "shell";
     st.textContent = surface === "shell"
-      ? (activeVm === "@keeper" ? "keeper@host"
-         : activeVm ? shellName + "@" + activeVm : "shell@host")
+      ? (shellInfo().who ? "shell:" + shellInfo().who
+         : acHostSeat() ? "shell@host" : shellName + "@" + activeVm)
         + (live ? "" : " (disconnected)")
       : surface + ":" + backendLabel(backendFor(surface)) +
         (surface === "frontier" && backendFor(surface) === "mct" ? " → " + backendLabel(frontierNative) + " · conversation" : "") + "@" + ground
@@ -408,6 +444,9 @@
     var sel = pane.querySelector("#fv-backend");
     var spec = SURFACES[surface] || { backends: {} };
     var keys = Object.keys(spec.backends || {});
+    // 1.0.143: exec-vs-ssh only means something for an LXD guest's shell; the
+    // host / ssh-locus shell has exactly one way in, so no picker.
+    if (surface === "shell" && spec.kind && spec.kind !== "lxc") keys = [];
     if (!keys.length) { sel.className = "hidden"; sel.innerHTML = ""; setStatus(); return; }
     sel.className = "";
     sel.innerHTML = "";
@@ -471,12 +510,51 @@
         renderBar();
       });
       sel.appendChild(bServe);
+      /* 1.0.144: a locus without a serve of its own gets ONE explicit action —
+         provision its standing serve (keeper/chat/worker/local) ON the locus, as
+         its user, from the station's shipped resources (POST
+         /api/locus/serve/provision). Being the host has no bearing on it. */
+      var srv = spec.serve || {};
+      if (!acOffered() && !acHostSeat() && srv.ok === false) {
+        var bProv = document.createElement("button");
+        bProv.type = "button";
+        bProv.setAttribute("data-mode", "provision");
+        bProv.textContent = "＋ serve";
+        bProv.title = "Provision " + activeVm + "'s own serve (runs as " + activeVm + "'s user, from the station's shipped resources)" +
+          (srv.error ? " — now: " + srv.error : "");
+        bProv.addEventListener("click", function () {
+          if (!confirm("Provision a standing abstract-claude serve on " + activeVm + "? It runs as that locus's user (user unit abstract-claude-serve@station) and starts its keeper session.")) return;
+          bProv.disabled = true; bProv.textContent = "provisioning…";
+          fetch("/api/locus/serve/provision", { method: "POST", credentials: "same-origin",
+            headers: { "Content-Type": "application/json" }, body: JSON.stringify({ vm: activeVm }) })
+            .then(function (r) { return r.json(); })
+            .then(function (d) {
+              fvToast(d.ok ? ("serve on " + activeVm + ": 127.0.0.1:" + d.port + " (" + (d.version || "") + ")")
+                           : ("serve provision failed: " + (d.error || "?")), !d.ok);
+              refreshMeta();
+            })
+            .catch(function (e) { fvToast("serve provision failed: " + e, true); refreshMeta(); });
+        });
+        sel.appendChild(bProv);
+      }
       var bTmux = document.createElement("button");
       bTmux.type = "button";
       bTmux.setAttribute("data-mode", "tmux");
       bTmux.textContent = "tmux";
-      bTmux.title = "terminal seat (tmux) — the selected keeper provider in a PTY";
-      bTmux.disabled = seatInfo.available === false;
+      /* 1.0.139: tmux is a Recommends — /api/term/backends reports frontier.tmux;
+         without it the seat cannot start, so the button is disabled and says why. */
+      var tmuxInfo = spec.tmux || {};
+      var tmuxMissing = tmuxInfo.available === false;
+      bTmux.title = tmuxMissing
+        ? (tmuxInfo.reason || "tmux is not installed — the terminal (tmux) seat is unavailable (install it: sudo apt install tmux)")
+        : seatInfo.available === false
+          ? "terminal seat (tmux) unavailable — " + backendLabel(frontierNative) + " is not installed on this locus"
+          : "terminal seat (tmux) — the selected keeper provider in a PTY";
+      // 1.0.144: the locus's OWN running seats (listed on its console socket, as its user)
+      var running = (spec.seats || []).map(function (x) { return x.name + (x.attached ? "*" : ""); });
+      if (running.length) bTmux.title += " · running on " + (acHostSeat() ? "this host" : activeVm) + ": " + running.join(", ");
+      if (spec.seat_live) bTmux.setAttribute("data-seat-live", "1");
+      bTmux.disabled = seatInfo.available === false || tmuxMissing;
       bTmux.className = acOn() ? "" : "on";
       bTmux.addEventListener("click", function () {
         if (!acOn() && backendFor("frontier") === frontierNative) { show("frontier"); return; }
@@ -580,6 +658,20 @@
     try { if (prev && prev.focus) prev.focus(); } catch (e) {}
     return ok;
   }
+  /* 1.0.143: in the desktop app the clipboard goes through Electron's own
+     clipboard (preload window.stationClipboard → main process), which needs
+     no focus, permission or secure context; a plain browser uses the async
+     Clipboard API, then the execCommand fallback (copy) or rejects (read). */
+  function fvBridge() {
+    var b = window.stationClipboard;
+    return (b && typeof b.writeText === "function" && typeof b.readText === "function") ? b : null;
+  }
+  function fvClipRead() {
+    var b = fvBridge();
+    if (b) return Promise.resolve(b.readText()).then(function (t) { return String(t || ""); });
+    if (navigator.clipboard && navigator.clipboard.readText) return navigator.clipboard.readText();
+    return Promise.reject(new Error("clipboard read unavailable"));
+  }
   function fvCopy(t, announce) {
     if (!t) { if (announce) fvToast("nothing selected to copy", true); return; }
     _fvSelLast = t;
@@ -587,7 +679,11 @@
       if (announce) fvToast(ok ? "copied " + t.length + " chars ✓"
                                : "copy FAILED — select again", !ok);
     };
-    if (navigator.clipboard && navigator.clipboard.writeText) {
+    var b = fvBridge();
+    if (b) {
+      Promise.resolve(b.writeText(t)).then(function () { done(true); },
+                                           function () { done(fvCopyFallback(t)); });
+    } else if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(t).then(
         function () { done(true); },
         function () { done(fvCopyFallback(t)); });
@@ -639,8 +735,14 @@
     return !!acPathNow() && (KEEPER_SURFACE === "serve" || AC_FORCE === "serve");
   }
   function acHostSeat() {
-    return !activeVm || activeVm === "@keeper" || activeVm === "keeper" || activeVm === "host";
+    // 1.0.141: the bare "keeper" is vm_mgr's locus, not this host — the host is
+    // the reserved tokens or this station's OWN locus name (window.__fvSelf).
+    if (!activeVm || activeVm === "@keeper" || activeVm === "@self" || activeVm === "host") return true;
+    var me = (window.__fvSelf && window.__fvSelf.names) || [];
+    return me.indexOf(activeVm) !== -1;
   }
+  // ?vm=<selected locus> for seat-config calls ("" on the host seat)
+  function vmQ(pre) { return acHostSeat() ? "" : ((pre || "?") + "vm=" + encodeURIComponent(activeVm)); }
   function acOn() {
     if (surface !== "frontier" || !acPathNow()) return false;
     return AC_FORCE ? AC_FORCE === "serve" : KEEPER_SURFACE === "serve";
@@ -800,6 +902,10 @@
     el.className = "fv-view";
     document.getElementById("fv-term-host").appendChild(el);
     var term = new Terminal({ fontSize: 13, cursorBlink: true,
+      // 1.0.143: selecting inside mouse-mode TUIs — Shift+drag (Linux/Windows,
+      // xterm's built-in force-selection) or Option+drag on macOS; a
+      // right-click never re-selects a word (it copies the selection you made).
+      macOptionClickForcesSelection: true, rightClickSelectsWord: false,
       theme: { background: "#0d1117", foreground: "#e6e9ef" } });
     var fit = new FitAddon.FitAddon();
     term.loadAddon(fit);
@@ -854,98 +960,61 @@
         }, 80);
       }, { passive: false, capture: true });
     }
-    /* NO copy-on-select (operator 2026-09-15): highlighting is a reading aid,
-       so a drag must never touch the clipboard. onSelectionChange only
-       remembers the last non-empty text so the EXPLICIT copies (Ctrl/Cmd+
-       Shift+C, right-click) still work after a live TUI redraw
-       has already wiped the highlight. Shift+drag selects as before. */
+    /* NO copy-on-select (operator 2026-09-15, reaffirmed 2026-10-01):
+       highlighting is a reading aid, so a drag never touches the clipboard.
+       Copy is EXPLICIT — Ctrl/Cmd+Shift+C, or a right-click on a selection.
+       v._selKeep holds the last non-empty selection so those explicit copies
+       still work after a busy TUI redraw wiped the highlight; it is dropped on
+       the next left click or keystroke (a new intent), never by a redraw.
+       Mouse-mode apps (claude-code, codex, opencode turn on DEC mouse
+       tracking) own plain drags: Shift+drag selects (xterm's force-selection
+       modifier on Linux/Windows; Option+drag on macOS via
+       macOptionClickForcesSelection). Shift may be released before copying. */
+    v._selKeep = "";
     term.onSelectionChange(function () {
       var t = term.getSelection();
-      if (t) { _fvSelLast = t; v._selPending = t; v._selAt = Date.now(); }
+      if (t) { _fvSelLast = t; v._selKeep = t; v._selAt = Date.now(); }
     });
-    /* Right-click (board t3, operator 2026-09-10: "right click copy … is
-       mostly broken"): the packaged desktop app has NO native context menu,
-       so a right-click did nothing at all — xterm parked the selection under
-       a menu that never opened. Now: a selection (live, or one made in the
-       last 2 s that a TUI redraw already wiped) → copy it; otherwise → paste
-       the clipboard into the PTY. Both toast. Ctrl/Cmd+Shift+V pastes too. */
-    function fvPaste() {
+    function selNow() { return term.getSelection() || v._selKeep || ""; }
+    /* PASTE (1.0.143, operator 2026-10-01): Ctrl+V and Ctrl/Cmd+Shift+V paste
+       directly — no menu. Every route ends in xterm's own term.paste(), which
+       converts newlines and adds the bracketed-paste markers ONLY when the app
+       turned that mode on (1.0.104's bracketed paste, now done once, by xterm).
+       Order: (1) the browser's NATIVE paste event that the real keystroke
+       fires on xterm's textarea — needs no clipboard permission and no secure
+       context; (2) if none arrives within 250 ms, the Electron bridge
+       (window.stationClipboard) or the async Clipboard API; (3) if that is
+       denied, the paste… box opens (a native Ctrl+V into a real textarea). */
+    function fvPasteText(txt) {
       if (!v.ws || v.ws.readyState !== 1) { fvToast("not connected", true); return; }
-      if (!(navigator.clipboard && navigator.clipboard.readText)) {
-        fvToast("paste blocked here — clipboard read unavailable", true); return;
-      }
-      navigator.clipboard.readText().then(function (txt) {
-        if (!txt) { fvToast("clipboard empty", true); return; }
-        // CLIPBOARD FIX (2026-09-18): fvPaste sends straight to the PTY,
-        // bypassing xterm's own paste, so multi-line text used to arrive as
-        // raw keystrokes and a TUI prompt (claude-code) submitted line by
-        // line. Wrap in bracketed-paste markers when the app has that mode
-        // on (xterm tracks it) so it is inserted as ONE paste, not run.
-        var _body = txt;
-        try { if (term.modes && term.modes.bracketedPasteMode)
-          _body = "\x1b[200~" + txt + "\x1b[201~"; } catch (e) {}
-        v.ws.send(enc.encode(_body));
-        fvToast("pasted " + txt.length + " chars");
-      }, function () { fvToast("paste blocked — clipboard permission", true); });
+      if (!txt) { fvToast("clipboard has no text", true); return; }
+      term.paste(txt);
+      fvToast("pasted " + txt.length + " chars");
     }
-    /* Right-click with NOTHING selected (operator 2026-09-17: "paste is greyed
-       out"). The browser only ENABLES its native Paste item when the click
-       lands on an editable node; xterm parks its 1px .xterm-helper-textarea at
-       the cursor, so a right-click anywhere else hits the non-editable screen
-       and the item is greyed. Fix: on the right mousedown, stretch that same
-       helper textarea over the pane and focus it, so the menu is built against
-       an editable target — the menu's Paste then fires a real `paste` event on
-       xterm's own textarea, which xterm sends to the PTY. The stretch is undone
-       on the next tick (the menu is already built) and by a 4s safety timer.
-       t323 is preserved: right-click by itself STILL never pastes — it only
-       opens the menu; pasting stays an explicit click/chord. */
-    var _hCss = null, _hT = null;
-    function helperTA() { return el.querySelector("textarea.xterm-helper-textarea"); }
-    function fvUnstretch() {
-      if (_hT) { clearTimeout(_hT); _hT = null; }
-      var ta = helperTA();
-      if (ta && _hCss !== null) { ta.style.cssText = _hCss; }
-      _hCss = null;
+    function fvPasteApi() {
+      v._pasteApiAt = Date.now();
+      fvClipRead().then(fvPasteText, function () {
+        fvToast("clipboard read blocked here — paste into the box, then send", true);
+        pOpen(true);
+      });
     }
-    function fvStretch() {
-      var ta = helperTA();
-      if (!ta || _hCss !== null) return;
-      _hCss = ta.style.cssText;
-      ta.style.cssText = _hCss + ";left:0;top:0;width:100%;height:100%;opacity:0;z-index:5;";
-      try { ta.focus(); } catch (e) {}
-      _hT = setTimeout(fvUnstretch, 4000);      // never leave the pane covered
-    }
-    el.addEventListener("mousedown", function (ev) {
-      if (ev.button === 2) fvStretch(); else fvUnstretch();
-    }, true);
-    el.addEventListener("paste", function () { fvUnstretch(); }, true);
-    el.addEventListener("contextmenu", function (ev) {
-      var t = term.getSelection() || ((Date.now() - (v._selAt || 0)) < 2000 ? _fvSelLast : "");
-      if (t) { ev.preventDefault(); ev.stopPropagation(); fvUnstretch(); fvCopy(t, true); return; }
-      // Nothing selected: let the NATIVE menu through (Paste now enabled). The
-      // helper textarea keeps focus after the un-stretch, so the menu's Paste
-      // still lands on it.
-      setTimeout(fvUnstretch, 0);
-    }, true);
     term.attachCustomKeyEventHandler(function (e) {
-      if (e.type === "keydown" && (e.ctrlKey || e.metaKey) && e.shiftKey
+      if (e.type === "keydown" && (e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey
           && (e.key === "C" || e.key === "c")) {
         // preventDefault: `return false` stops xterm, but WITHOUT this the
         // browser's native Ctrl/Cmd+Shift+C default still fires — belt-and-braces.
         e.preventDefault();
-        // live selection first; else the last one a redraw already wiped
-        fvCopy(term.getSelection() || _fvSelLast, true);
+        // live selection first; else the one a redraw already wiped
+        fvCopy(selNow() || _fvSelLast, true);
         return false;             // handled here — not sent to the PTY
       }
-      if (e.type === "keydown" && (e.ctrlKey || e.metaKey) && e.shiftKey
+      if (e.type === "keydown" && (e.ctrlKey || e.metaKey) && !e.altKey
           && (e.key === "V" || e.key === "v")) {
-        // preventDefault is REQUIRED: `return false` only tells xterm to skip the
-        // keystroke, but the browser's native Ctrl/Cmd+Shift+V default STILL fires
-        // a `paste` event on xterm's textarea → xterm pastes a SECOND copy. That
-        // was the "pastes twice in the prompt" doubling. Cancel the default so
-        // fvPaste() is the sole path (single send to the PTY).
-        e.preventDefault();
-        fvPaste();
+        // Ctrl+V / Ctrl+Shift+V (and Cmd+V): NOT sent to the PTY as ^V, and NOT
+        // preventDefault-ed — the browser's own paste event is route (1); the
+        // capture listener below takes it (one paste, never two).
+        clearTimeout(v._pasteArmT);
+        v._pasteArmT = setTimeout(function () { v._pasteArmT = null; fvPasteApi(); }, 250);
         return false;
       }
       /* Ctrl+_ (operator 2026-09-15: "it cannot be done in the browser, it
@@ -959,23 +1028,28 @@
         fvSend("\x1f");
         return false;
       }
+      if (e.type === "keydown" && !/^(Shift|Control|Alt|Meta|AltGraph|CapsLock)$/.test(e.key))
+        v._selKeep = "";          // typing = a new intent; the kept selection goes
       return true;
     });
     /* ── paste bypass panel (operator 2026-09-17) ─────────────────────────────
        The browser paste paths can all fail at once on this host (no Clipboard
-       API read, a greyed menu, a swallowed chord). This chip is the path that
-       cannot fail: the operator pastes into a REAL textarea with a native
-       Ctrl+V — always allowed, no secure context needed — and one POST injects
-       it into the tmux pane by session name via /api/term/paste (tmux
-       send-keys, same precedent as /api/term/unstick). No Enter is ever sent;
-       the text lands in the prompt and the operator submits it. */
+       API read, a swallowed chord). This chip is the path that cannot fail:
+       the operator pastes into a REAL textarea with a native Ctrl+V — always
+       allowed, no secure context needed. On the frontier seat (and a pulled
+       seat) one POST injects it into that tmux pane by session name via
+       /api/term/paste (tmux send-keys, same precedent as /api/term/unstick);
+       1.0.143: every other surface (⌂ shell, local) goes over this pane's own
+       socket with term.paste — /api/term/paste only knows the keeper seat, so
+       it used to land in the WRONG pane. No Enter is ever sent; the text lands
+       in the prompt and the operator submits it. */
     var pbtn = document.createElement("div");
     pbtn.className = "fv-pastebtn";
-    pbtn.textContent = "paste\u2026";
+    pbtn.textContent = "paste…";
     pbtn.title = "paste into this pane without the browser clipboard";
     var pbox = document.createElement("div");
     pbox.className = "fv-pastebox";
-    pbox.innerHTML = '<textarea placeholder="paste here (Ctrl+V), then send \u2192"></textarea>' +
+    pbox.innerHTML = '<textarea placeholder="paste here (Ctrl+V), then send →"></textarea>' +
       '<div class="row"><span class="msg" style="flex:1"></span>' +
       '<button type="button" class="cancel">close</button>' +
       '<button type="button" class="send">send to pane</button></div>';
@@ -991,9 +1065,17 @@
     pbox.querySelector(".send").addEventListener("click", function () {
       var txt = pta.value;
       if (!txt) { pmsg.textContent = "nothing to send"; return; }
-      pmsg.textContent = "sending\u2026";
+      if (!(s === "frontier" || PULLS[s])) {
+        if (!v.ws || v.ws.readyState !== 1) { pmsg.textContent = "not connected"; return; }
+        term.paste(txt);
+        pta.value = ""; pOpen(false);
+        fvToast("pasted " + txt.length + " chars");
+        return;
+      }
+      pmsg.textContent = "sending…";
       var body = { text: txt };
       if (PULLS[s] && PULLS[s].tmux) body.session = PULLS[s].tmux;
+      else if (!acHostSeat()) body.vm = activeVm;     // 1.0.141: the SELECTED locus's pane
       fetch("/api/term/paste", { method: "POST", credentials: "same-origin",
         headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) })
         .then(function (r) { return r.json().then(function (d) { return { s: r.status, d: d }; }); })
@@ -1007,6 +1089,46 @@
         })
         .catch(function (e) { pmsg.textContent = String((e && e.message) || e); });
     });
+    /* RIGHT-CLICK (1.0.143, operator 2026-10-01): no menu in the terminal —
+       the 2026-09-17 helper-textarea stretch that enabled the browser's
+       native menu (whose only use was "Paste") is gone. A right-click on a
+       selection (live, or kept from before a TUI redraw) copies it at once —
+       on mousedown, so the click never reaches the app (which would redraw
+       and wipe the highlight) and Shift no longer has to be held. With no
+       selection the click belongs to the app (mouse reporting) and only the
+       browser menu is suppressed. The paste… box keeps its native menu. */
+    var _ctxCopiedAt = 0;
+    function inBox(ev) { return pbox.contains(ev.target) || pbtn.contains(ev.target); }
+    el.addEventListener("mousedown", function (ev) {
+      if (inBox(ev)) return;
+      if (ev.button === 0) { if (!ev.shiftKey) v._selKeep = ""; return; }
+      if (ev.button !== 2) return;
+      var t = selNow();
+      if (!t) return;
+      ev.preventDefault(); ev.stopPropagation();
+      _ctxCopiedAt = Date.now();
+      fvCopy(t, true);
+    }, true);
+    el.addEventListener("contextmenu", function (ev) {
+      if (inBox(ev)) return;
+      ev.preventDefault(); ev.stopPropagation();
+      if (Date.now() - _ctxCopiedAt < 1500) return;      // mousedown already copied it
+      var t = selNow();
+      if (t) { fvCopy(t, true); return; }
+      var mouseApp = false;
+      try { mouseApp = !!term.modes && term.modes.mouseTrackingMode !== "none"; } catch (e) {}
+      fvToast(mouseApp ? "nothing selected — Shift+drag selects here (the app has the mouse)"
+                       : "nothing selected — paste: Ctrl+V / Ctrl+Shift+V");
+    }, true);
+    el.addEventListener("paste", function (ev) {
+      if (inBox(ev)) return;                              // the box's own textarea
+      if (v._pasteArmT) { clearTimeout(v._pasteArmT); v._pasteArmT = null; }
+      ev.preventDefault(); ev.stopPropagation();          // ONE path: ours, not xterm's too
+      if (Date.now() - (v._pasteApiAt || 0) < 1000) return; // the API fallback already pasted it
+      var txt = "";
+      try { txt = ev.clipboardData.getData("text/plain"); } catch (e) {}
+      fvPasteText(txt);
+    }, true);
     return v;
   }
 
@@ -1366,7 +1488,7 @@
   function refreshLoops() {
     var strip = document.getElementById("fv-loop-strip");
     if (!strip) return;
-    fetch("/api/loops", { credentials: "same-origin" })
+    fetch("/api/loops" + vmQ(), { credentials: "same-origin" })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (j) {
         var rows = (j && j.ok && j.active) ? j.active : [];
@@ -1374,15 +1496,22 @@
         // 1.0.124: log findings share the strip — pushed to the keeper the same
         // way; an inert signature stays listed, greyed, never notified.
         var finds = (j && j.ok && j.findings) ? j.findings.slice(0, 8) : [];
+        // 1.0.146 (t4260): every station hold / skip / coalesce / inert switch
+        // is a strip row too \u2014 a defer the operator cannot see is a silent hold.
+        var holds = (j && j.ok && j.holds) ? j.holds.slice(0, 12) : [];
         strip.textContent = "";
-        if (!rows.length && !recent.length && !finds.length) { strip.classList.remove("on"); return; }
+        if (!rows.length && !recent.length && !finds.length && !holds.length) { strip.classList.remove("on"); return; }
         strip.classList.add("on");
-        rows.concat(recent).concat(finds).forEach(function (l) {
+        rows.concat(recent).concat(finds).concat(holds).forEach(function (l) {
           var isFind = String(l.source || "").indexOf("finding:") === 0;
+          var isHold = !!l.hold;
           var row = document.createElement("div");
-          row.className = "fv-loop" + ((l.active && !l.inert) ? "" : " cleared");
+          row.className = "fv-loop" + ((l.active && !l.inert) ? "" : " cleared") + (isHold ? " hold" : "");
           var k = document.createElement("span"); k.className = "fv-loop-k";
-          k.textContent = isFind ? (l.inert ? "\u00b7 inert" : "\ud83d\udc1e " + (l.severity || "finding"))
+          var holdK = { "station:switch": "\u2699 switch", "station:hold": "\u23f8 hold",
+                        "station:skip": "\u26a0 skip", "station:pending": "\u23f3 pending" };
+          k.textContent = isHold ? (holdK[l.source] || "\u23f8 hold")
+                        : isFind ? (l.inert ? "\u00b7 inert" : "\ud83d\udc1e " + (l.severity || "finding"))
                                  : (l.active ? "\u26a0 loop" : "\u2713 cleared");
           var src = document.createElement("span"); src.className = "fv-loop-src"; src.textContent = l.source || "?";
           var id = document.createElement("span"); id.className = "fv-loop-id";
@@ -1408,13 +1537,19 @@
       .catch(function () { /* backend unreachable: keep the last strip */ });
   }
 
+  var _metaSeq = 0;
   function refreshMeta() {
     // availability follows the grounding: probe the active VM's seats
     var q = (activeVm && activeVm !== "@keeper")
       ? "?vm=" + encodeURIComponent(activeVm) : "";
+    // 1.0.143: an unreachable locus answers late (its probe times out); a
+    // reply for a locus that is no longer selected must not overwrite the
+    // current one's surfaces (it re-disabled ⌂ shell after switching back).
+    var seq = ++_metaSeq;
     fetch("/api/term/backends" + q, { credentials: "same-origin" })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (j) {
+        if (seq !== _metaSeq) return;
         if (!j || !j.frontier) return;
         // gate flags are metadata (chips deprecated 2026-09-17) — strip them
         // so SURFACES never grows phantom tabs; the client stays always-on.
@@ -1461,6 +1596,11 @@
       else selectSession(ev.target.value);
     });
     pane.querySelector("#fv-session-new").addEventListener("click", newSession);
+    pane.querySelector("#fv-shell").addEventListener("click", function () {
+      if (surface === "shell") { show("frontier"); return; }
+      if (shellInfo().available === false) { setStatus(); return; }
+      show("shell");
+    });
     // geometry: pin to the console's real header (nav) and status bar (floor);
     // best-effort measurement of full-width fixed bars, with the defaults as
     // the floor values.
@@ -1674,6 +1814,8 @@
       if (vm === activeVm) return;
       prevVm = activeVm;
       activeVm = vm;
+      sessionModelChoicesLoaded = false;    // 1.0.141: model pickers are per locus
+      if (SURFACES.shell) { delete SURFACES.shell.who; delete SURFACES.shell.available; delete SURFACES.shell.reason; }  // 1.0.143: ⌂ shell is per locus
       try { window.dispatchEvent(new CustomEvent("fv-vm", { detail: { vm: vm, prev: prevVm } })); } catch (e) {}
       // Grounding rule: a VM's A/B/local/shell are ITS OWN — all three
       // surfaces reground on a VM switch, each to that VM's persistent
@@ -1690,6 +1832,7 @@
       if (!acSync() && !acOn() && views[surface]) { connect(surface); setStatus(); }
       refreshMeta();                        // availability is per-VM now
       refreshRollState();                   // rolling state is per-locus too
+      try { refreshLoops(); } catch (e) {}  // 1.0.141: findings strip follows the locus
     },
     get: function () { return activeVm; }
   };

@@ -852,8 +852,11 @@ class NativeAdapter:
                         else "newest of %d (none appended recently)" % len(pool))
 
     def probe(self, prefer=""):
-        p = subprocess.run(["tmux", "-L", "console", "display-message", "-p", "-t", "=" + self.tmux + ":", "#{pane_pid}"],
-                           capture_output=True, text=True, timeout=5)
+        try:
+            p = subprocess.run(["tmux", "-L", "console", "display-message", "-p", "-t", "=" + self.tmux + ":", "#{pane_pid}"],
+                               capture_output=True, text=True, timeout=5)
+        except FileNotFoundError:   # 1.0.139: tmux is a Recommends — no tmux, no native seat
+            raise RuntimeError("tmux is not installed on this host — the native terminal seat needs it (sudo apt install tmux).")
         if p.returncode or not p.stdout.strip().isdigit():
             raise RuntimeError("Open the selected native terminal once to start or sign in to its session.")
         queue, processes = [int(p.stdout.strip())], []
@@ -932,8 +935,11 @@ class NativeAdapter:
         target = "=" + self.tmux + ":"
         # Literal tmux input, never a shell command. An Enter is a distinct event.
         for args in (["send-keys", "-t", target, "-l", pointer], ["send-keys", "-t", target, "Enter"]):
-            proc = await asyncio.create_subprocess_exec("tmux", "-L", "console", *args,
-                                                        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            try:
+                proc = await asyncio.create_subprocess_exec("tmux", "-L", "console", *args,
+                                                            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE)
+            except FileNotFoundError:   # no tmux: nothing was sent
+                return False
             try:
                 await asyncio.wait_for(proc.communicate(), 8)
             except asyncio.TimeoutError:
@@ -946,7 +952,10 @@ class NativeAdapter:
         return True
 
     async def cancel(self):
-        p = await asyncio.create_subprocess_exec("tmux", "-L", "console", "send-keys", "-t", "=" + self.tmux + ":", "Escape")
+        try:
+            p = await asyncio.create_subprocess_exec("tmux", "-L", "console", "send-keys", "-t", "=" + self.tmux + ":", "Escape")
+        except FileNotFoundError:   # no tmux: no seat to cancel
+            return
         await p.wait()
 
 

@@ -20,3 +20,21 @@ contextBridge.exposeInMainWorld('stationConsole', {
   setBounds: (r) => ipcRenderer.send('console:setBounds', rect(r)),
   reload: () => ipcRenderer.send('console:reload'),
 });
+
+// 1.0.143: the terminal's copy/paste fallback. Electron's clipboard module is
+// not available to a sandboxed preload, so main.js owns it (ipcMain.handle);
+// text only, and only the system clipboard — nothing else crosses the bridge.
+contextBridge.exposeInMainWorld('stationClipboard', {
+  readText: () => ipcRenderer.invoke('clipboard:readText'),
+  writeText: (t) => ipcRenderer.invoke('clipboard:writeText', String(t == null ? '' : t)),
+});
+
+contextBridge.exposeInMainWorld('stationBrowser', {
+  openCapture: () => ipcRenderer.send('browser:open-capture'),
+  show: (r) => ipcRenderer.send('browser:show', rect(r)),
+  hide: () => ipcRenderer.send('browser:hide'),
+  setBounds: (r) => ipcRenderer.send('browser:setBounds', rect(r)),
+  navigate: (url) => ipcRenderer.send('browser:navigate', String(url || '')),
+  reload: () => ipcRenderer.send('browser:reload'),
+  onEvent: (fn) => ipcRenderer.on('browser:event', (_event, data) => fn(data)),
+});

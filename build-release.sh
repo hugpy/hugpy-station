@@ -144,8 +144,12 @@ rsync -a --delete --delete-excluded \
     --exclude '*.bak-*' --exclude '*.bak' --exclude '*.orig' --exclude '*.rej' \
     "$SRC/resources/" "$APPDIR_SRC/resources/"
 rsync -a --delete "$SRC/build/" "$APPDIR_SRC/build/"
-cp -f "$SRC/main.js" "$SRC/package.json" "$SRC/electron-builder.yml" \
+cp -f "$SRC/main.js" "$SRC/preload.js" "$SRC/package.json" "$SRC/electron-builder.yml" \
       "$SRC/LICENSE" "$APPDIR_SRC/"
+# observability/ is required by main.js (toggle.js at startup) — without it the
+# packaged app would crash on launch. test/ never enters the workspace.
+rsync -a --delete --delete-excluded --exclude 'test/' \
+    "$SRC/observability/" "$APPDIR_SRC/observability/"
 info "$(find "$APPDIR_SRC" -type f | wc -l) files"
 
 # ── 2. toolchain ─────────────────────────────────────────────────────────────
@@ -268,9 +272,14 @@ check_listing() { # check_listing <label> <listing-file>
                 resources/backend/server.py resources/app.asar \
                 resources/backend/mct_gateway.py resources/backend/mct_http.py \
                 resources/backend/static/mct-renderer.js \
+                resources/backend/prompt_send.py resources/backend/static/prompt-tools.js \
+                resources/backend/static/board-md.js \
                 resources/backend/frontier-models.default.json \
                 resources/backend/abstract-claude.default.json \
                 resources/backend/local-keeper/AGENTS.md \
+                resources/backend/directives.py resources/backend/directive-templates/core.md \
+                resources/backend/todo_digest.py resources/backend/locus_exec.py \
+                resources/bin/station-serve-provision resources/systemd/abstract-claude-serve@.service \
                 resources/bin/mct-pull resources/bin/mct-push \
                 resources/bin/hugpy-station-firstrun resources/bin/hugpy-station-web-run \
                 resources/bin/abstract-claude-console resources/abstract-claude-console.desktop \
@@ -298,6 +307,13 @@ check_asar() {    # check_asar <label> <extracted-app.asar>
         ok "$label app.asar version $got"
     else
         bad "$label app.asar version '$got' != package.json '$VERSION'"
+    fi
+    # main.js requires ./observability/toggle at startup: an asar without it
+    # cannot launch. The asar header is compact JSON, so the dir entry is greppable.
+    if grep -aq '"observability":{"files":{' "$asar" && grep -aq '"toggle.js":{' "$asar"; then
+        ok "$label app.asar ships observability/"
+    else
+        bad "$label app.asar is missing observability/ (main.js would crash on launch)"
     fi
 }
 
@@ -357,6 +373,15 @@ deb)
         && ok "deb Recommends: lxd | lxd-installer" || bad "deb Recommends missing lxd"
     grep -q 'vendor/aiohttp/' "$TMP/deb.list" \
         && ok "deb ships vendored aiohttp" || bad "deb missing resources/backend/vendor"
+    # 1.0.139: seat provisioning needs curl + python3-venv + python3-pip on a bare
+    # Ubuntu (Depends: apt resolves them online); tmux backs the terminal seat
+    # (Recommends: absent = button disabled, never a traceback).
+    for dep in curl python3-venv python3-pip; do
+        grep '^ Depends:' "$TMP/deb.control" | grep -qE "(^|[ ,])$dep(\$|[ ,(])" \
+            && ok "deb Depends: $dep" || bad "deb Depends missing $dep"
+    done
+    grep '^ Recommends:' "$TMP/deb.control" | grep -qE '(^|[ ,])tmux($|[ ,(])' \
+        && ok "deb Recommends: tmux" || bad "deb Recommends missing tmux"
     ARTIFACTS+=("$DEB")
     ;;
 rpm)

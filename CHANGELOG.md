@@ -3,6 +3,434 @@
 Versions before 1.0.91 are recorded in git history and in README.md; this file
 starts at the release that introduced it.
 
+## 1.0.147 — 2026-10-01
+
+* Pin abstract-serve-core 0.1.16: operator interrupt = stop (no operator:interrupt
+  hold, no retry); the prompt queue drains at turn end.
+* Merge st-keeper-card (steward keeper card = the locus's serve Keeper role, t4262)
+  and st-switches (disabling-switch audit, station side, t4260/t4250) — see the
+  "unreleased" sections below.
+* serve-run provisions the venv before baking the UI (F3.17).
+
+## 1.0.146 — 2026-10-01
+
+* Pin abstract-serve-core 0.1.15 (queue-first collator, context bounds for every
+  backend, standing-session defaults; t4246 t4252).
+* The seat handoff lives in the toolserver; /resume = pull (st-handoff, below).
+
+## unreleased (st-handoff) — 2026-10-01 — the seat handoff lives in the toolserver; /resume = pull
+
+* Operator ruling 2026-10-01: "the toolserver should house the handoffs … /resume should
+  allow for its pull. The file-pointer system is ambiguous and bound to fail." The
+  `handoffs` row (toolserver ≥ 0.0.41: `handoff_request locus text [task fork]`) is the
+  ONLY place a handoff lives. `<state>/frontier-handoff.md` is RETIRED: no launch reads
+  it, nothing consumes/deletes it; a leftover file is renamed `.retired-<stamp>` at
+  station start and its text filed as a row when none is open (audit line, never silent).
+* Launch: the tmux seat directive's "Session init prompt (handoff)" layer is the
+  toolserver's one-paragraph POINTER (`handoff/station → layer`, fetched right before the
+  launch; an unreachable toolserver yields an explicit "pull it yourself" line). The BODY is
+  injected ONCE by the seat's SessionStart hook (`hooks/ledger_hook.py` → `handoff/pull`
+  with the seat's own session id; the row becomes `consumed` by it; serve per-turn resumes
+  never re-inject). HANDOFF_ID in a spawned seat's env pins the exact row.
+* `/api/handoff/spawn` is VERIFIED: a seat must still be alive 2.5 s after launch (a dead
+  pane is reported with its last lines and killed — no ghost "spun" seats, the h27–h29
+  failure); a fresh seat gets `--session-id` (returned as `session_id`) and
+  `EXCHANGE_LOCUS`/`HANDOFF_ID`. Features add `verify`, `session-id`.
+* Steward tab "session init prompt": GET shows the exact init prompt the next seat
+  receives (`handoff/station → init_prompt`, same text as `handoff_pull`), POST files a
+  row (`by=operator-steward`, no spawn), empty text abandons the open row. Remote loci use
+  the same central rows (`_remote_handoff` and the `handoff` cfg file are gone).
+* Idle relaunch files the rolling init prompt as a row instead of writing the file.
+## unreleased (st-keeper-card) — 2026-10-01 — steward keeper card = the serve Keeper
+
+* Steward › sessions: the Keeper card is the locus's serve Keeper session (model,
+  pending model, serve context gauge); model picker lists the full catalog; tmux seat
+  demoted to an emergency sub-card (t4262). New `GET/POST /api/locus/keeper?vm=`
+  (roster keeper role + `/api/console/sessions` gauge + `/api/console/models`
+  catalog; POST `{action:"set_model", model, backend?}` forwards to that serve's
+  roster, `set_provider` first when the backend changes; upstream errors are
+  passed through as `{ok:false, error}`). The old "context 4,443,744 / 1,000,000"
+  number was the cumulative relayed total — it is now a separate "relayed" line.
+## unreleased (st-switches) — 2026-10-01 — the disabling-switch audit, station side (t4260, t4250)
+
+Operator ruling d4254: a core guarantee (prompts go out at idle, pings and digests
+are delivered, standing sessions can act, the keeper is reachable) never has an off
+switch, a silent hold, an attempt cap or an unbounded defer; the only interruptions
+are explicit operator actions that are visible, owned and expiring. Station side of
+the 2026-10-01 audit (`AUDIT.md` §3):
+
+* **Holds are visible** (new `station_holds.py`): every coalesce / skip / wait /
+  inert code default the station performs is a row on the ⚠ strip (`GET /api/loops`
+  → `holds`, rendered by fleetview-term.js) with a count — `station:switch`,
+  `station:hold`, `station:skip`, `station:pending`. Persisted in
+  `<state>/station-holds.json`.
+* 1 Digest: a BUSY keeper no longer "defers" the digest tick after tick — it is
+  submitted through the comms-nudge path (`_nudge_serve` → `/api/console/chat`) and
+  QUEUES behind the turn; state `queued` carries the queue message id
+  (`queue_message_ids`, `queued_behind`). `deferred` is gone; an unreadable keeper is
+  `NOT delivered` (todo_digest.decide: `unreachable`, no `defer`).
+* 2 Reminders: `_REMIND_CAP` (3 attempts, then withhold) is removed; only the
+  `_REMIND_MIN_GAP` coalesce spaces reminders; the comment reads "delivery #N, no cap".
+* 3 `STATION_REMIND_MITIGATOR` (and every other inert-able default) is exposed with
+  its live value in `/api/about` → `switches` and `/api/loops` → `config.switches`,
+  and shows on the strip as `⚙ switch` when off.
+* 4 Nudge drain: a "wait" behind a busy turn is bounded (`keeper_nudge.WAIT_MAX_S`,
+  15 min) → `comms-nudge-requeue` audit line + `count:comms-nudge-requeue` strip
+  counter; while waiting, a `hold:comms-nudge-inflight` row shows it. A serve-core
+  0.1.15 hold (`{by, until}`) is waited out, never released by the station.
+* 5 "board status unknown" (toolserver down) → `comms-nudge-skip` audit (once per
+  reason) + a `skip:comms-nudge@<locus>` strip row with the pending count; nothing
+  is dropped. 6 Every `comms-nudge-skip` (no serve, serve refused, tmux off) mirrors
+  reason + pending count into the strip, cleared on the next successful send; the
+  5-min batch window shows "N pending, next in Xs".
+* 7 Hand-off dedupe (`handoff-dispatch.json`) has a 6 h age floor
+  (`STATION_HANDOFF_REQUEUE_SECS`): an identical open set is re-queued after it
+  (`handoff-requeue` audit, "re-queued" note in the batch).
+* 8 ✍ prompt: a serve the station cannot reach / resolve no longer ends in `failed`
+  — the prompt is RE-PENDED to the locus's `prompt-pending.json` with the reason
+  (state `pending`, `pending_id`), retried every `STATION_PROMPT_PENDING_TICK`
+  (60 s) until a serve session takes it; `GET|POST /api/prompt/pending?vm=` lists /
+  retries; a `pending:prompt@<locus>` strip row counts them. Bug reports never end in
+  `failed` either (state `pending` + reason, retried every pass).
+* 9 Bug-report outbox: a report queued behind a busy worker turn is waited for at
+  most `bug_route.INFLIGHT_MAX_S` (15 min, `STATION_BUGREPORT_INFLIGHT_MAX`), then
+  pulled out (`inflight_cancel`) and re-sent coalesced (`bug-report-requeue` audit +
+  strip counter).
+* 10 `frontier-keeper.json` and `frontier-delegate.json` record `by`, `at`,
+  `expires` on every write (`POST {expires_s|expires}`); GET returns them; a disable
+  / delegate-ON past its expiry reads as lifted. A disabled frontier keeper is a
+  `⚙ switch` strip row.
+* 11 Every locus has a keeper that knows its locus (t4250): provisioning
+  (`/api/locus/serve/provision`) and the new `POST /api/locus/serve/standing?vm=`
+  ship `standing_permission_mode: "bypassPermissions"`, `standing_cwd: <locus $HOME>`
+  and `permission_mode_by_label` for keeper/chat/worker into the locus's
+  `AC_ROOT/config.json` (missing keys only — idempotent, operator values kept;
+  `locus_exec.standing_config`), record the locus facts (home, gate, user units,
+  trees, serve, registry goal / tree rules from `loci/pointers`) in its
+  `directives/station.json` → `nuances`, and render the keeper directive with a
+  **LOCUS NUANCES** block (`directive-templates/nuances-keeper.md`).
+* 12 Serve-core 0.1.15: the station sends queue action `release` (`/api/prompt/status`
+  POST, the nudge kick) and tolerates both the 0.1.14 and 0.1.15 response shapes
+  (`keeper_nudge.queue_action_ok`); a 0.1.14 serve (HTTP 400 "Unknown queue action")
+  gets `retry` as the fallback. `/api/prompt/status` still accepts `retry` from older
+  UIs and sends it as `release`.
+* Tests: `test_switches_146.py` (one focused test per change; the standing-config
+  script runs for real against a temp state dir) + the touched suites updated.
+
+## 1.0.145 — 2026-10-01 — mirrored board notes are no longer clipped
+
+* Board: the central→local mirror/update path clipped notes at 2000 chars and comments
+  at 2000, which cut operator RUN scripts off before their closing fence on the
+  operator tab (the central text and the materialized scripts were complete). Notes
+  now mirror up to 20k and comments up to 8k.
+
+## 1.0.144 — 2026-10-01 — every locus gets a serve chat and a keeper; no silent suppression; the board as a static reference
+
+* Serve chat + keeper on EVERY locus: `station-serve-provision` sets up a locus's own
+  serve as its own user from shipped resources (`POST /api/locus/serve/provision`,
+  "＋ serve" button); each locus's own tmux seats are listed (`frontier.seats`);
+  LXD guests' serves are reached through a relay; `prompt_send` and nudges accept a
+  locus's raw keeper session id; the B pane, delegate and fs switches act on the
+  selected locus.
+* Comms pings are delivered into every managed locus's keeper serve session
+  (claimed, observed as `sender->receiver`, marked delivered); a delegation to
+  another locus is no longer dropped as self-origin.
+* No silent suppression (d4187): the ping gate no longer withholds — every request
+  ping nudges; the issue gate only annotates; inert silencing and B proposals are off
+  by default (`STATION_NOTIFY_INERT_SILENCES`, `STATION_B_PROPOSE`); the old B
+  reminder-verdict cycle is off (`STATION_REMIND_MITIGATOR`, board t4178).
+* Bug reports go only to the locus's WORKER serve session as `finding` board items
+  with delivery state (d4188); 1.0.143-era finding pings are forwarded and closed.
+* Reminders: a deterministic open-todos DELTA digest into each keeper serve session
+  (30 min cadence when idle, ≤1.5k chars, never to tmux, no attempt cap, skips
+  recorded; findings excluded) — `todo_digest.py`, one `[digest]` row per locus.
+* Board as a static reference: ⚑ operator / ⚖ proposal / 🔖 bookmark / 🧭 direction
+  items render in full via `static/board-md.js` following `docs/BOARD-ITEM-FORMAT.md`
+  (fenced blocks with language label + ⧉ copy, copy-all, ⚠ unformatted-command /
+  placeholder badges, prose folds while code stays visible).
+* Operator items carry a RUN script (one self-contained bash block, DO then VERIFY;
+  `ROLLBACK RUN:` optional), materialized to `<state>/operator-scripts/<id>.sh`
+  (+ `.rollback.sh`, `.done` on close) with a one-liner in the item; each run records
+  stamped output + a JSON sidecar under `results/<id>/` and is attached once to the
+  item as a RESULT comment with `result`/`flag` annotations; the item shows the
+  one-liner (⧉ copy), ▶ copy script, and the ✔/✖ result card. B draft-run endpoint.
+* Directives: a Station Toolkit section (what exists for delegation and the exact
+  call shape; tool names verified against the live toolserver) + a "Board items"
+  section; keeper no longer receives bug reports; B never gates pings.
+* Observability v2 (OFF by default): actions linked to requests by event-listener
+  stacks (labelled "inferred" tier for scheduler tasks; timers/page-load never
+  attributed); one-view chain action → stack → request → handler/traceback →
+  response → consumer; per-request trace headers; filters, trace-next-N, span level
+  and module filters; inference off/summary/explain (explicit per trace); saved
+  traces + provenance ingest; settings-at-open fix. Server half specified for hugpy.
+* Fixes: console drawer no longer truncates notes at 2000 chars; B fix proposals use
+  the proposal shape; paste box on shell/local surfaces pastes into its own pane.
+* Pins: abstract-serve-core 0.1.14 (relay to a busy console session uses its own
+  drained queue; truncation marked; queue-full is an error; speech chips; per-session
+  directives).
+
+## 1.0.143 — 2026-10-01 — shell back, copy/paste, a prompt bar that delivers, speech, observability, per-session directives
+
+* ⌂ shell returns to the terminal bar: a persistent terminal on the selected locus as its
+  own user (vm_mgr@ae on the host) via the 1.0.141 locus transport; unreachable loci
+  disable it with the reason.
+* Terminal copy: right-click on a selection copies at once (no Shift-juggling); selections
+  survive TUI redraws; Option+drag selects on macOS. Still no copy-on-select (2026-09-15).
+* Terminal paste: Ctrl+V / Ctrl+Shift+V paste directly (native paste → Electron clipboard
+  → Clipboard API → paste box); bracketed paste via xterm; the redundant right-click
+  "Paste" menu is gone. Electron exposes stationClipboard over IPC. Fix: the paste box
+  on shell/local surfaces pastes into its own pane, not the keeper seat.
+* ✍ prompt bar delivers directly: POST /api/prompt/send to the locus's serve session
+  (selected / keeper head) or its tmux seat, with delivered / queued / NOT-delivered
+  state and reply tracking (/api/prompt/status); the prompt-inbox file-pointer path
+  survives only as a labelled fallback.
+* Clipboard images (image/*) attach in the prompt bar; copied paths stay text; 📋 image.
+* Opt-in speech (default OFF): 🎙 dictation (Web Speech, else station Whisper) and
+  🔊 read serve replies aloud — in the prompt bar and (serve-core 0.1.13) the /ac console.
+* Observability phase 1 (OFF by default; Help menu or HUGPY_STATION_OBSERVABILITY=1):
+  in-app trace browser joining action → initiator stack → X-Hugpy-Trace-Id request →
+  flask handler span → output → response; filters + inference level (off/summary).
+* Directives are distinct per locus × standing session (keeper / chat / worker / local)
+  plus tmux, generated by directives.py from shipped templates, live locus facts and
+  operator overlays; serve sessions receive theirs every turn (AC_SESSION_DIRECTIVES_DIR).
+  tmux seats are framed as fallback / inference arm; the steward editor gains a session
+  picker; delegation gains a "serve" switch.
+* Pins: abstract-serve-core 0.1.13.
+
+## 1.0.142 — 2026-10-01 — the /ac console is baked from the package that serves it
+
+* station-bake-webui: the console dist is baked from abstract_serve_core/webui
+  (abstract-serve-core SERVES the console; it was baked from abstract_claude's
+  stale copy, so serve UI fixes never reached the browser). abstract_serve and
+  abstract_claude remain fallbacks for older installs.
+* REQUIREMENTS pins: abstract-serve-core 0.1.12 (import name renamed
+  abstract_serve -> abstract_serve_core, transitional alias kept; serve fixes:
+  history order, tool calls after reload, mid-turn model change, live
+  processing status, per-unit timestamps, responding model), abstract-claude
+  0.1.71, abstract-gpt 0.1.15, hugpy-agent 0.1.85.
+* unshipped-artifacts: re-acked ac-loci.json (stale hugpy :9125 pin cleared)
+  and the 7006 unit (as edited 2026-09-30).
+
+## 1.0.141 — 2026-10-01 — any station views any locus exactly as that locus's own host does
+
+Principle (operator): every station is perfect as host of its own locus; only the
+REMOTE path broke. There is now ONE code path (`resources/backend/locus_exec.py`)
+that runs identically on this host (`bash -s`), over ssh (`ssh … bash -s` on the
+mux) or in an LXD guest (`lxc exec … bash -s`). Fixes from
+/tmp/station-remote-locus-audit.md (S1, S2, R1–R7).
+
+* Identity (R1). `keeper` is vm_mgr's REGISTERED locus key, no longer a synonym
+  for "this station". The host is the reserved tokens `""`/`@self`/`@keeper`/`host`
+  or this station's OWN locus name (STATION_LOCUS / the registry). `_keeper_locus()`
+  no longer falls back to `keeper`: an unconfigured station shows "locus not
+  configured" (board 409 `unconfigured`, UI banner, no file↔DB sync) instead of
+  silently reading and syncing into vm_mgr's board. New `GET /api/station/identity`.
+  The host board routes are `/api/vm/@self/*` (and `@keeper`); a request for the
+  station's own name is answered in-process (no 307). A middleware folds any host
+  spelling in `?vm=` to `@keeper`. Several registered rows on one endpoint (keeper +
+  ae-mgr at vm_mgr@192.168.1.100) resolve deterministically: kind=station, then a
+  deliberately registered row over an auto-registered "ssh host added on" one, then
+  a legacy-alias target; a true tie is never guessed. Legacy alias `ae-vm-mgr` →
+  `keeper` is built in (STATION_LOCUS and dropdown names). The loci sync picks the
+  self row the same way (no dict-order dependence). The UI (`isHostVm`, TodoDrawer,
+  messages, `acHostSeat`, locus labels) uses the station's own names; an ssh locus
+  named `keeper` stays selectable on other stations.
+* Seat launch (S1, R2). `_tmux_persist`, `_seat_launch_script`, `_seat_launch_remote`
+  and `_ssh_remote_launch_script` are gone. `_seat_launch` writes the seat script ON
+  THE TARGET (heredoc on stdin into the target's `<state>/seat-launch`, 0700) and the
+  PTY runs the same short `tmux -L console new-session -A -s <sess> "bash <file>"`
+  everywhere — the tmux argv stays < 1 KB with a 20 KB directive ("command too long"
+  fixed). If the script cannot be written the seat says why; there is no inline
+  fallback. The script's env prelude is identical on every target (resolves the
+  target's state dir, imports the seat keys from ITS env files, exports
+  EXCHANGE_LOCUS/HUGPY_LOCUS = the target locus); the host additionally pins its own
+  process env. Directive, guidance, handoff, models, fs/delegate switches and the A
+  template are read ON the target (`locus_exec.read_cfg`), so a remote seat never
+  gets the viewing station's directive. mct `{ws}`/model/label rewrites now happen
+  before the script is written (they were dead code since mct v2). A reattach does no
+  remote I/O. The host relaunch uses the same launcher (`seat_start_detached`).
+  Unstick, paste (`body.vm`), show, live `/model` and every `_locus_run`/finder/journal
+  spawn go through the same transport.
+* Serve on a remote locus (S2, R3). `abstract-claude-serve-run` publishes where it
+  listens: `<state>/ac-serve-<instance>.json` {port, pid} and a central seat_state row
+  (seat `keeper`, status.surface=serve, status.port) via `abstract-claude seat-report`
+  watching the serve pid. The station discovers a locus's serve from that row, else
+  by the same probe run on the target (own pid only — never another user's serve),
+  and reaches it with `ssh -O forward -L 127.0.0.1:<eph>:127.0.0.1:<port>` on the
+  existing mux. ac-loci.json is now an optional override. `/ac/@<locus>/`, the Serve
+  button, `/api/frontier/limits?vm=`, `/api/ac/rollover?vm=` and the serve token
+  meter (`/api/frontier/cache?vm=`) use the SELECTED locus's serve. The runner no
+  longer defaults EXCHANGE_LOCUS to `keeper`.
+* Per-locus config (R4/R5). `/api/frontier/directive|handoff|models` and
+  `/api/b/model` take `?vm=` and read/write the target's own files; the UI sends the
+  selected locus on every seat-config call (SeatPanel `seatQ(vm)`, VM_SCOPED_API,
+  the session model picker). B chat for an ssh locus runs that locus's own
+  `hugpy_agent.mct.b_answer` on the target (no host-B leak); unknown names 404.
+  `/api/a/usage?vm=` reads the central exchanges table for that locus. Findings and
+  loops are filtered to rows tagged with the locus; steward log / keeper directives
+  are labelled "this station". Live turn flow, B guidance, fs policy, delegate and
+  GPT settings for another locus stay an honest 404.
+* lxc-only paths (R6). The files API (`/api/stations/<name>/fs/*`) works for the
+  host and every ssh locus (one python on the target, fenced under that user's
+  $HOME, payloads on stdin); LXD guests keep `lxc file`. The journal probe never
+  picks another user's station unit (hugpy showed hugpy-demo's): without a unit of
+  its own a locus shows its own user journal.
+* The station writes `~/.config/hugpy-station/state-dir` at startup (when its state
+  dir is elsewhere) so peers' scripts find it.
+* Tests: `resources/backend/test_locus_exec.py` (10: fake ssh runner, 20 KB directive
+  → tmux argv < 1 KB, identical script for host and ssh, real local runs of the
+  materialize/config/fs/probe scripts, forward over the mux),
+  `resources/backend/test_remote_locus_141.py` (10: identity, ambiguity, legacy alias,
+  unconfigured state, target-only seat config + env), `test_locus_central.py` updated.
+
+## 1.0.140 — 2026-10-01 — every keeper ping goes through the toolserver issue gate
+
+Fixes the serve keeper flood (/tmp/serve-flood-report.md: 47 of 48 keeper turns
+in 24 h were station nudges, 80 of them from loop-detector key churn). Needs
+abstract_toolserver >= 0.0.39 (category `issue`).
+
+* Gate first, ping second: the loop detector (`_loops_act` → `_gate_loops`, one
+  `issue_observe` per new/updated loop row, kind `loop:<source>`, subject = the
+  loop identity), log findings (`_notify_findings` → `_gate_findings`, one observe
+  per sighting with `n` = count growth, kind `finding:<kind>`, subject = the
+  finding's existing `signature`, source `<unit>@<locus>` so sightings land on the
+  86 imported issues) and B's proposal ✉ (`_propose_deliver`, source `b-propose`)
+  ping only when the gate returns `page=true`. Caller / unit / client session are
+  passed so the gate's self-origin guard can tell the keeper's own runs apart
+  (`loop_detector._finding` now carries `caller`/`session_id`; a systemd restart
+  loop is never self-origin).
+* The comms relay (`_deliver_pings` → `_gate_pings`): a ping carrying
+  `issue_fp=` was paged at its source and is nudged only while that issue is still
+  `raised`; any other ping (channel `ch_…`, operator/station comms, an older
+  station) is observed first (kind `channel`|`comms`) and nudged only on a page.
+* PAGING FAILS CLOSED: no gate decision (toolserver down, bad reply) = nothing is
+  sent; it is logged and re-judged next pass. History/disposition writes FAIL OPEN.
+* B: queried only when `issue_b_query_ok(fp)`; its prompt carries
+  `issue_memory(fp)` for THAT fingerprint only (replaces the NotifyBook
+  prior-proposal block; NotifyBook stays as the read-through fallback); every
+  outcome is recorded with `issue_record_b`; novelty is judged against the issue's
+  own priors.
+* Dispositions → registry: finding/loop closes and `POST /api/findings/<sig>/disposition`
+  go to `issue_set` (inert → benign, accept/plain close → processed, reject →
+  raised), proposal verdicts also to `issue_record_action` (accept = the fix).
+  Each close is forwarded once; the station's own auto-resolve is not a disposition.
+* `STATION_NUDGE_TMUX` (default 0): a failed serve delivery NEVER falls back to the
+  tmux keeper pane unless this is explicitly 1 — the item stays pending on the
+  board and the failure is logged (`comms-nudge-skip`).
+* Delivery addresses the keeper SERVE SESSION, resolved fresh on every send (roster
+  role → serve's rollover chain head). A nudge handed to a console session is
+  watched until it drains (`inflight` in comms-nudge-pending.json): queued behind a
+  turn on an `auto=off` session it is started with `POST /api/console/queue
+  action=retry` once the session is idle; stranded on a rolled-over / wiped
+  session or behind someone else's hold it is removed there and re-pended for the
+  head. No new nudge is stacked on an undrained one. Serve itself is unchanged.
+* `STATION_BUGSCAN=0` is now a master off: it wins over the persisted
+  `bugscan/state.json` `on:true` (the scan loop, `_bugscan_run`, and the panel's
+  on/now return 409); state.json is left as the operator set it.
+* Tests: `resources/backend/test_issue_gate.py` (20, toolserver mocked), updated
+  `test_keeper_nudge.py`, `test_channel_ping_nudge.py`.
+
+## 1.0.139 — 2026-10-01 — a launch never kills the running Station
+
+* CRITICAL FIX (1.0.138 VM test): `abstract-claude-serve-run` started serve
+  without `--no-browser`, so serve-core's auto-open ran `hugpy-station --serve
+  claude` through the full launcher on every Station launch; with port 8899 held,
+  the launcher's reaper (`pkill -f hugpy-station/hugpy-station`, `pkill -f
+  resources/backend/server.py`, `fuser -k -9`) killed the Station that had just
+  started serve, and the headless `hugpy-station-web@` backend with it.
+  - The runner now passes `--no-browser` (probed from `serve --help`; a serve
+    without the flag is started with no DISPLAY/WAYLAND_DISPLAY so it cannot open
+    a window).
+  - The launcher has no name- or port-based kill left. `--serve` mode touches no
+    process at all (serve-app joins this user's serve on 9124-9127, else starts
+    one). Station mode examines only the listener on the station port: a live
+    Station of this user -> hand off (main.js now takes Electron's single-instance
+    lock and focuses the running window); a backend whose desktop Station
+    (`HUGPY_STATION_DESKTOP_PID`) is gone -> that one pid is reaped; anything else
+    (headless unit, other users, hand-run server.py) is left alone and the new
+    Station takes the next free port. A stopped (^Z) Station gets a message, exit 4.
+    A live Station is recognised by its binary (/proc/<pid>/exe) or argv[0] cut at
+    the first space — Chromium rewrites the main process's cmdline into one
+    space-joined string, which (caught in the pre-release VM test) made a second
+    `hugpy-station` reap the running Station's own backend as "stale".
+    Test: `tests/test_launcher_no_kill.py` (run it in a VM, never on a live host).
+* seat-provision: "claude ok" now means a `claude` CLI that runs (`claude
+  --version`), not the exit status of `curl | bash` (offline, that was 0 with no
+  claude installed).
+* tmux is a declared Recommends; without it the backend answers rc 127 + a clear
+  message instead of FileNotFoundError tracebacks, `/api/term/backends` reports
+  `frontier.tmux.available=false` and the UI disables the tmux button with the
+  reason. Deb Depends now include curl, python3-venv, python3-pip (asserted by
+  build-release.sh).
+
+## 1.0.138 — 2026-09-30 — locus-specific station (every locus is a central-DB key)
+
+* The station is LOCUS-SPECIFIC: the top-left dropdown pick is just a different
+  `locus` key on the central (toolserver) tables. `_central_locus()` maps EVERY
+  dropdown locus to its central key — host aliases (`''`/keeper/@keeper/host, or
+  a pointer at this very user@host) -> `_keeper_locus()`; an operator alias
+  (`$STATE/locus-aliases.json`); a registered locus is its own key; an
+  unregistered ssh host / LXD guest whose endpoint is exactly ONE registered
+  locus's endpoint resolves to it (hs-fresh -> hs-fresh-ubuntu, a-brain ->
+  a-brain-coder-next); anything else is its own name. Resolution waits for the
+  first loci sync after a restart, so an early write never lands on the bare name.
+* ☑ board read AND write (add / edit / status / comment / delete / ✨ assist / 📨
+  ping / ⧉ brief) go to the selected locus's central `todos` rows for ssh hosts,
+  LXD guests and registered loci alike (`/api/vm/<locus>/todo`,
+  `/api/mct/todo?vm=`). LXD guests no longer read `~ubuntu/todo.json` through
+  lxc exec. The host keeper keeps its file failsafe (never fewer items than the
+  file). Central board reads take the locus's whole slice (cap 500 -> 5000).
+* ◳ canvas, ✉ messages (central comms inbox / comms ping, no lxc mail file),
+  ✍ prompts, 🎯 rolling state, seat auth and mct seat status read the locus's
+  central rows for every locus kind — no workbench, sidecar or station file on
+  the locus. The drawer header names the central key when it differs (`→ key`).
+  `todo-history` answers an honest 404 off-host (no central todo journal yet).
+* Channel push for any harness (station half): a comms ping whose ref is a
+  channel id (`ch_…`, "(ref ch_…)" in the note) skips the 300 s
+  NUDGE_MIN_INTERVAL batch window and is pushed at once through `_nudge_frontier`
+  — serve first (`_nudge_serve`, wait=false, queued, never interrupts), tmux
+  fallback. Such pings stay kind=request (message-kind pings are closed before
+  the nudge). Test: `test_channel_ping_nudge.py`.
+* Carried fix (1.0.134-1.0.137 UI blank): the 🌐 browser panel regex is
+  `/^https?:\/\//i` again; `test_static_js_syntax.py` `node --check`s every inline
+  script.
+* Source guard also refuses direct edits to /etc/ufw/* (use the gate action
+  ufw.apply-rules: test → backup → apply → health check → auto-restore). A one-line
+  invalid before.rules took the host off the network on 2026-09-30.
+* `resources/serve-app/serve-core.js`: the join-first probe (STATION_CONSOLE_AC,
+  HUGPY_AGENT_SERVE, then 9124/9125/9126/9127) and the backend preselect now live
+  in ONE module used by both `hugpy-station --serve` (serve-app/main.js) and the
+  Station's native console view (main.js: startServeIfNeeded joins any answering
+  console and pins the backend's /ac proxy to it; SERVE_BACKEND /
+  `--console-backend=` preselects on first show). Node test: tests/serve-core.test.js.
+* hugpy serve window (`hugpy-station --serve [claude|gpt|hugpy]`, resources/serve-app,
+  `abstract-claude-console.desktop`); pins `abstract-claude==0.1.69`,
+  `abstract-serve-core==0.1.9`. `preload.js` ships in app.asar (window.stationConsole).
+
+## 1.0.137 — 2026-09-30 — bounded SSH/tmux seat launch
+
+* FIX (station UI gone since 1.0.134): the 🌐 browser panel's URL check was the
+  double-escaped regex `/^https?:\\/\\//i` — a SyntaxError ("Invalid regular
+  expression flags") that stopped index.html's whole inline script, so React never
+  mounted and only the frontier terminal column rendered. Now `/^https?:\/\//i`;
+  `resources/backend/test_static_js_syntax.py` runs `node --check` over every inline
+  script and static/*.js.
+* Source guard (PreToolUse hook `hooks/source_guard_hook.py`, wired by
+  `a-settings-template.json` + firstrun): refuses copying/worktree-ing/cloning a
+  source out of place and direct `twine upload`; points at the abstract-pypit
+  release loop (`<staging>/<project>/push.sh stage|release`). Symlinked sources in
+  /srv/pyit/dev are resolved to their real path.
+* Loops already DECIDED upon are logged, not re-pinged: loop-detector rows go
+  through the notifier's per-signature dispositions (`keeper_notify.gate_loops`);
+  loop board items carry the `inert:/accept` close line, read back by
+  `_loops_read_dispositions`. (One already-decided loop re-pinged 3x had set off a
+  17 MB keeper turn.)
+
+* Remote frontier seat commands are uploaded through a short-lived 0700 local
+  wrapper and executed from a remote launch file. tmux and the interactive SSH
+  argv no longer carry the generated prompt/settings payload, preventing the
+  `command too long` fallback to a plain login shell.
+
 ## 1.0.131 — 2026-09-29
 
 ### abstract-claude 0.1.67 / abstract-serve-core 0.1.7 — the collator goes away after send

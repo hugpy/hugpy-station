@@ -14,6 +14,16 @@ import keeper_notify as kn  # noqa: E402
 T0 = 1_790_700_000.0
 
 
+
+import pytest  # noqa: E402
+
+
+@pytest.fixture
+def legacy_inert(monkeypatch):
+    """The pre-2026-10-01 silencing (inert / decided loops) is reachable only with
+    STATION_NOTIFY_INERT_SILENCES=1 (default off, board t4178 [F2.5])."""
+    monkeypatch.setenv("STATION_NOTIFY_INERT_SILENCES", "1")
+
 def _f(key="f1", kind="rate_limit_429", source="7002_hugpy_api.service", locus="keeper", sev="high",
        count=3, last=T0, sig="upstream returned N Too Many Requests for model <id>", action=""):
     return {"hash": key, "kind": kind, "source": source, "locus": locus, "severity": sev, "count": count,
@@ -179,7 +189,7 @@ def test_parse_disposition_close_comment():
     assert kn.parse_disposition(ours + "\ninert: benign retry") == ("inert", "benign retry")
 
 
-def test_inert_suppresses_notifications_and_proposals_but_keeps_counting():
+def test_inert_suppresses_notifications_and_proposals_but_keeps_counting(legacy_inert):
     b, s = _book(), FakeSink()
     _fan(b.step([(_f(), "new")], {}, T0), s)
     b.set_disposition("f1", "inert", "known upstream quota", by="keeper", now=T0 + 10)
@@ -196,7 +206,7 @@ def _inert_then(b, f_after, t):
     return b.step([(f_after, "jump")], {}, t)
 
 
-def test_inert_reopens_on_new_source():
+def test_inert_reopens_on_new_source(legacy_inert):
     b = _book()
     ev = _inert_then(b, _f(key="f2", source="7004_hugpy_toolserver.service", last=T0 + 60), T0 + 60)
     assert ev["reopened"] and "new source" in b.sig(b.rows["f2"]["sigkey"])["reopen_reason"]
@@ -204,13 +214,13 @@ def test_inert_reopens_on_new_source():
     assert "why now: re-opened from inert: new source" in kn.fmt_mail(ev["mail"][0], b.sig(ev["mail"][0]["sigkey"]))
 
 
-def test_inert_reopens_on_new_locus():
+def test_inert_reopens_on_new_locus(legacy_inert):
     b = _book()
     _inert_then(b, _f(key="f3", locus="op", last=T0 + 60), T0 + 60)
     assert "new locus op" in b.sig(b.rows["f3"]["sigkey"])["reopen_reason"]
 
 
-def test_inert_reopens_on_severity_class():
+def test_inert_reopens_on_severity_class(legacy_inert):
     b = _book()
     b.step([(_f(sev="medium"), "new")], {}, T0)
     b.set_disposition("f1", "inert", "noise", now=T0 + 5)
@@ -218,7 +228,7 @@ def test_inert_reopens_on_severity_class():
     assert ev["reopened"] and "severity rose to high" in b.sig(b.rows["f1"]["sigkey"])["reopen_reason"]
 
 
-def test_inert_reopens_on_tenfold_rate_only():
+def test_inert_reopens_on_tenfold_rate_only(legacy_inert):
     b = _book()
     b.step([(_f(count=3), "new")], {}, T0)
     b.step([(_f(count=6, last=T0 + 1800), None)], {}, T0 + 1800)                # ~6/h
@@ -273,3 +283,49 @@ if __name__ == "__main__":
                 failed += 1
                 print("FAIL ", name, "->", repr(e))
     sys.exit(1 if failed else 0)
+
+
+# ---- loops through the book's dispositions (operator 2026-09-30) -----------------------
+def _loop(identity="ae-worker", key="worker:ae-worker"):
+    return {"key": key, "source": "worker", "identity": identity, "count": 3, "last_seen": 1000.0}
+
+
+def test_decided_loop_is_logged_not_pinged(tmp_path, legacy_inert):
+    import loop_detector as ld
+    book = kn.NotifyBook(state_path=str(tmp_path / "n.json"))
+    undecided, decided = _loop("computron", "worker:computron"), _loop()
+    skey = kn.loop_sigkey(decided)
+    book.sig(skey)
+    book.set_disposition(skey, "inert", "re-exec during landings is expected", by="keeper", now=900)
+    ev, quiet = kn.gate_loops(book, {"new": [decided], "mail": [decided, undecided], "cleared": []}, now=1000)
+    assert quiet == [decided]
+    assert ev["new"] == [] and ev["mail"] == [undecided]
+    assert book.sigs[skey]["loop_hits"] == 1
+    # the loop's board note carries the same close contract as findings
+    _, note = ld.fmt_board(dict(decided, first_seen=900, detail="d", action="a"))
+    assert kn.parse_disposition(note + "\ninert: expected") == ("inert", "expected")
+    assert kn.parse_disposition(note) == (None, "")
+
+
+def test_accepted_loop_reopens_when_it_comes_back(tmp_path, legacy_inert):
+    book = kn.NotifyBook(state_path=str(tmp_path / "n.json"))
+    row = _loop()
+    skey = kn.loop_sigkey(row)
+    book.sig(skey)
+    book.set_disposition(skey, "accepted", "", by="keeper", now=900)
+    ev, quiet = kn.gate_loops(book, {"new": [], "mail": [row]}, now=1000)        # still active: quiet
+    assert quiet == [row] and ev["mail"] == []
+    ev, quiet = kn.gate_loops(book, {"new": [row], "mail": [row]}, now=5000)     # came back: delivered
+    assert quiet == [] and ev["new"] == [row]
+    assert book.sigs[skey]["disposition"] == "open" and "did not hold" in book.sigs[skey]["reopen_reason"]
+
+
+def test_inert_is_reported_by_default(monkeypatch):
+    """t4178: without the legacy switch an inert disposition only lowers the priority."""
+    monkeypatch.delenv("STATION_NOTIFY_INERT_SILENCES", raising=False)
+    book = kn.NotifyBook()
+    row = {"key": "k", "sigkey": "s", "severity": "high", "source": "x.service"}
+    book.rows["k"] = row
+    book.sig("s").update(disposition="inert", reason="noise")
+    assert book.notify_row(row) and book.priority_of(row) == "low"
+    assert "inert: noise" in book.annotation(row)

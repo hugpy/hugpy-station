@@ -58,8 +58,8 @@ Fetched from `?help=true` on 2026-09-08. Defaults in parentheses; `None` = requi
 | `todo` | queue · ☑ | `t<N>` | your own queue — incl. anything the operator MIGHT want. NOT an ask the operator must action. | `SCOPE: … — DONE: …` |
 | `request` | queue · ✋ | `t<N>` | an ask AT the keeper (operator/peer filed it). NOT a self-note. | `ASK <who>: … — DONE: …` |
 | `bookmark` | 🔖 | `bm<N>` | a stable build / shipped commit / verified checkpoint. NOT a plan. | `SHIPPED <UTC>: … — VERIFIED: … — ROLLBACK: …` |
-| `operator` | ⚑ | `o<N>` | ONE action only the operator can take (privilege you lack), with a copyable `cmd`. NOT a wish-list. | `@worker: … task: …` + `cmd:` block |
-| `proposal` | ⚖ | `p<N>` | a decision wanted FROM the operator: pros/cons/rec. NOT self-decided. | `PROBLEM: … / OPTIONS: A) … B) … / REC: …` |
+| `operator` | ⚑ | `o<N>` | ONE action only the operator can take (privilege you lack), with a copyable `cmd`. NOT a wish-list. | [BOARD-ITEM-FORMAT.md](BOARD-ITEM-FORMAT.md) §1: `[root]\|[OP]` title + WHY/WHO/GATE/DO/VERIFY/EXPECT |
+| `proposal` | ⚖ | `p<N>` | a decision wanted FROM the operator: pros/cons/rec. NOT self-decided. | [BOARD-ITEM-FORMAT.md](BOARD-ITEM-FORMAT.md) §2: PROBLEM/OPTIONS/REC/DECISION/SKETCH |
 | `direction` | queue · 🧭 | `d<N>` | a standing operator ruling/invariant you carry forward. NOT a one-off task or your own opinion. | `RULING (<who, date>): "<quote>" — STATE: <APPLIED\|FOLDED\|CLOSED>` |
 
 ### Comms (`comms/*`) — protocol in §5
@@ -94,7 +94,10 @@ Fetched from `?help=true` on 2026-09-08. Defaults in parentheses; `None` = requi
 ### Seats and sessions (`handoff/*`, `session/*`, `seat/*`, `assess/*`, `exchange/*`)
 | tool | params | what it does |
 |---|---|---|
-| `handoff_request` | `ssh, dir, user, seat ('claude'), brief (''), locus (''), source_session ('')` | Request a jump-in: a NEW seat scoped+authed by `{ssh, dir, user}`; records + notifies (board `operator` item); spins immediately when a station seat API is configured. |
+| `handoff_request` | `locus, text, task (''), fork (false), spawn (true), ssh, dir, user, seat ('claude'), source_session ('')` | Leave a handoff for the NEXT session on the locus — ONE toolserver row (state open → spun → claimed → consumed → done), carrying the ledger pointer + your session id. With ssh/dir/user a station seat is asked for; `spun` only when the station VERIFIED it running. Pullable either way. |
+| `handoff_pull` | `locus or id, session_id (''), consume (true)` | The /resume: the init prompt for the newest open handoff (text + ledger pointer + what the previous seat did, from the exchanges DB). The SessionStart hook calls it with the seat's session id; the row becomes `consumed` by that session, idempotent per session, loud for another. |
+| `handoff_claim` | `id, status ('claimed'), by, session_id, station_handle` | Idempotent state transitions (claimed / consumed / done / abandoned); invalid transitions are errors. |
+| `handoff_station` | `locus ('')` | Station seat API probe; with a locus also `init_prompt` (the same text handoff_pull returns) and `layer` (the launch pointer) — steward tab, launch and tool never diverge. |
 | `handoff_list` | `status, limit (50), mode` | Handoffs newest first (status pending\|spun\|claimed\|done\|abandoned; mode seat\|pull). |
 | `handoff_claim` | `id, station_handle (''), status ('claimed')` | Attach the created station session (or mark done/abandoned). |
 | `session_pull` | `session_id, ssh, dir, user, brief, locus, machine, fork (True), seat ('claude'), name` | PULL a live Claude Code session into a station seat; the bridge auto-fills id/ssh/dir/user — an agent normally passes just `brief`. `fork` keeps the origin intact; `name` = the pulled session's tmux seat and locus (default `sess-<id8>`). |

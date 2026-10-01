@@ -51,6 +51,12 @@ except ImportError:  # no system python3-aiohttp: vendored wheels (built for Ubu
     import aiohttp
 from aiohttp import WSMsgType, web
 
+import locus_exec as LX   # 1.0.141: ONE code path to act on a locus (self / ssh / lxd)
+import prompt_send as PS  # 1.0.143: ✍ prompt delivers directly (serve session / tmux seat)
+import todo_digest as TD  # 1.0.144: deterministic open-todos digest -> each locus's keeper session
+import operator_scripts as OPS  # 1.0.144: operator items' RUN blocks as files on disk
+import directives as DV   # 1.0.143: per-(locus x session) directives + init briefs, one source of record
+
 ROOT = Path(__file__).resolve().parent          # .../vm_mgr/console
 VM_BIN = ROOT.parent / "bin"                      # .../vm_mgr/bin (vm-* scripts)
 STATIC = ROOT / "static"
@@ -338,6 +344,14 @@ class _RingLogHandler(logging.Handler):
         doc = {"seq": _LOG_SEQ[0], "ts": round(record.created, 3), "level": record.levelname,
                "name": record.name, "msg": msg[:4000]}
         _LOG_RING.append(doc)
+        # The ring is a view; provenance is the durable source.  Keep this
+        # best-effort so a locked/full state DB can never break application
+        # logging.
+        try:
+            from provenance import record_log
+            record_log(doc)
+        except Exception:
+            pass
         loop = _LOG_LOOP
         if loop is not None and _LOG_SUBS:
             try:
@@ -382,6 +396,43 @@ async def _start_log_ring(app):
     _alog.info("console backend up — log feed live (ring %d)", _LOG_RING.maxlen)
 
 
+async def _start_handoff_retire(app):
+    """1.0.146: <state>/frontier-handoff.md is no longer read by any launch. A
+    leftover file is renamed (never silently dropped) and its text is filed as
+    a toolserver handoff row when none is open for this locus, so what was
+    written for a successor still reaches one."""
+    try:
+        if not FRONTIER_HANDOFF_PATH.exists():
+            return
+        text = FRONTIER_HANDOFF_PATH.read_text(encoding="utf-8").strip()
+        dst = FRONTIER_HANDOFF_PATH.with_name(FRONTIER_HANDOFF_PATH.name + ".retired-" + time.strftime("%Y%m%d-%H%M%S"))
+        FRONTIER_HANDOFF_PATH.rename(dst)
+        filed = ""
+        locus = _station_locus()
+        if text and locus:
+            try:
+                st = await _ts_call(app, "handoff/station", {"locus": locus}, timeout=10)
+                if not (st or {}).get("handoff"):
+                    row = await _ts_call(app, "handoff/request",
+                                         {"locus": locus, "text": text, "by": "station-retire-file", "spawn": False},
+                                         timeout=20)
+                    filed = f"; filed as toolserver handoff {row.get('id')}"
+                else:
+                    filed = f"; NOT filed — handoff {st['handoff']['id']} is already open on {locus}"
+            except Exception as e:                           # noqa: BLE001
+                filed = f"; NOT filed (toolserver: {str(e)[:120]}) — file it with handoff_request"
+        _audit_line("frontier-handoff", f"legacy file retired → {dst.name} ({len(text)} chars){filed}")
+    except Exception as e:                                   # noqa: BLE001
+        logging.getLogger("station.handoff").warning("legacy handoff file: %s", e)
+
+
+async def _start_directives(app):
+    """1.0.143: every station start re-derives <state>/directives/rendered/ —
+    a hand edit there never survives, by construction."""
+    n = await asyncio.get_running_loop().run_in_executor(None, _render_session_directives)
+    _alog.info("directives: rendered for %s (%d changed)", _station_locus() or "(unconfigured locus)", len(n or []))
+
+
 async def api_steward_log(request):
     """GET /api/steward/log?tail=N — the console backend's own recent log
     records, oldest first: {seq, ts, level, name, msg}."""
@@ -390,7 +441,9 @@ async def api_steward_log(request):
     except ValueError:
         n = 300
     rows = list(_LOG_RING)[-n:]
-    return web.json_response({"ok": True, "rows": rows, "seq": _LOG_SEQ[0], "capacity": _LOG_RING.maxlen})
+    # 1.0.141: the backend's own process log — labelled, never passed off as a locus's
+    return web.json_response({"ok": True, "rows": rows, "seq": _LOG_SEQ[0], "capacity": _LOG_RING.maxlen,
+                              "scope": "this station (backend process log)"})
 
 
 async def api_steward_log_stream(request):
@@ -421,6 +474,125 @@ async def api_steward_log_stream(request):
     finally:
         _LOG_SUBS.discard(q)
     return resp
+
+
+async def api_provenance(request):
+    """Durable agent/tool/edit/log ledger for the Station investigator tab."""
+    try:
+        from provenance import rows
+        after = max(0, int(request.query.get("after") or 0))
+        limit = max(1, min(2000, int(request.query.get("limit") or 300)))
+        return web.json_response({"ok": True, **rows(after, limit)})
+    except Exception as e:
+        _alog.exception("provenance read failed")
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+
+async def api_provenance_stream(request):
+    """SSE cursor stream; the client receives durable rows after its cursor."""
+    try:
+        cursor = max(0, int(request.query.get("after") or 0))
+    except ValueError:
+        cursor = 0
+    resp = web.StreamResponse(headers={"Content-Type": "text/event-stream",
+                                       "Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    await resp.prepare(request)
+    try:
+        await resp.write(b": connected\n\n")
+        while True:
+            try:
+                from provenance import rows
+                doc = rows(cursor, 200)
+                if doc["events"]:
+                    cursor = doc["cursor"]
+                    await resp.write(("event: provenance\ndata: " + json.dumps(doc) + "\n\n").encode())
+                else:
+                    await resp.write(b": keepalive\n\n")
+                await asyncio.sleep(1)
+            except asyncio.CancelledError:
+                raise
+            except (ConnectionResetError, RuntimeError):
+                break
+            except Exception as e:
+                await resp.write(("event: error\ndata: " + json.dumps({"error": str(e)}) + "\n\n").encode())
+                await asyncio.sleep(2)
+    except (ConnectionResetError, asyncio.CancelledError, RuntimeError):
+        pass
+    return resp
+
+
+async def api_provenance_query(request):
+    """Record that the investigator has queried the editor of a finding."""
+    body = await request.json()
+    finding_id = int(body.get("finding_id") or 0)
+    message = str(body.get("message") or "")[:4000]
+    try:
+        from provenance import mark_query, record
+        mark_query(finding_id)
+        eid = record("editor_query", {"finding_id": finding_id, "message": message},
+                      source="provenance-investigator", actor="local-agent",
+                      operation="query-editor")
+        return web.json_response({"ok": True, "event_id": eid})
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+
+async def api_provenance_ingest(request):
+    """Append an observation emitted by the standalone browser console."""
+    body = await request.json()
+    kind = str(body.get("kind") or "browser_event")[:80]
+    payload = body.get("body") if "body" in body else body
+    try:
+        parent_id = int(body["parent_id"]) if body.get("parent_id") is not None else None
+    except (TypeError, ValueError):
+        parent_id = None
+    try:
+        from provenance import record
+        eid = record(kind, payload,
+                     source=str(body.get("source") or "observability-browser")[:120],
+                     actor=str(body.get("actor") or "browser")[:120],
+                     session_id=str(body.get("session_id") or "")[:160],
+                     trace_id=str(body.get("trace_id") or "")[:160],
+                     operation=str(body.get("operation") or "browser")[:120],
+                     parent_id=parent_id)
+        return web.json_response({"ok": True, "event_id": eid})
+    except Exception as e:
+        _alog.exception("provenance ingest failed")
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+
+async def api_provenance_investigate(request):
+    """Ask the local keeper agent to compare expected vs observed execution.
+
+    This is intentionally an explicit action from the provenance tab.  The
+    prompt contains bounded ledger records; the full records remain durable
+    in SQLite and can be inspected by the investigator later.
+    """
+    body = await request.json()
+    expected = str(body.get("expected") or "").strip()[:8000]
+    if not expected:
+        return web.json_response({"ok": False, "error": "expected outcome is required"}, status=400)
+    try:
+        from provenance import rows, record
+        snapshot = rows(max(0, int(body.get("after") or 0)), 250)
+        prompt = (
+            "You are the local test investigator for Hugpy Station. Compare the expected "
+            "outcome below with the observed agent outputs, tool calls, edits, and logs. "
+            "Trace execution in order, identify the first divergence, name the file/item "
+            "and editor responsible, distinguish a warning from a propagated error, and "
+            "propose the smallest testable edit. Do not claim a fix without evidence.\n\n"
+            "EXPECTED:\n" + expected + "\n\nOBSERVED LEDGER:\n" +
+            json.dumps(snapshot, ensure_ascii=False, default=str)[:50000])
+        result = await asyncio.to_thread(_b_answer, prompt, [], "@keeper")
+        reply = result.get("reply", "") if isinstance(result, dict) else str(result)
+        eid = record("investigation", {"expected": expected, "reply": reply,
+                                        "event_count": len(snapshot.get("events") or [])},
+                      source="provenance-investigator", actor="local-agent",
+                      operation="compare-expected-observed")
+        return web.json_response({"ok": True, "event_id": eid, "reply": reply})
+    except Exception as e:
+        _alog.exception("provenance investigation failed")
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
 
 
 def audit(request, action, detail="", ok=True):
@@ -459,6 +631,33 @@ def require_provision(request):
         raise web.HTTPForbidden(reason="missing provision capability")
     if not csrf_ok(request):
         raise web.HTTPForbidden(reason="bad or missing CSRF token")
+
+
+_AC_FRAME_STATION_APIS = ("/api/b/",)
+_AC_FRAME_REF_RE = re.compile(r"^https?://[^/]+/ac/@([A-Za-z0-9_.-]+)/")
+
+
+@web.middleware
+async def locus_vm_mw(request, handler):
+    """1.0.141: ONE spelling of the host on the wire inside the backend. A ?vm=
+    naming the host — @self, host, or this station's OWN locus name in any
+    documented spelling — reaches every handler as the historic "@keeper"
+    sentinel, so no handler needs to know the station's name. Any other value
+    (including the bare `keeper` on a station that is not vm_mgr's) is a
+    remote locus and passes through untouched."""
+    v = request.query.get("vm")
+    if v is None and request.path.startswith(_AC_FRAME_STATION_APIS):
+        # 1.0.144: a locus console framed at /ac/@<locus>/ calls the STATION's
+        # own API at the origin root (keeper-live.js stationApi: B chat, B model,
+        # models, voice) without a locus — it used to be answered by the HOST's
+        # B. The frame's Referer names its locus; ground the call there.
+        m = _AC_FRAME_REF_RE.search(request.headers.get("Referer") or "")
+        if m:
+            v = m.group(1)
+            request = request.clone(rel_url=request.rel_url.update_query(vm=v))
+    if v is not None and v.strip() and v.strip() != "@keeper" and _is_host_vm(v.strip()):
+        request = request.clone(rel_url=request.rel_url.update_query(vm="@keeper"))
+    return await handler(request)
 
 
 @web.middleware
@@ -517,7 +716,31 @@ async def auth_mw(request, handler):
 # --------------------------------------------------------------------------- #
 # station discovery
 # --------------------------------------------------------------------------- #
+# 1.0.139: tmux is a Recommends, not a Depends. Without it every tmux probe
+# (seat liveness, nudges, pane reads — many on background ticks) used to raise
+# FileNotFoundError out of create_subprocess_exec and log a traceback. A missing
+# tmux is now an ordinary failed command (rc 127 + this message): callers already
+# handle rc != 0, /api/term/backends reports it, and the UI disables the tmux seat.
+TMUX_MISSING_MSG = "tmux is not installed on this host — the terminal (tmux) seat is unavailable (install it: sudo apt install tmux)"
+_TMUX_CACHE = {"ts": 0.0, "ok": False}
+
+
+def _tmux_available():
+    """True when a `tmux` binary is on PATH. Re-probed every 30 s, so installing
+    tmux while the station runs is picked up without a restart."""
+    now = time.monotonic()
+    if not _TMUX_CACHE["ts"] or now - _TMUX_CACHE["ts"] > 30:
+        _TMUX_CACHE.update(ts=now, ok=bool(shutil.which("tmux")))
+    return _TMUX_CACHE["ok"]
+
+
+def _tmux_missing(args):
+    return bool(args) and args[0] == "tmux" and not _tmux_available()
+
+
 async def _run(*args):
+    if _tmux_missing(args):
+        return 127, "", TMUX_MISSING_MSG
     proc = await asyncio.create_subprocess_exec(
         *args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
@@ -618,6 +841,20 @@ def _lan_ip(inst):
     return ""
 
 
+def _inet_ips(inst):
+    """Every IPv4 address an LXD guest holds (not loopback / docker / veth) —
+    _central_locus() matches these against registered locus endpoints."""
+    net = (inst.get("state") or {}).get("network") or {}
+    out = []
+    for iface, info in net.items():
+        if iface == "lo" or iface.startswith(("docker", "br-", "veth")):
+            continue
+        for addr in info.get("addresses", []):
+            if addr.get("family") == "inet" and addr.get("address"):
+                out.append(addr["address"])
+    return out
+
+
 def _project(inst):
     dev = (inst.get("devices") or {}).get("project") or {}
     src = dev.get("source", "")
@@ -663,6 +900,7 @@ async def discover():
             "name": name,
             "status": inst.get("status", "Unknown"),
             "ip": _lan_ip(inst),
+            "ips": _inet_ips(inst),     # 1.0.138: every inet addr (locus endpoint match)
             "project": _project(inst) or ("(base image)" if is_base else ""),
             "base": is_base,
             "bridge": _bridge_open(name),
@@ -923,7 +1161,7 @@ async def api_keeper_directives(request):
             except Exception:
                 continue
             by_name.setdefault(r["name"], []).append(r)
-    return web.json_response({"current": cur, "directives": by_name})
+    return web.json_response({"current": cur, "directives": by_name, "scope": "this station"})
 
 
 async def _keeper_directive(*args):
@@ -1159,6 +1397,36 @@ async def api_llm_models(request):
     return web.json_response({"models": models})
 
 
+async def api_voice_transcribe(request):
+    """Same-origin Whisper proxy for the Station /ac voice control.
+
+    The browser posts the MediaRecorder multipart body here; the station
+    forwards it to the local Hugpy gateway with the station's server-side
+    credential, so no fleet token is exposed to the page.
+    """
+    body = await request.read()
+    if not body or len(body) > 25 * 1024 * 1024:
+        return web.json_response({"error": "audio is empty or exceeds 25 MB"}, status=413)
+    ctype = request.headers.get("Content-Type", "")
+    if not ctype.startswith("multipart/form-data;"):
+        return web.json_response({"error": "expected multipart audio upload"}, status=415)
+    base = (os.environ.get("HUGPY_URL") or _LOCAL_HUGPY_FRONT).rstrip("/")
+    token = (os.environ.get("HUGPY_API_KEY") or
+             os.environ.get("HUGPY_OPERATOR_TOKEN") or "").strip()
+    headers = {"Content-Type": ctype}
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=180)) as s:
+            async with s.post(base + "/api/ml/transcribe", data=body, headers=headers) as r:
+                payload = await r.read()
+                out_type = r.headers.get("Content-Type", "application/json")
+                return web.Response(status=r.status, body=payload,
+                                    headers={"Content-Type": out_type})
+    except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+        return web.json_response({"error": "transcription gateway unavailable: " + str(e)}, status=502)
+
+
 # Taught to the model when the chat's Design drawer is in play (body.design).
 # The fenced ```wireframe blocks it describes are rendered by the UI as live
 # layout thumbnails and round-trip into the drawer's editor (wireframe.js);
@@ -1258,7 +1526,15 @@ def _parse_action(text):
     return None
 
 
-async def _exec_in_station(name, command):
+async def _exec_in_station(name, command, parent_event_id=None):
+    started = time.time()
+    try:
+        from provenance import record
+        tool_event = record("tool_call", {"command": command, "station": name},
+                            source="station-agent", actor="agent", session_id=name,
+                            operation="execute", parent_id=parent_event_id)
+    except Exception:
+        tool_event = None
     rc, out, err = await _lxc(name, "bash", "-lc", command)
     output = (out or "")
     if err and err.strip():
@@ -1266,7 +1542,21 @@ async def _exec_in_station(name, command):
     output = output.strip()
     if len(output) > AGENT_OBS_LIMIT:
         output = output[:AGENT_OBS_LIMIT] + f"\n…[truncated, {len(output)} chars total]"
-    return rc, output or "(no output)"
+    result = output or "(no output)"
+    try:
+        from provenance import record
+        record("tool_result", {"command": command, "station": name, "rc": rc,
+                                "duration_ms": round((time.time() - started) * 1000),
+                                "output": result}, source="station-agent", actor="runtime",
+               session_id=name, operation="execute-result", parent_id=tool_event)
+        # Link the returned result to the exact call that produced it.
+        if tool_event:
+            record("tool_result_link", {"tool_event": tool_event, "rc": rc},
+                   source="station-agent", actor="runtime", session_id=name,
+                   operation="returns", parent_id=tool_event)
+    except Exception:
+        pass
+    return rc, result, tool_event
 
 
 async def _sse(resp, obj):
@@ -1276,6 +1566,13 @@ async def _sse(resp, obj):
 async def _agent_stream_step(session, url, payload, headers, resp):
     """One model turn: stream tokens to the browser, return the full text."""
     text = ""
+    try:
+        from provenance import record
+        record("agent_output", {"request": payload, "phase": "start"},
+               source="station-agent", actor="model",
+               session_id=str(payload.get("model") or "unknown"), operation="model-request")
+    except Exception:
+        pass
     async with session.post(url, json=payload, headers=headers) as up:
         if up.status != 200:
             await _sse(resp, {"type": "error", "message": (await up.text())[:500]})
@@ -1299,7 +1596,14 @@ async def _agent_stream_step(session, url, payload, headers, resp):
                 if piece:
                     text += piece
                     await _sse(resp, {"type": "token", "text": piece})
-    return text
+    try:
+        from provenance import record
+        output_event = record("agent_output", {"phase": "complete", "text": text},
+               source="station-agent", actor="model",
+               session_id=str(payload.get("model") or "unknown"), operation="model-output")
+    except Exception:
+        pass
+    return text, output_event if 'output_event' in locals() else None
 
 
 async def api_llm_agent(request):
@@ -1328,16 +1632,23 @@ async def api_llm_agent(request):
             stopped = True
             for _ in range(AGENT_MAX_STEPS):
                 payload = {"model": model, "messages": convo, "max_tokens": max_tokens, "stream": True}
-                text = await _agent_stream_step(s, url, payload, headers, resp)
+                text, output_event = await _agent_stream_step(s, url, payload, headers, resp)
                 convo.append({"role": "assistant", "content": text})
                 action = _parse_action(text)
                 if not action:
                     stopped = False
                     break
                 await _sse(resp, {"type": "action", "command": action})
-                rc, output = await _exec_in_station(station, action)
+                rc, output, tool_event = await _exec_in_station(station, action, output_event)
                 await _sse(resp, {"type": "observation", "rc": rc, "output": output})
                 convo.append({"role": "user", "content": f"Observation (exit {rc}):\n{output}"})
+                try:
+                    from provenance import record
+                    record("observation", {"rc": rc, "output": output},
+                           source="station-agent", actor="runtime", session_id=station,
+                           operation="feeds-model", parent_id=tool_event)
+                except Exception:
+                    pass
             if stopped:
                 await _sse(resp, {"type": "error", "message": f"stopped after {AGENT_MAX_STEPS} action steps"})
         await _sse(resp, {"type": "done"})
@@ -1546,11 +1857,17 @@ A_SETTINGS_TEMPLATE_PATH = (Path(os.environ["A_SETTINGS_TEMPLATE"])
 A_SETTINGS_SHIPPED = ROOT / "a-settings-template.json"
 
 
-def _a_template_doc():
+def _a_template_doc(cfg=None):
     """(doc, source, path) — the user template, else the shipped file, else
-    the built-in defaults."""
+    the built-in defaults. cfg (1.0.141): the target locus's own template."""
+    if cfg is not None:
+        d = _cfg_json(cfg, "a_template")
+        if isinstance(d, dict) and d:
+            return d, "user", Path(str(cfg.get("state") or "")) / "a-settings-template.json"
     for path, src in ((A_SETTINGS_TEMPLATE_PATH, "user"),
                       (A_SETTINGS_SHIPPED, "shipped")):
+        if cfg is not None and src == "user":
+            continue
         try:
             doc = json.loads(path.read_text())
             if isinstance(doc, dict) and doc:
@@ -1565,20 +1882,105 @@ def _a_settings_json() -> str:
     return json.dumps(_a_template_doc()[0], separators=(",", ":"))
 
 
+# ── 1.0.146 (t4260 / d4254): every station hold, skip, coalesce and inert code
+# default is RECORDED here and shown on the ⚠ strip (GET /api/loops → holds).
+try:
+    import station_holds as _sh
+except ImportError:                                  # pragma: no cover — packaging error
+    _sh = None
+_HOLDS = None
+
+
+def _holds():
+    global _HOLDS
+    if _HOLDS is None and _sh is not None:
+        _HOLDS = _sh.Holds(state_path=str(FV_STATE_HOME / "station-holds.json"))
+    return _HOLDS
+
+
+def _hold_note(key, source, identity, detail="", action="", **kw):
+    h = _holds()
+    if h is None:
+        return None
+    try:
+        return h.note(key, source, identity, detail, action, **kw)
+    except Exception:                                # noqa: BLE001 — a strip row never breaks a loop
+        return None
+
+
+def _hold_clear(key):
+    h = _holds()
+    if h is None:
+        return None
+    try:
+        return h.clear(key)
+    except Exception:                                # noqa: BLE001
+        return None
+
+
+def _hold_rows():
+    h = _holds()
+    try:
+        return h.rows() if h is not None else []
+    except Exception:                                # noqa: BLE001
+        return []
+
+
+def _toggle_owner(request):
+    """Who flipped an operator toggle (session user / token / ip)."""
+    try:
+        claims = session_claims(request) or {}
+        return str(claims.get("u") or ("token" if request.headers.get("X-Console-Token") else client_ip(request)))[:40]
+    except Exception:                                # noqa: BLE001
+        return "operator"
+
+
+def _toggle_expires(body, now=None):
+    """`expires` (epoch) or `expires_s` (seconds from now) of a toggle body — 0 = none."""
+    now = time.time() if now is None else now
+    try:
+        if body.get("expires"):
+            return int(float(body["expires"]))
+        if body.get("expires_s"):
+            return int(now + float(body["expires_s"]))
+    except (TypeError, ValueError):
+        pass
+    return 0
+
+
+def _toggle_expired(doc, now=None):
+    exp = int((doc or {}).get("expires") or 0)
+    return bool(exp) and (time.time() if now is None else now) >= exp
+
+
+def _frontier_doc(now=None) -> dict:
+    """frontier-keeper.json as {enabled, by, at, expires, expired}. 1.0.146:
+    every write carries by/at/expires; a DISABLE past its expiry reads as
+    enabled again (an interruption is owned, visible and expiring — d4254)."""
+    try:
+        doc = json.loads((FV_STATE_HOME / "frontier-keeper.json").read_text())
+    except (OSError, ValueError):
+        doc = {}
+    if not isinstance(doc, dict):
+        doc = {}
+    out = {"enabled": bool(doc.get("enabled", True)), "by": str(doc.get("by") or ""),
+           "at": int(doc.get("at") or 0), "expires": int(doc.get("expires") or 0), "expired": False}
+    if not out["enabled"] and _toggle_expired(out, now):
+        out["enabled"], out["expired"] = True, True
+    return out
+
+
 def _frontier_enabled() -> bool:
     """The Frontier Keeper: Enabled/Disabled toggle (default enabled). Gates
     only A-surface launches; Local Keeper and Shell are never gated."""
-    try:
-        doc = json.loads((FV_STATE_HOME / "frontier-keeper.json").read_text())
-        return bool(doc.get("enabled", True))
-    except (OSError, ValueError):
-        return True
+    return _frontier_doc()["enabled"]
 
 
 async def term_frontier(request):
     """GET/POST /api/term/frontier — flip or read the Frontier Keeper toggle.
     Disabling does not stop a running frontier session (keeper-gate semantics);
-    it only prevents starting a new one."""
+    it only prevents starting a new one. POST {"enabled": bool, "expires_s"?:
+    N | "expires"?: epoch} — the file records by / at / expires (1.0.146)."""
     if request.method == "POST":
         try:
             body = await request.json()
@@ -1586,11 +1988,23 @@ async def term_frontier(request):
         except Exception:
             return web.json_response(
                 {"error": 'body must be {"enabled": <bool>}'}, status=400)
+        now = int(time.time())
+        doc = {"enabled": enabled, "by": _toggle_owner(request), "at": now,
+               "expires": 0 if enabled else _toggle_expires(body, now)}
         FV_STATE_HOME.mkdir(parents=True, exist_ok=True)
-        (FV_STATE_HOME / "frontier-keeper.json").write_text(
-            json.dumps({"enabled": enabled}) + "\n")
-        return web.json_response({"ok": True, "enabled": enabled})
-    return web.json_response({"enabled": _frontier_enabled()})
+        (FV_STATE_HOME / "frontier-keeper.json").write_text(json.dumps(doc) + "\n")
+        if enabled:
+            _hold_clear("switch:frontier-keeper")
+        else:
+            _hold_note("switch:frontier-keeper", _sh.SOURCE_SWITCH if _sh else "station:switch",
+                       "frontier keeper DISABLED by %s" % doc["by"],
+                       "A-surface launches are gated%s" % (
+                           " until " + time.strftime("%H:%M", time.localtime(doc["expires"])) if doc["expires"]
+                           else " — NO expiry set"),
+                       "POST /api/term/frontier {\"enabled\": true}", by=doc["by"], expires=doc["expires"])
+        audit(request, "frontier-toggle", "enabled=%s by %s expires=%s" % (enabled, doc["by"], doc["expires"] or "-"))
+        return web.json_response(dict(doc, ok=True))
+    return web.json_response(_frontier_doc())
 
 
 def _b_enabled() -> bool:
@@ -1637,14 +2051,22 @@ async def term_unstick(request):
     matters here: this always targets the real keeper-claude session by
     name, the same way _ping_station_keeper / the /model live-apply path
     already do."""
+    # 1.0.141: ?vm= (or body.vm) = the SELECTED locus's seat, through the same
+    # locus target every seat action uses ('' / @keeper = this host).
+    try:
+        _b = await request.json() if request.can_read_body else {}
+    except Exception:
+        _b = {}
+    vm = (request.query.get("vm") or str((_b or {}).get("vm") or "")).strip()
+    vm = "" if _is_host_vm(vm) else vm
     sess = _tmux_session_for("frontier", "claude-code") or "keeper-claude"
-    if not await _tmux_has(sess):
-        audit(request, "term-unstick", sess + " (no live seat)", ok=False)
+    rc, _o, _e = await _tmux_on(vm, "has-session", "-t", "=" + sess)
+    if rc != 0:
+        audit(request, "term-unstick", sess + f"@{vm or 'host'} (no live seat)", ok=False)
         return web.json_response(
-            {"ok": False, "error": "no live keeper-claude seat", "session": sess},
+            {"ok": False, "error": "no live keeper-claude seat", "session": sess, "vm": vm or "@keeper"},
             status=409)
-    rc, _o, err = await _run(
-        "tmux", "-L", KEEPER_TMUX_SOCK, "send-keys", "-t", "=" + sess + ":", "C-_")
+    rc, _o, err = await _tmux_on(vm, "send-keys", "-t", "=" + sess + ":", "C-_")
     audit(request, "term-unstick", sess, ok=(rc == 0))
     if rc != 0:
         return web.json_response(
@@ -1690,8 +2112,12 @@ async def term_paste(request):
              "len": len(text)}, status=413)
     sess = (body.get("session") or "").strip() \
         or _tmux_session_for("frontier", "claude-code") or "keeper-claude"
-    if not await _tmux_has(sess):
-        audit(request, "term-paste", sess + " (no live seat)", ok=False)
+    # 1.0.141: the SELECTED locus's pane (body.vm / ?vm=), same locus target.
+    vm = (str(body.get("vm") or "") or request.query.get("vm") or "").strip()
+    vm = "" if (_is_host_vm(vm) or body.get("session")) else vm   # a pulled seat is host-side
+    rc0, _o0, _e0 = await _tmux_on(vm, "has-session", "-t", "=" + sess)
+    if rc0 != 0:
+        audit(request, "term-paste", sess + f"@{vm or 'host'} (no live seat)", ok=False)
         return web.json_response(
             {"ok": False, "error": "no live seat", "session": sess}, status=409)
     chunks = [text[i:i + TERM_PASTE_CHUNK]
@@ -1699,8 +2125,7 @@ async def term_paste(request):
     bracketed = "\n" in text
     parts = (["\x1b[200~"] + chunks + ["\x1b[201~"]) if bracketed else chunks
     for part in parts:                       # sequential: order is the paste
-        rc, _o, err = await _run("tmux", "-L", KEEPER_TMUX_SOCK, "send-keys",
-                                 "-t", "=" + sess + ":", "-l", "--", part)
+        rc, _o, err = await _tmux_on(vm, "send-keys", "-t", "=" + sess + ":", "-l", "--", part)
         if rc != 0:
             audit(request, "term-paste",
                   "%s (%d chars, send-keys rc=%d)" % (sess, len(text), rc), ok=False)
@@ -2197,6 +2622,25 @@ async def a_usage(request):
     mct, and when no mct2 session exists the deprecated broker's
     `hugpy-agent mct-usage` still answers. With an active VM the readout comes
     from THAT VM's workbench (grounding rule)."""
+    vm, key = _locus_scope(request)
+    if vm:
+        # 1.0.141: another locus's usage comes from the CENTRAL exchanges table
+        # keyed by that locus (its seats' Stop hook / serve record every turn) —
+        # never from this host's transcripts.
+        try:
+            rep = await _ts_call(request.app, "exchange/usage_report", {"locus": key, "last": 20}, timeout=15)
+        except Exception as e:                           # noqa: BLE001
+            return web.json_response({"ok": False, "locus": key, "remote": True,
+                                      "error": f"usage for {key} unavailable (toolserver exchanges): {str(e)[:200]}"},
+                                     status=502)
+        tot = (rep or {}).get("totals") or {}
+        return web.json_response({
+            "ok": True, "locus": key, "remote": True, "backend": request.query.get("backend") or "mct",
+            "source": f"toolserver exchanges (locus={key})", "sessions": [],
+            "turns": tot.get("runs") or 0, "input": tot.get("input_tokens") or 0,
+            "cache_write": tot.get("cache_creation_tokens") or 0, "cache_read": tot.get("cache_read_tokens") or 0,
+            "output": tot.get("output_tokens") or 0, "cost_usd": tot.get("total_cost_usd") or 0.0,
+            "by_source": (rep or {}).get("by_source") or [], "recent": (rep or {}).get("recent") or []})
     resp = await _sidecar_proxy(request)
     if resp is not None:
         return resp
@@ -2286,7 +2730,10 @@ def _bg_user_path(ws=None):
 def _strip_directive(text):
     """Remove every copy of the frontier directive (and the composition
     headers it travels with) from operator guidance text, so the directive is
-    composed into a seat's governing instruction EXACTLY once."""
+    composed into a seat's governing instruction EXACTLY once.
+    1.0.143: every generated directive block (BEGIN/END-fenced by
+    directives.py), composer header and switch section goes mechanically
+    (DV.strip_generated); the operator's tmux overlay / legacy file text too."""
     t = text or ""
     try:
         d = _frontier_directive_text()[0].strip()
@@ -2294,50 +2741,70 @@ def _strip_directive(text):
         d = ""
     if d and d in t:
         t = t.replace(d, "")
-    # headers that only the composer emits; a user file never legitimately has them
-    for hdr in ("# Operator guidance\n", "# Session init prompt (handoff — this launch only)\n",
-                "# Session init prompt (handoff)\n"):
-        t = t.replace(hdr, "")
-    for marker in (_DELEGATE_ONLY_TEXT, _DELEGATE_OFF_TEXT):
-        try:
-            if marker and marker.strip() and marker.strip() in t:
-                t = t.replace(marker.strip(), "")
-        except NameError:
-            pass
-    return re.sub(r"\n{3,}", "\n\n", t).strip() + ("\n" if t.strip() else "")
+    return DV.strip_generated(t)
 
 
-def _frontier_handoff_pending():
-    """1.0.65: the per-session init prompt (frontier-handoff.md) — text or ''."""
+def _cfg_text(cfg, key):
+    """1.0.141: a seat-config snapshot's file text (locus_exec.read_cfg shape:
+    {"state", "files": {key: text|None}}); None = the file is absent there."""
+    return ((cfg or {}).get("files") or {}).get(key)
+
+
+def _cfg_json(cfg, key):
+    t = _cfg_text(cfg, key)
     try:
-        return FRONTIER_HANDOFF_PATH.read_text(encoding="utf-8").strip()
-    except OSError:
+        return json.loads(t) if t else None
+    except ValueError:
+        return None
+
+
+# ── 1.0.146: the seat handoff lives in the TOOLSERVER (operator 2026-10-01:
+# "the toolserver should house the handoffs … /resume should allow for its
+# pull"). <state>/frontier-handoff.md is retired: no file an operator or agent
+# has to place, no station-side consumption. The launch directive carries only
+# the one-paragraph POINTER the toolserver renders (handoff/station → layer);
+# the body is injected ONCE by the seat's SessionStart hook (ledger_hook.py →
+# handoff/pull, which marks the row consumed by that session id). The steward
+# tab reads/writes the same row (api_frontier_handoff → handoff/station,
+# handoff/request).
+_HANDOFF_LAYER = {}          # locus -> the toolserver's launch layer ('' = none open / unreachable)
+
+
+async def _handoff_layer_refresh(app, locus):
+    """Fetch the launch layer for `locus` from the toolserver (handoff/station)
+    right before a seat launch. Unreachable toolserver → an explicit layer that
+    says so (the seat must then pull by hand), never a silent blank."""
+    locus = _canon_locus(locus or "") or _station_locus()
+    if not locus:
+        _HANDOFF_LAYER[locus] = ""
         return ""
-
-
-def _frontier_handoff_consume(reason=""):
-    """The init prompt is handed off exactly once: delete the file after the
-    launch that carried it (operator 2026-09-02: once handed off it must no
-    longer be populated)."""
     try:
-        if FRONTIER_HANDOFF_PATH.exists():
-            FRONTIER_HANDOFF_PATH.unlink()
-            return True
-    except OSError:
-        pass
-    return False
+        doc = await _ts_call(app, "handoff/station", {"locus": locus}, timeout=10)
+        layer = str((doc or {}).get("layer") or "")
+    except Exception as e:                                   # noqa: BLE001
+        layer = (f"The toolserver could not be asked for an open handoff on locus {locus} "
+                 f"({str(e)[:120]}). Before working, run handoff_pull locus={locus} yourself — "
+                 "a handoff may be waiting.")
+    _HANDOFF_LAYER[locus] = layer
+    return layer
+
+
+def _frontier_handoff_pending(cfg=None):
+    """The launch layer last fetched for the locus (text or '')."""
+    loc = str((cfg or {}).get("locus") or "") or _station_locus()
+    return _HANDOFF_LAYER.get(_canon_locus(loc) or loc, "")
 
 
 def _compose_guidance(user_text):
     """What B injects as the governing_instruction: the frontier directive,
     then the operator's guidance, then (this launch only) the session init
-    prompt. The steward tab shows exactly this."""
-    d = _frontier_directive_text()[0].rstrip()
-    u = _strip_directive(user_text).strip()      # the directive is composed ONCE, here
-    h = _frontier_handoff_pending()
-    return (d + ("\n\n# Operator guidance\n" + u if u else "")
-            + "\n\n" + _delegate_section("mct")
-            + ("\n\n# Session init prompt (handoff — this launch only)\n" + h if h else "") + "\n")
+    prompt. The steward tab shows exactly this.
+    1.0.143: the mct seat is a TMUX seat — it gets the generated tmux
+    directive (fallback / inference arm, never "the keeper") + the operator
+    guidance + the tmux overlay + its delegation switch + the handoff."""
+    snap = _dirv_snapshot()
+    snap["files"]["guidance"] = _strip_directive(user_text)   # the directive is composed ONCE, here
+    return DV.compose("tmux", snap, fx=_dirv_facts(), backend="mct", with_handoff=True)
 
 
 def _render_guidance(ws=None):
@@ -2356,7 +2823,7 @@ def _render_guidance(ws=None):
 
 
 async def _push_guidance_to_ssh(name, session):
-    d = _frontier_directive_text()[0]
+    d = _push_directive(name)
     ws = f"$HOME/.mct/{session}"
     script = (f'mkdir -p "$HOME/.config/hugpy-station" {ws}; '
               f'cat > "$HOME/.config/hugpy-station/frontier-directive.md" <<\'__HSDIR__\'\n{d}\n__HSDIR__\n'
@@ -2382,7 +2849,7 @@ async def _push_mct_to_locus(vm):
     # station composes its own from its own directive.
     if vm in _TS_LOCI.get("hosts", {}):
         return True
-    d = _frontier_directive_text()[0]
+    d = _push_directive(vm)
     ws = "$HOME/.config/hugpy-station/mct2/repl"
     script = ('command -v abstract-claude >/dev/null 2>&1 || '
               'pip install --user -q -U abstract-claude >/dev/null 2>&1 || '
@@ -2412,7 +2879,7 @@ async def _push_guidance_to_vm(vm, session):
     ~/.config/hugpy-station/frontier-directive.md of the dev user), then
     compose the session's file from that + whatever user guidance the VM
     already holds. Best effort; the seat still launches if this fails."""
-    d = _frontier_directive_text()[0]
+    d = _push_directive(vm)
     ws = f"{VM_MCT_ROOT}/{session}"
     script = (f'mkdir -p "$HOME/.config/hugpy-station" {shlex.quote(ws)}; '
               f'cat > "$HOME/.config/hugpy-station/frontier-directive.md"; '
@@ -2471,7 +2938,8 @@ async def b_guidance_post(request):
                 up.unlink()
             did = "guidance cleared"
         _render_guidance()
-        did += " — composed with the frontier directive into operator-guidance.md"
+        _render_session_directives()        # 1.0.143: the keeper serve session's directive carries it
+        did += " — composed with the tmux directive into operator-guidance.md and into the keeper session's directive"
     except OSError as e:
         return web.json_response({"error": str(e)}, status=500)
     return web.json_response({"ok": True, "did": did, "path": str(up), "composed_path": str(_bg_path())})
@@ -2491,6 +2959,18 @@ _B_SYSMSG = (
     "derived memory. Answer the operator directly, concisely, in first person as "
     "B. Ground every claim in the state below; when the state does not contain "
     "the answer, say so plainly.\n\n=== your current state ===\n")
+
+
+def _b_local_brief():
+    """1.0.143: B's directive + init brief (session kind `local`) for this
+    locus — the rendered file when present, else composed now. '' on error."""
+    try:
+        p = FV_STATE_HOME / DV.RENDERED_DIR / "local.md"
+        if p.exists():
+            return p.read_text(encoding="utf-8").strip()
+        return _session_directive("local").strip()
+    except Exception:                                    # noqa: BLE001
+        return ""
 
 
 def _console_b_server():
@@ -2562,12 +3042,14 @@ async def _sidecar_vm(request):
     when it names a real station OR an ssh host (both run their own workbench
     console — install-vm-console / install-ssh-console), else the static
     model-VM pin. '' = host-native."""
-    if request.path.startswith("/api/vm/keeper/"):
-        return ""              # the host keeper's own board/aliases stay host
+    m = re.match(r"^/api/vm/([^/]+)/", request.path)
+    if m and _is_host_vm(m.group(1)):
+        return ""              # the host's own board/aliases (@self/@keeper/own locus name)
     vm = (request.query.get("vm") or "").strip()
-    if vm in ("@keeper", "host"):
+    if _is_host_vm(vm):
         return ""
     if vm:
+        await _loci_ready()        # 1.0.138: callers map vm -> its central key next
         if _ssh_host(vm):
             return vm
         try:
@@ -2600,13 +3082,177 @@ def _local_ips_cached():
     return _LOCAL_IPS_CACHE["ips"]
 
 
-def _central_locus(vm):
-    """The toolserver locus whose central board serves `vm` — '' when the
-    locus is host-native, an LXD station, or a remote ssh host that has its
-    own workbench (vmconsole token present)."""
-    if not vm or vm in ("keeper", "@keeper", "host"):
+# ── 1.0.138: ONE station, every other locus is a central-DB key ──────────────
+# Operator 2026-09-30: "this station is to be locus specific. the top left
+# dropdown switches locus' … have all features pointed to that host. so really it
+# just needs to repoint the db endpoint to that locus' table/row" — and no
+# hugpy-station install / sidecar / workbench may be REQUIRED on any locus but the
+# one host the browser uses. So a dropdown pick is just a different `locus` key on
+# the central (toolserver) tables (todos, canvas, prompts, comms pings, seat_state,
+# assessments); only the live terminal still needs the machine itself.
+# 1.0.141: "keeper" is vm_mgr's REGISTERED locus key, never a synonym for "this
+# station". The host is addressed by reserved tokens that can never be a locus
+# key ('' / @self / @keeper / host) or by this station's OWN locus name
+# (STATION_LOCUS / the registry) — so on any other station a dropdown entry
+# named `keeper` is vm_mgr's locus, not the viewer's own board.
+_HOST_VMS = ("", "@self", "@keeper", "host")
+HOST_TOKEN = "@self"
+# Documented legacy spellings of a registered locus (docs/STATION-FEATURES-PER-
+# LOCUS.md: "ae-vm-mgr remains only as a loci alias row" of keeper).
+_LEGACY_LOCUS_ALIASES = {"ae-vm-mgr": "keeper", "ae_vm_mgr": "keeper"}
+LOCUS_ALIASES_PATH = FV_STATE_HOME / "locus-aliases.json"
+
+
+def _canon_locus(name):
+    """A locus name with its documented legacy alias folded (ae-vm-mgr -> keeper)."""
+    n = (name or "").strip().lower()
+    return _LEGACY_LOCUS_ALIASES.get(n, n)
+
+
+def _is_host_vm(vm):
+    """The host seat: a reserved token, or this station's own locus name (in
+    any documented spelling). Never the bare word `keeper` unless `keeper` IS
+    this station's locus."""
+    v = (vm or "").strip()
+    if v in _HOST_VMS:
+        return True
+    own = _station_locus()
+    return bool(own) and _canon_locus(v) == own
+
+
+def _locus_aliases():
+    """Optional operator map {dropdown name: central locus key} in
+    $FV_STATE_HOME/locus-aliases.json — for a locus whose rows were filed under
+    another name (e.g. {"solcatcher": "ae-solcatcher"}). Absent file = {}."""
+    doc = _read_json(LOCUS_ALIASES_PATH, {}) or {}
+    if not isinstance(doc, dict):
+        return {}
+    out = {}
+    for k, v in doc.items():
+        v = str(v or "").strip().lower()
+        if isinstance(k, str) and _SSH_NAME_RE.match(v):
+            out[k.strip()] = v
+    return out
+
+
+def _lxd_ips(name):
+    """The guest's IPv4s from the discover() cache (no lxc call here)."""
+    for st in (_DISCOVER_CACHE.get("stations") or []):
+        if st.get("name") == name:
+            return list(st.get("ips") or ([st["ip"]] if st.get("ip") else []))
+    return []
+
+
+def _endpoint(h):
+    try:
+        port = int(h.get("port") or 22)
+    except (TypeError, ValueError):
+        port = 22
+    return (str(h.get("user") or "root"), str(h.get("host") or ""), port)
+
+
+def _endpoints_of(vm):
+    """{(user, host, port)} a dropdown locus is reached at: its ssh pointer, or
+    ubuntu@<each guest ip> for an LXD guest (the guest's dev/seat user)."""
+    h = _ssh_host(vm)
+    if h:
+        return {_endpoint(h)}
+    return {("ubuntu", ip, 22) for ip in _lxd_ips(vm)}
+
+
+def _self_locus_names():
+    """This station's own locus name plus every legacy spelling of it."""
+    own = _station_locus()
+    if not own:
+        return set()
+    return {own} | {a for a, k in _LEGACY_LOCUS_ALIASES.items() if k == own}
+
+
+def _pick_endpoint_locus(names, registered=None):
+    """ONE locus for an endpoint that several registered rows share (keeper and
+    ae-mgr are both vm_mgr@192.168.1.100:22). Deterministic: a kind=station row
+    beats any other kind; a row the station itself auto-registered when an ssh
+    host was added ("ssh host added on ...") loses to a deliberately registered
+    one; a legacy-alias target beats a plain name. A TIE between the best two
+    is never broken by guessing (no lexical pick): '' then, so the caller keeps
+    the bare name (an empty slice beats someone else's board)."""
+    registered = registered if registered is not None else (_TS_LOCI.get("hosts") or {})
+    names = sorted(set(n for n in names if n))
+    if len(names) <= 1:
+        return names[0] if names else ""
+    alias_targets = set(_LEGACY_LOCUS_ALIASES.values())
+
+    def rank(n):
+        h = registered.get(n) or {}
+        kind = str(h.get("kind") or "")
+        auto = str(h.get("goal") or "").startswith("ssh host added on ")
+        return (kind != "station", auto, n not in alias_targets)
+    ranked = sorted(names, key=rank)
+    if rank(ranked[0]) == rank(ranked[1]):
         return ""
-    return vm if _ssh_host(vm) else ""
+    return ranked[0]
+
+
+def _central_locus(vm):
+    """The central (toolserver DB) locus key whose rows serve dropdown locus `vm`
+    — for EVERY locus kind, so switching the dropdown is only a different key:
+      * the host seat ('' / keeper / @keeper / host / this station's own locus
+        name, or any pointer at this very user@host) -> _keeper_locus();
+      * an operator alias (locus-aliases.json) wins next;
+      * a locus REGISTERED in the toolserver (loci/pointers) is its own key;
+      * an unregistered ssh host / LXD guest whose endpoint is exactly ONE
+        registered locus's endpoint resolves to that locus (one machine, one
+        locus: hs-fresh -> hs-fresh-ubuntu, a-brain -> a-brain-coder-next);
+      * anything else is its own name.
+    '' only for a string that cannot be a locus key."""
+    v = (vm or "").strip()
+    if v in _HOST_VMS:
+        return _keeper_locus()            # '' when this station has no locus yet
+    if not _SSH_NAME_RE.match(v):
+        return ""
+    alias = _locus_aliases().get(v)
+    if alias:
+        return alias
+    if v in _self_locus_names():
+        return _keeper_locus()
+    registered = _TS_LOCI.get("hosts") or {}
+    if v in registered:
+        return v
+    if v in _LEGACY_LOCUS_ALIASES:        # 1.0.141: documented legacy spelling
+        return _LEGACY_LOCUS_ALIASES[v]
+    eps = _endpoints_of(v)
+    if eps:
+        me, ips = getpass.getuser(), _local_ips_cached()
+        if _keeper_locus() and any(u == me and host in ips and port == 22 for u, host, port in eps):
+            return _keeper_locus()            # a pointer at THIS station's own user@host
+        hits = [n for n, h in registered.items()
+                if isinstance(h, dict) and _endpoint(h) in eps]
+        if hits:                          # 1.0.141: several rows on one endpoint -> one, deterministically
+            return _pick_endpoint_locus(hits, registered) or v
+    return v
+
+
+async def _loci_ready(timeout=10.0):
+    """Wait (bounded) for the first loci/pointers sync ATTEMPT after startup:
+    until it lands, registered loci are unknown and an endpoint alias (hs-fresh
+    -> hs-fresh-ubuntu) would resolve to the bare name — a write in the first
+    seconds after a restart must not land on the wrong key."""
+    end = time.monotonic() + timeout
+    while not _TS_LOCI.get("synced") and time.monotonic() < end:
+        await asyncio.sleep(0.2)
+
+
+async def _known_locus_key(name):
+    """_central_locus(name) when `name` is a locus this station knows (host
+    alias, ssh host, LXD guest, registered locus); '' for an unknown name — a
+    typo in a URL must never read or write some other locus's rows."""
+    if _is_host_vm(name):
+        return _keeper_locus()
+    await _loci_ready()
+    if (_ssh_host(name) or name in (_TS_LOCI.get("hosts") or {})
+            or name in _self_locus_names() or name in await _known_names_safe()):
+        return _central_locus(name)
+    return ""
 
 
 def _central_todo_path(locus):
@@ -2668,7 +3314,7 @@ def _central_item(r):
     it = {"id": str(r.get("id") or ""),
           "type": r.get("type") if r.get("type") in TODO_TYPES else "todo",
           "text": str(r.get("text"))[:500],
-          "note": human[:2000],
+          "note": human,      # never truncated (operator 2026-09-14; BOARD-ITEM-FORMAT.md)
           "status": r.get("status") if r.get("status") in TODO_STATUS else "open",
           "by": str(r.get("by") or "")[:24],
           "ts": int(r.get("updated") or r.get("created") or 0)}
@@ -2682,10 +3328,62 @@ def _central_item(r):
     return it
 
 
+# 1.0.138: a locus's WHOLE central slice (hs-fresh-ubuntu holds 700+ rows; the
+# old 500 cap hid the oldest and made comments on them 404 "no such item").
+CENTRAL_TODO_LIMIT = 5000
+
+
 async def _central_todo_state(app, locus):
-    rows = await _ts_call(app, "todo/list", {"locus": locus, "limit": 500}, timeout=15)
+    rows = await _ts_call(app, "todo/list", {"locus": locus, "limit": CENTRAL_TODO_LIMIT}, timeout=15)
     items = [i for i in (_central_item(r) for r in reversed(rows or [])) if i]
+    await _operator_scripts_attach(app, locus, rows or [], items)
+    _operator_scripts_sync(locus, items, "central:" + locus)
     return {"schema": "todo.v1", "items": items, "locus": locus, "central": True}
+
+
+async def _operator_scripts_attach(app, locus, rows, items):
+    """1.0.144: a script run leaves <ts>.json + <ts>.log under
+    <state>/operator-scripts/results/<id>/. Each NEW sidecar is attached to its
+    item exactly once: a RESULT comment on the central note (the RAW note, so
+    sections and earlier comments survive), then the registry mark — a failed
+    post is retried at the next read, a posted one never repeats. The item is
+    never closed here; `annotate` (in the sync) adds `result` + `flag`."""
+    try:
+        if not locus or locus != _keeper_locus():
+            return
+        pend = OPS.pending_results(FV_STATE_HOME, items)
+    except Exception as e:                                   # noqa: BLE001
+        logging.getLogger("station.board").warning("operator-scripts results scan skipped: %s", e)
+        return
+    raw = {str(r.get("id") or ""): str(r.get("note") or "") for r in rows if isinstance(r, dict)}
+    for p in pend:
+        note = raw.get(p["id"])
+        if note is None:
+            continue
+        try:
+            await _ts_call(app, "todo/update", {"id": p["id"], "note": note.rstrip("\n") + "\n" + p["comment"]}, timeout=15)
+            raw[p["id"]] = note.rstrip("\n") + "\n" + p["comment"]
+            OPS.mark_attached(FV_STATE_HOME, p["sidecar"], p["id"])
+            for it in items:                                 # the response shows the comment at once
+                if it.get("id") == p["id"]:
+                    it["note"] = _split_note_comments(raw[p["id"]])[0]
+        except Exception as e:                               # noqa: BLE001
+            logging.getLogger("station.board").warning("operator-scripts result %s not attached: %s", p["sidecar"], e)
+
+
+def _operator_scripts_sync(locus, items, source):
+    """1.0.144: THIS locus's operator items' RUN / ROLLBACK RUN blocks live as
+    files under <state>/operator-scripts/ (operator 2026-10-01: a pre-made
+    script, one command from ~ on the host). Every board read reconciles the
+    dir and annotates the items with `one_liner` / `rollback_one_liner` for the
+    renderer; the stored text is never rewritten. Other loci's slices are only
+    read here, so they get no files. Fail open: a disk error never blocks a read."""
+    try:
+        if locus and locus == _keeper_locus():
+            OPS.sync(FV_STATE_HOME, items, source)
+            OPS.annotate(FV_STATE_HOME, items)
+    except Exception as e:                                   # noqa: BLE001
+        logging.getLogger("station.board").warning("operator-scripts sync skipped: %s", e)
 
 
 async def _central_todo_get(request, locus):
@@ -2720,7 +3418,7 @@ async def _central_todo_post(request, locus):
             await _ts_call(app, "todo/add", {
                 "text": text[:500], "type": item.get("type") or "todo",
                 "priority": pr if pr in MCT_TODO_PRIOS else None,
-                "note": str(item.get("note") or "")[:2000],
+                "note": str(item.get("note") or ""),
                 "by": str(item.get("by") or "operator")[:24],
                 "source": "station:" + _station_id(), "locus": locus}, timeout=15)
         elif verb in ("set", "edit", "update"):
@@ -2735,7 +3433,7 @@ async def _central_todo_post(request, locus):
             if "text" in f and str(f.get("text") or "").strip():
                 upd["text"] = str(f["text"]).strip()[:500]
             if "note" in f:
-                upd["note"] = str(f.get("note") or "")[:2000]
+                upd["note"] = str(f.get("note") or "")
             # comments have no column on a central board — persist them IN the note
             # (the established idiom). The console POSTs the FULL comments array, so
             # rebuild note = human text + every comment re-encoded, reading the RAW
@@ -2748,7 +3446,7 @@ async def _central_todo_post(request, locus):
                         human = _split_note_comments(upd["note"])[0]
                     else:
                         rows = await _ts_call(app, "todo/list",
-                                              {"locus": locus, "limit": 500}, timeout=15)
+                                              {"locus": locus, "limit": CENTRAL_TODO_LIMIT}, timeout=15)
                         raw = next((str(r.get("note") or "") for r in (rows or [])
                                     if str(r.get("id") or "") == tid), None)
                         if raw is None:   # never clobber a note we couldn't read back
@@ -2766,18 +3464,18 @@ async def _central_todo_post(request, locus):
             ctext = (body.get("text") or "").strip()
             if verb == "comment" and not ctext:
                 return web.json_response({"error": "comment needs text"}, status=400)
-            cur = next((i for i in (await _central_todo_state(app, locus))["items"]
-                        if i["id"] == tid), None)
-            if not cur:
+            # the RAW stored note (human text + encoded comments, uncapped): a
+            # resolve/comment must keep every section and every prior comment
+            rows = await _ts_call(app, "todo/list", {"locus": locus, "limit": CENTRAL_TODO_LIMIT}, timeout=15)
+            raw = next((str(r.get("note") or "") for r in (rows or [])
+                        if str(r.get("id") or "") == tid), None)
+            if raw is None:
                 return web.json_response({"error": "no such item"}, status=404)
             if verb == "resolve":
-                upd = {"id": tid, "status": "done",
-                       "note": ("[" + body["verdict"] + "] " + (cur.get("note") or ""))[:2000]}
+                upd = {"id": tid, "status": "done", "note": "[" + body["verdict"] + "] " + raw}
             else:
-                note = cur.get("note") or ""
-                upd = {"id": tid, "note": ((note + "\n") if note else "")
+                upd = {"id": tid, "note": ((raw + "\n") if raw else "")
                        + "[comment operator " + time.strftime("%Y-%m-%d %H:%M") + "] " + ctext}
-                upd["note"] = upd["note"][:2000]
             await _ts_call(app, "todo/update", upd, timeout=15)
         elif verb == "replace":
             return web.json_response(
@@ -2858,6 +3556,98 @@ async def _central_todo_route(request, locus):
     if request.method == "POST":
         return await _central_todo_post(request, locus)
     raise web.HTTPMethodNotAllowed(request.method, ["GET", "POST"])
+
+
+_PING_FROM_RE = re.compile(r"^\[ping\](?:\[msg\])?\s*(?:from\s+)?(\S+)")
+
+
+async def _central_messages(request, locus):
+    """GET /api/vm/<locus>/messages for a non-host locus (1.0.138): its ✉ inbox
+    is the central comms lane — comms/inbox to=<locus> (the [ping] rows every
+    comms_ping/fleet message files on that locus's board) — mapped onto the
+    bugreport-api {ok, messages:[{id, ts, from, to, text}]} shape, oldest first."""
+    if request.method != "GET":
+        raise web.HTTPMethodNotAllowed(request.method, ["GET"])
+    try:
+        doc = await _ts_call(request.app, "comms/inbox", {"to": locus}, timeout=15)
+    except Exception as e:
+        return web.json_response({"ok": False, "error": f"{locus}: comms inbox unreachable — {e}"},
+                                 status=502)
+    rows = []
+    for p in (doc.get("pings") if isinstance(doc, dict) else None) or []:
+        if not isinstance(p, dict) or not p.get("id"):
+            continue
+        m = _PING_FROM_RE.match(str(p.get("note") or ""))
+        rows.append({"id": str(p["id"]), "ts": int(p.get("created") or p.get("updated") or 0),
+                     "from": (m.group(1) if m else "") or str(p.get("by") or "board"),
+                     "to": locus, "text": str(p.get("text") or ""), "status": p.get("status"),
+                     "via": "board"})
+    rows.sort(key=lambda r: r["ts"])
+    return web.json_response({"ok": True, "central": True, "locus": locus,
+                              "messages": rows[-FLEET_MAIL_MAX:]})
+
+
+async def _central_todo_brief(request, locus):
+    """POST /api/vm/<locus>/todo/brief for a non-host locus (1.0.138): the brief
+    + a snapshot of the locus's OPEN central items ride the comms lane
+    (comms/ping to=<locus>), which the locus's keeper sees in its inbox — no
+    lxc exec / ~/todo.json / live pane on the locus required."""
+    try:
+        body = await request.json()
+        text = " ".join(str(body.get("text") or "").split())
+        if not text:
+            raise ValueError
+    except Exception:
+        return web.json_response({"error": 'body must be {"text": "<brief>"}'}, status=400)
+    try:
+        state = await _central_todo_state(request.app, locus)
+        summary = _todo_brief_summary(json.dumps({"items": state["items"]}))
+        res = await _ts_call(request.app, "comms/ping", {
+            "to": locus, "from_": _keeper_locus() or getpass.getuser(), "kind": "message",
+            "text": ("☑ board brief from the operator's console: " + text[:FLEET_MSG_MAX]
+                     + " " + summary + " Please act on the open items on your board."),
+        }, timeout=15)
+    except Exception as e:
+        audit(request, "todo-brief", f"locus={locus} via=board failed: {e}", ok=False)
+        return web.json_response({"ok": False, "error": f"{locus}: board ping failed — {e}"}, status=502)
+    audit(request, "todo-brief", f"locus={locus} via=board", ok=True)
+    return web.json_response({"ok": True, "pinged": False, "via": "board", "locus": locus,
+                              "id": (res or {}).get("id") if isinstance(res, dict) else None,
+                              "open": sum(1 for i in state["items"]
+                                          if i.get("status") in ("open", "doing"))})
+
+
+async def _central_todo_ping(request, locus):
+    """📨 per-item ping for a non-host locus (1.0.138): reads the item from the
+    locus's central rows and files ONE comms ping on that locus."""
+    try:
+        body = await request.json()
+        tid = str(body.get("id") or "").strip()
+        if not tid:
+            raise ValueError
+    except Exception:
+        return web.json_response({"error": 'body must be {"id"}'}, status=400)
+    try:
+        items = (await _central_todo_state(request.app, locus))["items"]
+    except Exception as e:
+        return web.json_response({"ok": False, "error": f"{locus}: central board unreachable — {e}"},
+                                 status=502)
+    it = next((i for i in items if i.get("id") == tid), None)
+    if not it:
+        return web.json_response({"ok": False, "error": f"no board item {tid}"}, status=404)
+    extra = " ".join(str(body.get("text") or "").split())[:200]
+    line = (f"📨 board {tid} [{it.get('status') or 'open'}/{it.get('priority') or 'low'}] from the operator: "
+            + " ".join(str(it.get("text") or "").split())[:300]
+            + (f" — {extra}" if extra else "")
+            + " — please tend to it and update the item on the board.")
+    try:
+        res = await _ts_call(request.app, "comms/ping", {
+            "to": locus, "from_": _keeper_locus() or getpass.getuser(), "kind": "message", "text": line}, timeout=15)
+    except Exception as e:
+        return web.json_response({"ok": False, "error": f"{locus}: board ping failed — {e}"}, status=502)
+    _audit_line("todo-ping", f"{tid} → {locus} (board)")
+    return web.json_response({"ok": True, "id": tid, "via": "board", "locus": locus,
+                              "ping": (res or {}).get("id") if isinstance(res, dict) else None})
 
 
 async def _sidecar_proxy(request):
@@ -3038,8 +3828,11 @@ def _b_answer(text, history, vm=""):
     # python (packaged installs) may not have the module at all.
     py = _hugpy_python()
     if py:
+        # 1.0.143: "brief" = B's own per-session directive (the `local` kind).
+        # hugpy_agent.mct.b_answer does not read it yet (it composes its own
+        # B_SYSMSG); the in-process fallback below does.
         payload = json.dumps({"workspace": str(_active_ws()), "text": text,
-                              "history": (history or [])[-20:]})
+                              "history": (history or [])[-20:], "brief": _b_local_brief()})
         try:
             r = subprocess.run([py, "-m", "hugpy_agent.mct.b_answer"],
                                input=payload.encode(), capture_output=True,
@@ -3059,7 +3852,8 @@ def _b_answer(text, history, vm=""):
     hit = _b_fallback_lookup(text, ground, _b_state_empty(sess, srv), started)
     if hit is not None:           # lookup answered — no model call
         return {"reply": hit, "offline": False, "model": _B_LOOKUP_MODEL, "tokens": 0}
-    msgs = [{"role": "system", "content": _B_SYSMSG + ground}]
+    brief = _b_local_brief()
+    msgs = [{"role": "system", "content": (brief + "\n\n" if brief else "") + _B_SYSMSG + ground}]
     for m in (history or [])[-20:]:
         r, c = m.get("role"), m.get("content")
         if r in ("user", "assistant") and isinstance(c, str):
@@ -3078,6 +3872,30 @@ def _b_answer(text, history, vm=""):
         return {"reply": "[B offline - deterministic state readout]\n"
                          f"(gateway unavailable: {type(exc).__name__}: {exc})\n\n" + ground,
                 "offline": True}
+
+
+async def _b_answer_remote(vm, text, history):
+    """B on a remote locus: its own hugpy_agent.mct.b_answer, run ON the
+    target (payload on stdin), grounded in ITS station workspace."""
+    payload = base64.b64encode(json.dumps({"workspace": "", "text": text,
+                                           "history": (history or [])[-20:]}).encode()).decode()
+    script = (LX.STATE_SH
+              + 'export B_WS="$S/mct/repl"; export PATH="$HOME/.local/bin:$PATH"\n'
+              + 'py=""; hb="$(command -v hugpy-agent 2>/dev/null)"; '
+              + 'for c in "$( [ -n "$hb" ] && sed -n \'1s/^#! *//p\' "$hb")" "$S/serve-venv/bin/python" python3; do '
+              + '[ -n "$c" ] && "$c" -c "import hugpy_agent" 2>/dev/null && { py="$c"; break; }; done\n'
+              + '[ -n "$py" ] || { echo "hugpy_agent (B) is not installed for $(id -un)@$(hostname)" >&2; exit 3; }\n'
+              + "base64 -d <<'__B141__' | \"$py\" -c 'import json,os,sys; d=json.load(sys.stdin); "
+              + "d[\"workspace\"]=os.environ[\"B_WS\"]; print(json.dumps(d))' | exec \"$py\" -m hugpy_agent.mct.b_answer\n"
+              + "\n".join(payload[i:i + 76] for i in range(0, len(payload), 76)) + "\n__B141__\n")
+    rc, out, err = await LX.run(_locus_target(vm), script, timeout=200)
+    try:
+        d = json.loads((out or "").strip().splitlines()[-1])
+        if isinstance(d, dict) and d.get("reply"):
+            return {"reply": d["reply"], "offline": bool(d.get("offline")), "grounded_in": vm}
+    except Exception:                                    # noqa: BLE001
+        pass
+    return {"error": f"B on {vm} unavailable: " + ((err or out or f"rc={rc}").strip()[-300:])}
 
 
 async def b_chat(request):
@@ -3100,9 +3918,21 @@ async def b_chat(request):
             "reply": "[B is switched off — flip the B chip in the terminal "
                      "bar (or POST /api/term/bgate) to re-enable]",
             "offline": True})
-    vm = str(body.get("vm") or "").strip()
-    if vm != "@keeper" and (not vm or vm not in await _known_names_safe()):
-        vm = ""                   # ssh locus / unknown name → this station's own B (no lxc exec)
+    # 1.0.144: ?vm= too — a locus console's B pane (framed at /ac/@<locus>/)
+    # gets it from locus_vm_mw via its Referer; the body wins when both are set.
+    vm = str(body.get("vm") or request.query.get("vm") or "").strip()
+    if vm and _is_host_vm(vm):
+        vm = "@keeper"
+    elif vm and _ssh_host(vm) and _locus_target(vm).remote:
+        # 1.0.141: an ssh locus is answered by THAT locus's own B, run on the
+        # target through the one locus transport — never this station's B
+        # grounded on this host's files (the old silent host leak).
+        res = await _b_answer_remote(vm, text, history)
+        if res.get("error"):
+            return web.json_response({"ok": False, "locus": vm, **res}, status=502)
+        return web.json_response({"ok": True, "locus": vm, **res})
+    elif vm and vm not in await _known_names_safe():
+        return web.json_response({"ok": False, "error": f"unknown locus {vm}"}, status=404)
     try:
         loop = asyncio.get_event_loop()
         result = await loop.run_in_executor(None, _b_answer, text, history, vm)
@@ -3120,7 +3950,9 @@ async def b_chat(request):
 # ERROR, not a blank board). The board lives in the CURRENT MCT workspace
 # (todo.json), shared with the agent — the file IS the interface. -------------
 MCT_TODO_STATUSES = ("open", "doing", "done")
-MCT_TODO_TYPES = ("todo", "request", "bookmark", "operator", "proposal", "direction")
+# `finding` (2026-10-01): a bug report owned by the locus's WORKER session — the
+# keeper's reminder digest / nudges exclude it (bug_route.BOARD_TYPE).
+MCT_TODO_TYPES = ("todo", "request", "bookmark", "operator", "proposal", "direction", "finding")
 MCT_TODO_PRIOS = ("low", "medium", "high")
 TODO_TYPES = set(MCT_TODO_TYPES)
 TODO_STATUS = set(MCT_TODO_STATUSES)
@@ -3220,7 +4052,8 @@ async def _todo_ts_sync_once(app):
     # board-sot 2026-09-18: was _station_locus(), which returns '' on the host
     # keeper (STATION_LOCUS unset) and made this whole DB->file reverse sync
     # early-return every tick — the reason central `todos` items never reached
-    # the file the UI reads. _keeper_locus() resolves the canonical 'keeper' slice.
+    # the file the UI reads. 1.0.141: _keeper_locus() is this station's OWN locus;
+    # '' (not configured) means no sync at all — never the `keeper` slice.
     locus = _keeper_locus()
     if not locus:
         return
@@ -3280,6 +4113,8 @@ async def _todo_ts_sync_loop(app):
 
 
 async def _start_todo_ts_sync(app):
+    if os.environ.get("STATION_DEV_QUIET") == "1":   # 1.0.144: a dev copy never syncs the live board file
+        return
     app["todo_ts_sync"] = asyncio.create_task(_todo_ts_sync_loop(app))
 
 
@@ -3321,7 +4156,7 @@ def todo_norm(raw, by, nid):
     return {"id": f"{todo_type_letter(typ)}{nid}",
             "type": typ,
             "text": text,
-            "note": str(raw.get("note", "") or "").strip()[:2000],
+            "note": str(raw.get("note", "") or "").strip(),     # never truncated (BOARD-ITEM-FORMAT.md)
             **({"priority": str(raw.get("priority")).strip().lower()}
                if str(raw.get("priority", "")).strip().lower() in ("medium", "high")
                else {}),
@@ -3360,7 +4195,7 @@ def todo_apply(state, body):
         if "text" in f and str(f["text"]).strip():
             it["text"] = str(f["text"]).strip()[:500]
         if "note" in f:
-            it["note"] = str(f["note"] or "").strip()[:2000]
+            it["note"] = str(f["note"] or "").strip()[:20000]   # 2026-10-01: operator RUN scripts exceed 2k; mirrored notes must never be clipped (t4221)
         if str(f.get("priority", "")).strip().lower() in ("low", "medium", "high"):
             p = str(f["priority"]).strip().lower()
             if p == "low":
@@ -3376,7 +4211,7 @@ def todo_apply(state, body):
             for c in f["comments"][:50]:
                 if not isinstance(c, dict):
                     continue
-                ctext = str(c.get("text", "")).strip()[:2000]
+                ctext = str(c.get("text", "")).strip()[:8000]
                 if not ctext:
                     continue
                 cts = c.get("ts")
@@ -3484,7 +4319,7 @@ async def _finder_ground(req_vm):
     api_seat_status / the terminal launch. The operator's own client (`op`,
     kind=session, board-only) is never a locus name, so it can never be listed."""
     v = (req_vm or "").strip()
-    if v in ("@keeper", "keeper", "host"):
+    if v and _is_host_vm(v):
         return "", ""
     v = v or MODEL_VM
     if not v:
@@ -3502,32 +4337,13 @@ def _finder_kind(ground):
 
 async def _finder_exec(ground, script, timeout=FINDER_TIMEOUT):
     """Run the finder script in the locus as its seat user -> (rc, out, err).
-    Grounded exactly like a seat: local-self (this host, or an ssh-host entry
-    that names THIS station's own user@host), ssh (script on stdin over the
+    1.0.141: the one locus transport (locus_exec): self (this host, or an
+    ssh-host entry naming THIS station's own user@host), ssh (stdin over the
     entry's key/port/mux, BatchMode), lxd (lxc exec as ubuntu)."""
-    h = _ssh_host(ground) if ground else None
-    if h and _is_self_target(f"{h.get('user') or 'root'}@{h['host']}:{int(h.get('port') or 22)}"):
-        h, ground = None, ""                    # local-self: no ssh hop
-    if not ground:
-        argv, stdin = ["bash", "-c", script], None
-    elif h:
-        argv, stdin = _ssh_argv(h) + ["bash", "-s"], script.encode()
-    else:
-        argv, stdin = ["lxc", "exec", ground, "--", "sudo", "-u", "ubuntu", "-H",
-                       "bash", "-c", script], None
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE)
-    except OSError as e:
-        return 127, "", str(e)
-    try:
-        out, err = await asyncio.wait_for(proc.communicate(stdin), timeout)
-    except asyncio.TimeoutError:
-        with contextlib.suppress(Exception):
-            proc.kill()
-        return 124, "", f"finder timed out after {timeout}s"
-    return proc.returncode, out.decode(errors="replace"), err.decode(errors="replace")
+    rc, out, err = await LX.run(_locus_target(ground), script + "\n", timeout=timeout)
+    if rc == 124:
+        err = f"finder timed out after {timeout}s"
+    return rc, out, err
 
 
 def _finder_script(op, body, root):
@@ -4056,7 +4872,8 @@ async def mct_live(request):
                               "session": sid or _active_session()})
 
 
-async def _central_prompt(request, vm):
+async def _central_prompt(request, vm, locus=None):
+    locus = locus or _central_locus(vm) or vm   # 1.0.138: the locus's central key
     try:
         body = await request.json()
         text = (body.get("text") or "").strip()
@@ -4067,7 +4884,7 @@ async def _central_prompt(request, vm):
         return web.json_response({"error": "empty prompt"}, status=400)
     try:
         doc = await _ts_call(request.app, "prompt/submit", {
-            "locus": vm, "text": text, "files": files, "by": _station_id(),
+            "locus": locus, "text": text, "files": files, "by": _station_id(),
             "session": _active_session()}, timeout=120)
     except Exception as e:
         return web.json_response(
@@ -4075,11 +4892,15 @@ async def _central_prompt(request, vm):
     if not isinstance(doc, dict) or not doc.get("path"):
         return web.json_response({"ok": False, "error": f"{vm}: prompt/submit gave no path"}, status=502)
     submitted = False
-    sess = _live_surface_session(_surface_key("frontier", vm, _active_session()))
+    sess = None if body.get("save_only") else _live_surface_session(_surface_key("frontier", vm, _active_session()))
     if sess is not None:
         try:
-            sess.write((str(doc.get("pointer") or ("Handle the operator prompt at "
-                        + str(doc["path"]) + "/prompt.md — read it via a pull, then respond.")) + "\r").encode("utf-8"))
+            # 1.0.143: text, then Enter as a SEPARATE write — an Ink TUI reads
+            # text+"\r" arriving in one write as a paste and never submits.
+            sess.write(str(doc.get("pointer") or ("Handle the operator prompt at "
+                       + str(doc["path"]) + "/prompt.md — read it via a pull, then respond.")).encode("utf-8"))
+            await asyncio.sleep(0.3)
+            sess.write(b"\r")
             submitted = True
         except Exception:
             submitted = False
@@ -4116,7 +4937,7 @@ async def mct_prompt(request):
     the only place its A can read them), then the pointer line is typed into
     the HARNESS's frontier PTY for that VM, which is the live seat here."""
     vm = await _sidecar_vm(request)
-    if vm:
+    if vm and _central_locus(vm) != _keeper_locus():
         # Operator 2026-09-02 ("just have it sent to the toolserver"): a non-host
         # locus's prompt + files go to the toolserver's central prompt inbox
         # (prompt/submit) — stored on ae where every seat can read them, with a
@@ -4147,7 +4968,7 @@ async def mct_prompt(request):
     # into the live native seat (durable, sha-verified, idempotent, visible in
     # /api/mct/live). No prompt-inbox file, no client-typed pointer. The
     # inbox path below stays as the fallback when no ledger/seat exists.
-    broker = request.app.get("mct_broker")
+    broker = None if body.get("save_only") else request.app.get("mct_broker")
     if broker is not None:
         seat = await _mct_native_seat()
         if seat:
@@ -4195,23 +5016,356 @@ async def mct_prompt(request):
                + (" (with " + str(len(saved)) + " attached file(s) in " + str(dst)
                   + ": " + ", ".join(saved) + ")" if saved else "")
                + " — read it via a pull, then respond.")
+    # 1.0.143: this inbox+pointer path is the LEGACY FILE-POINTER FALLBACK. The ✍
+    # prompt bar delivers through POST /api/prompt/send (serve session / tmux
+    # seat) and only reaches here when the operator explicitly picks "save to
+    # inbox (file-pointer fallback)" after a failed send. Nothing consumes
+    # prompt-inbox/ by itself: the reply says so.
     note = ("saved \u2192 prompt-inbox/" + ts
-            + (" \u00b7 " + str(len(saved)) + " file(s)" if saved else ""))
-    return web.json_response({"ok": True, "note": note, "submitted": False,
+            + (" \u00b7 " + str(len(saved)) + " file(s)" if saved else "")
+            + " (file-pointer fallback \u2014 NOT delivered; point a session at " + str(dst) + ")")
+    return web.json_response({"ok": True, "note": note, "submitted": False, "legacy": "file-pointer",
                               "pointer": pointer, "path": str(dst)})
+
+
+# ── ✍ prompt delivery (1.0.143, operator 2026-10-01) ─────────────────────────
+# The prompt bar sends the TEXT to the target session directly — the locus's
+# serve console session (POST /api/console/chat on THAT locus's serve, from
+# _ac_resolve) or its Terminal tmux seat (send-keys + a separate Enter) — and
+# reports delivered / queued / unconfirmed / NOT delivered + reason. Logic in
+# prompt_send.py; this is the wiring. /api/mct/prompt's prompt-inbox pointer
+# stays only as the explicit, labelled file-pointer fallback.
+def _serve_caller(app, base):
+    """call(method, path, body) -> (status, json|None) against one serve upstream."""
+    base = (base or AC_UPSTREAM).rstrip("/")
+
+    async def call(method, path, body=None):
+        sess = app.get("proxy_sess")
+        if sess is None:
+            sess = app["proxy_sess"] = aiohttp.ClientSession()
+        to = aiohttp.ClientTimeout(total=60 if path.startswith("/api/session/attach") else 15)
+        async with sess.request(method, base + path, json=body, timeout=to) as r:
+            doc = (await r.json(content_type=None)
+                   if r.content_type and "json" in r.content_type else None)
+            return r.status, doc
+    return call
+
+
+async def _serve_head_of(call, role=None):
+    """(sid, why): the serve's keeper session — roster role -> rollover head."""
+    role = role or NUDGE_SERVE_ROLE
+    st, roster = await call("GET", "/api/session/roster")
+    if st != 200 or not isinstance(roster, dict):
+        return "", "serve roster HTTP %s" % st
+    try:
+        _st, roll = await call("GET", "/api/session/rollover")
+    except Exception:                                    # noqa: BLE001 — no chain: the roster wins
+        roll = None
+    if _knudge is not None:
+        return _knudge.resolve_keeper_session(roster, roll if isinstance(roll, dict) else None, role)
+    ent = next((e for e in roster.get("roles") or [] if isinstance(e, dict) and e.get("role") == role), None)
+    sid = str((ent or {}).get("session_id") or "")
+    return (sid, "roster") if sid else ("", "no live %s session in serve" % role)
+
+
+async def _serve_queue_release(call, sid, by="station"):
+    """POST /api/console/queue action=release (serve-core 0.1.15: lifts a hold
+    and kicks the queue). A 0.1.14 serve does not know "release" (HTTP 400
+    "Unknown queue action") — it is sent "retry", the same operation there.
+    -> (status, doc) in either release's shape (keeper_nudge.queue_action_ok)."""
+    st, doc = await call("POST", "/api/console/queue", {"session_id": sid, "action": _knudge.QUEUE_RELEASE
+                                                         if _knudge else "release", "by": by})
+    if st == 400 and "unknown queue action" in str((doc or {}).get("error") if isinstance(doc, dict) else "").lower():
+        st, doc = await call("POST", "/api/console/queue", {"session_id": sid, "action": "retry"})
+    return st, doc
+
+
+def _prompt_store_local(files):
+    """Seat attachments for the HOST: plain files under the active workspace's
+    prompt-inbox/<ts>/ (storage only — the prompt text itself is sent)."""
+    import base64 as _b64
+    dst = _active_ws() / "prompt-inbox" / (time.strftime("%Y%m%d-%H%M%S") + "-att")
+    dst.mkdir(parents=True, exist_ok=True)
+    out = []
+    for f in files:
+        mime, b64 = PS.split_data_url(f.get("dataUrl"))
+        name = re.sub(r"[^A-Za-z0-9._-]", "_", str(f.get("name") or "file"))[:80].strip("._") or "file"
+        p = dst / name
+        n = 1
+        while p.exists():
+            n += 1
+            p = dst / ("%d-%s" % (n, name))
+        data = _b64.b64decode(b64)
+        p.write_bytes(data)
+        out.append({"path": str(p), "name": name, "mime": str(f.get("type") or mime or ""), "size": len(data)})
+    return out
+
+
+async def api_prompt_send(request):
+    """POST /api/prompt/send[?vm=] {text, files:[{name,type,dataUrl}], target:
+    auto|serve|seat, session_id?, seat_backend?, force?} -> PS.result dict
+    (+ locus, surface). HTTP 200 for every decided outcome (ok/state say
+    which); 400 only for a malformed body."""
+    try:
+        body = await request.json()
+    except Exception:
+        return web.json_response(PS.result("failed", "", "bad body"), status=400)
+    if not isinstance(body, dict):
+        return web.json_response(PS.result("failed", "", "bad body"), status=400)
+    text = str(body.get("text") or "")
+    files = PS.clean_files(body.get("files"))
+    if not text.strip() and not files:
+        return web.json_response(PS.result("failed", "", "empty prompt"), status=400)
+    vm = await _sidecar_vm(request)
+    try:
+        surface, ac = await _keeper_surface_now(vm)
+    except Exception as e:                               # noqa: BLE001
+        surface, ac = KEEPER_SURFACE, {"ok": False, "error": str(e)}
+    target = PS.choose_target(body.get("target"), surface)
+    locus = vm or "host"
+    if target == "serve":
+        if not ac.get("url"):
+            res = PS.result("failed", "serve", ac.get("error") or ("no abstract-claude serve for locus " + locus))
+        elif not ac.get("ok"):
+            res = PS.result("failed", "serve", "serve not answering: " + str(ac.get("error") or ac.get("url")))
+        else:
+            call = _serve_caller(request.app, ac["url"])
+            res = await PS.deliver_serve(call, text, files, session_id=str(body.get("session_id") or ""),
+                                         head=lambda: _serve_head_of(call),
+                                         fallback_head=str(body.get("target") or "auto") == "auto")
+            res["serve"] = ac.get("path") or ""
+    else:
+        backend = str(body.get("seat_backend") or "")
+        sess = _tmux_session_for("frontier", backend)
+        if not sess:      # mct (no tmux of its own) / unknown: the native seat it rides
+            sess = ((await _live_frontier_session()) if not vm else "") or "keeper-claude"
+        out_text, store_err = text, ""
+        if files:
+            try:
+                if vm:       # a non-host locus: the central inbox on ae (prompt/submit) keeps the files
+                    doc = await _ts_call(request.app, "prompt/submit", {
+                        "locus": _central_locus(vm) or vm, "text": text, "files": files,
+                        "by": _station_id(), "session": _active_session()}, timeout=120)
+                    items = [{"path": os.path.join(str(doc.get("path") or ""), n), "name": n}
+                             for n in (doc.get("files") or [])]
+                else:
+                    items = await asyncio.to_thread(_prompt_store_local, files)
+                out_text = text + PS.attachments_block(items)
+            except Exception as e:                       # noqa: BLE001
+                store_err = "attachments not stored: %s" % e
+        if store_err:
+            res = PS.result("failed", "seat", store_err)
+        else:
+            res = await PS.deliver_seat(lambda *a: _tmux_on(vm, *a), sess, out_text,
+                                        force=bool(body.get("force")), label="%s@%s" % (sess, locus))
+    res.update(locus=locus, surface=surface)
+    if PS.repend_worthy(res):
+        # 1.0.146 (t4260 / d4254): a prompt the serve head could not take right
+        # now is RE-PENDED to the locus's prompt-pending file with the reason and
+        # retried every tick (_prompt_pending_loop) — never a final "failed"
+        ent = _prompt_repend(vm, locus, text, files, str(body.get("session_id") or ""),
+                             str(body.get("target") or "auto"), res.get("reason") or "")
+        res = PS.result("pending", "serve", res.get("reason") or "", locus=locus, surface=surface,
+                        pending_id=ent["id"], attempts=0,
+                        detail="re-pended for locus %s — retried every %ds until a serve session takes it"
+                               % (locus, PROMPT_PENDING_TICK))
+    audit(request, "prompt-send", "%s → %s %s %s %s" % (locus, res.get("target"), res.get("state"),
+                                                        res.get("session_id") or res.get("seat") or res.get("pending_id") or "",
+                                                        (res.get("reason") or "")[:160]),
+          ok=bool(res.get("ok")))
+    return web.json_response(res)
+
+
+# ── 1.0.146: the per-locus prompt-pending file (re-pended ✍ prompts) ───────────
+PROMPT_PENDING_TICK = max(10, int(os.environ.get("STATION_PROMPT_PENDING_TICK") or "60"))
+PROMPT_PENDING_MAX_FILE_B = 2_000_000       # attachments ride along as data URLs up to this
+
+
+def _prompt_pending_path(vm):
+    if not vm or _is_host_vm(vm):
+        return FV_STATE_HOME / "prompt-pending.json"
+    return _locus_state_dir(_central_locus(vm) or vm) / "prompt-pending.json"
+
+
+def _prompt_pending(vm):
+    doc = _read_json(_prompt_pending_path(vm), {}) or {}
+    return [e for e in (doc.get("items") or []) if isinstance(e, dict) and e.get("id")]
+
+
+def _prompt_pending_write(vm, items):
+    p = _prompt_pending_path(vm)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    _write_json_atomic(p, {"items": list(items), "saved": int(time.time())})
+    key = "pending:prompt@" + (vm or "host")
+    if items:
+        _hold_note(key, _sh.SOURCE_PENDING if _sh else "station:pending",
+                   "✍ prompt(s) re-pended for %s" % (vm or "host"),
+                   "; ".join("%s: %s" % (e.get("id"), (e.get("reason") or "")[:80]) for e in items[-3:]),
+                   "GET /api/prompt/pending?vm=%s — delivered automatically when the serve session answers"
+                   % (vm or ""), count=len(items))
+    else:
+        _hold_clear(key)
+
+
+def _prompt_repend(vm, locus, text, files, session_id, target, reason):
+    """Append one failed ✍ prompt to the locus's pending file (never drops)."""
+    items = _prompt_pending(vm)
+    keep = [f for f in (files or []) if len(str(f.get("dataUrl") or "")) <= PROMPT_PENDING_MAX_FILE_B]
+    ent = {"id": "pp-" + secrets.token_hex(4), "vm": vm or "", "locus": locus, "text": text,
+           "files": keep, "dropped_files": max(0, len(files or []) - len(keep)),
+           "session_id": session_id, "target": target, "reason": str(reason)[:300],
+           "at": int(time.time()), "attempts": 0, "last_attempt": 0, "last_reason": str(reason)[:300]}
+    items.append(ent)
+    _prompt_pending_write(vm, items)
+    _audit_line("prompt-repend", "%s %s: %s" % (locus, ent["id"], ent["reason"][:160]))
+    return ent
+
+
+async def _prompt_pending_once(app, vm):
+    """Retry every re-pended prompt of one locus; -> [(id, state, reason)]."""
+    items = _prompt_pending(vm)
+    if not items:
+        return []
+    out, keep = [], []
+    try:
+        surface, ac = await _keeper_surface_now(vm)
+    except Exception as e:                               # noqa: BLE001
+        surface, ac = KEEPER_SURFACE, {"ok": False, "error": str(e)}
+    now = int(time.time())
+    for ent in items:
+        res = None
+        if ac.get("url") and ac.get("ok"):
+            call = _serve_caller(app, ac["url"])
+            res = await PS.deliver_serve(call, ent.get("text") or "", ent.get("files") or [],
+                                         session_id=str(ent.get("session_id") or ""),
+                                         head=lambda c=call: _serve_head_of(c),
+                                         fallback_head=str(ent.get("target") or "auto") == "auto")
+        else:
+            res = PS.result("failed", "serve", ac.get("error") or "no abstract-claude serve for locus " + (vm or "host"))
+        ent["attempts"] = int(ent.get("attempts") or 0) + 1
+        ent["last_attempt"] = now
+        if res.get("ok"):
+            out.append((ent["id"], res.get("state"), ""))
+            _audit_line("prompt-repend-delivered", "%s %s → %s %s after %d attempt(s)"
+                        % (ent.get("locus"), ent["id"], res.get("state"), res.get("session_id") or "", ent["attempts"]))
+            continue
+        ent["last_reason"] = str(res.get("reason") or "")[:300]
+        keep.append(ent)
+        out.append((ent["id"], "pending", ent["last_reason"]))
+    _prompt_pending_write(vm, keep)
+    return out
+
+
+def _prompt_pending_vms():
+    """Every locus with a pending file: the host + each <state>/loci/<locus>/."""
+    vms = [""]
+    try:
+        for d in (FV_STATE_HOME / "loci").iterdir():
+            if (d / "prompt-pending.json").is_file():
+                vms.append(d.name)
+    except OSError:
+        pass
+    return vms
+
+
+async def _prompt_pending_loop(app):
+    await asyncio.sleep(min(20, PROMPT_PENDING_TICK))
+    while True:
+        for vm in _prompt_pending_vms():
+            try:
+                await _prompt_pending_once(app, vm)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:                       # noqa: BLE001
+                _rlog.warning("prompt pending %s: %s", vm or "host", e)
+        await asyncio.sleep(PROMPT_PENDING_TICK)
+
+
+async def _start_prompt_pending(app):
+    app["prompt_pending"] = asyncio.create_task(_prompt_pending_loop(app))
+
+
+async def _stop_prompt_pending(app):
+    t = app.get("prompt_pending")
+    if t:
+        t.cancel()
+
+
+async def api_prompt_pending(request):
+    """GET /api/prompt/pending[?vm=] — the re-pended ✍ prompts of a locus (text
+    clipped); POST {action:"retry"} runs one delivery pass now."""
+    vm = await _sidecar_vm(request)
+    if request.method == "POST":
+        res = await _prompt_pending_once(request.app, vm)
+        return web.json_response({"ok": True, "vm": vm or "@self", "results": [
+            {"id": i, "state": s, "reason": r} for i, s, r in res]})
+    items = [{k: e.get(k) for k in ("id", "locus", "session_id", "target", "reason", "at", "attempts",
+                                      "last_attempt", "last_reason", "dropped_files")}
+             | {"text": str(e.get("text") or "")[:300], "files": len(e.get("files") or [])}
+             for e in _prompt_pending(vm)]
+    return web.json_response({"ok": True, "vm": vm or "@self", "items": items,
+                              "path": str(_prompt_pending_path(vm)), "tick_s": PROMPT_PENDING_TICK})
+
+
+async def api_prompt_status(request):
+    """GET /api/prompt/status?vm=&session_id=&ids=a,b&since=<cursor> -> where a
+    serve-delivered prompt is now (PS.classify_status) + the reply when done.
+    POST {session_id, action:"release"} starts a held/stalled serve queue
+    (serve-core 0.1.15 action; "retry" is accepted from older UIs and sent as
+    "release" — 0.1.14 only knew "retry", 0.1.15 keeps it as an alias)."""
+    vm = await _sidecar_vm(request)
+    url, _unit, _path, key = await _ac_resolve(vm)
+    if not url:
+        return web.json_response({"state": "unknown", "error": "no serve for locus " + (key or vm or "host")})
+    call = _serve_caller(request.app, url)
+    if request.method == "POST":
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        sid = str((body or {}).get("session_id") or "")
+        if not sid or (body or {}).get("action") not in ("retry", "release"):
+            return web.json_response({"ok": False, "error": "need {session_id, action:'release'}"}, status=400)
+        st, doc = await _serve_queue_release(call, sid, by=_toggle_owner(request))
+        ok = _knudge.queue_action_ok(st, doc) if _knudge else st == 200
+        audit(request, "prompt-release", "%s %s HTTP %s" % (vm or "host", sid, st), ok=ok)
+        return web.json_response({"ok": ok, "status": st, "result": doc, "action": "release"})
+    sid = request.query.get("session_id") or ""
+    ids = [i for i in (request.query.get("ids") or "").split(",") if i]
+    if not sid or not ids:
+        return web.json_response({"state": "unknown", "error": "need session_id and ids"}, status=400)
+    try:
+        since = int(request.query.get("since") or 0)
+    except ValueError:
+        since = 0
+    try:
+        qst, q = await call("GET", "/api/console/queue?id=" + sid)
+        est, ev = await call("GET", "/api/console/events?id=%s&since=%d" % (sid, since))
+    except Exception as e:                               # noqa: BLE001
+        return web.json_response({"state": "unknown", "error": "serve unreachable: %s" % e})
+    events = (ev or {}).get("events") if est == 200 and isinstance(ev, dict) else []
+    out = PS.classify_status(ids, q if qst == 200 and isinstance(q, dict) else None, events or [])
+    out["session_id"] = sid
+    # the events page is capped (500): hand back the last seq so the next poll
+    # continues from there instead of re-reading a long turn's first page
+    out["cursor"] = max([since] + [int(e.get("seq") or 0) for e in (events or []) if isinstance(e, dict)])
+    return web.json_response(out)
 
 
 async def mct_todo_get(request):
     """GET /api/mct/todo - the current session's todo.v1 board. With an
     active VM the board is THAT VM's own (via its workbench); the
-    /api/vm/keeper/todo alias always stays the host keeper's board."""
+    /api/vm/keeper/todo alias always stays the host keeper's board.
+    1.0.138: every non-host locus kind (ssh host, LXD guest, registered locus)
+    reads ITS central `todos` rows — no workbench/lxc file on the locus."""
     vm = await _sidecar_vm(request)
-    loc = _central_locus(vm)
-    if loc:
-        return await _central_todo_get(request, loc)
-    resp = await _sidecar_proxy(request)
-    if resp is not None:
-        return resp
+    if vm:
+        loc = _central_locus(vm)
+        if not loc:
+            return _retired(request.path, vm)
+        if loc != _keeper_locus():
+            return await _central_todo_get(request, loc)
+        # a dropdown alias of THIS host falls through to the host board below
     # host keeper (board-sot 2026-09-18): the central DB `todos` slice is the
     # source of truth, the local file is the FAILSAFE. Serve the central board
     # when it is reachable AND at least as complete as the file; otherwise serve
@@ -4219,6 +5373,8 @@ async def mct_todo_get(request):
     # DB that is unreachable, errors, or is momentarily shorter than the file
     # (e.g. before the reverse sync has back-filled it) silently keeps the file.
     kloc = _keeper_locus()
+    if not kloc:                     # 1.0.141: never fall back to vm_mgr's `keeper` slice
+        return _unconfigured_response("board")
     try:
         central = await _central_todo_state(request.app, kloc)
     except Exception:
@@ -4231,7 +5387,53 @@ async def mct_todo_get(request):
                                   "path": _central_todo_path(kloc)})
     if state is None:
         return web.json_response({"ok": False, "error": err}, status=502)
+    _operator_scripts_sync(kloc, state["items"], "file:" + str(_mct_todo_path()))
     return web.json_response({"ok": True, "state": state, "path": str(_mct_todo_path())})
+
+
+async def api_board_operator_draft_run(request):
+    """POST /api/board/operator/{id}/draft-run — ask B to DRAFT a RUN block
+    (BOARD-ITEM-FORMAT.md) from an operator item's WHY/DO/VERIFY/EXPECT when it
+    has none, and file the draft as a comment on the item. Never applied: the
+    keeper (or the operator) moves it into a RUN: section by hand. Unused by
+    the UI by default (1.0.144)."""
+    tid = str(request.match_info.get("id") or "").strip()
+    kloc = _keeper_locus()
+    if not kloc:
+        return _unconfigured_response("board")
+    try:
+        rows = await _ts_call(request.app, "todo/list", {"locus": kloc, "limit": CENTRAL_TODO_LIMIT}, timeout=15)
+    except Exception as e:                                   # noqa: BLE001
+        return web.json_response({"ok": False, "error": f"central board unreachable — {e}"}, status=502)
+    row = next((r for r in (rows or []) if str(r.get("id") or "") == tid), None)
+    if not row or row.get("type") != "operator":
+        return web.json_response({"ok": False, "error": "no such operator item"}, status=404)
+    note = str(row.get("note") or "")
+    if OPS.run_blocks(note).get("RUN") is not None:
+        return web.json_response({"ok": False, "error": "item already has a RUN block"}, status=409)
+    prompt = ("Draft the RUN: block of this hugpy board operator item. Output ONLY one fenced ```bash "
+              "block: a complete script starting with '#!/usr/bin/env bash' and 'set -euo pipefail', "
+              "a comment with the item id and title, explicit absolute 'cd' where a step needs a "
+              "directory, the DO steps in order, then the VERIFY checks written as 'test' commands "
+              "that exit non-zero on failure, with the expected output as comments. It runs as the "
+              "operator from ~ on the host; use sudo / ssh <host> inline. No placeholders.\n\n"
+              f"id: {tid}\ntitle: {row.get('text')}\n\n{note}")
+    loop = asyncio.get_running_loop()
+    try:
+        reply = await loop.run_in_executor(None, _todo_keeper_chat, [{"role": "user", "content": prompt}], 900)
+    except Exception as e:                                   # noqa: BLE001
+        return web.json_response({"ok": False, "error": f"B: {e}"}, status=502)
+    m = re.search(r"```(?:bash|sh)?\s*\n(.*?)```", reply or "", re.DOTALL)
+    if not m or "#!/usr/bin/env bash" not in m.group(1):
+        return web.json_response({"ok": False, "error": "B returned no usable script"}, status=502)
+    draft = m.group(1).strip("\n")
+    comment = ("[comment B@%s %s] DRAFT RUN (not applied — review, then move it into a RUN: section):\n```bash\n%s\n```"
+               % (_station_id(), time.strftime("%Y-%m-%d %H:%M"), draft))
+    try:
+        await _ts_call(request.app, "todo/update", {"id": tid, "note": note.rstrip("\n") + "\n" + comment}, timeout=15)
+    except Exception as e:                                   # noqa: BLE001
+        return web.json_response({"ok": False, "error": f"comment not saved — {e}", "draft": draft}, status=502)
+    return web.json_response({"ok": True, "id": tid, "draft": draft, "applied": False})
 
 
 async def mct_todo_post(request):
@@ -4243,14 +5445,17 @@ async def mct_todo_post(request):
     serialized under the board's flock (o10 v4); a decision rides in on note +
     status (the canonical proposal contract). Mutations journal CANONICAL
     events ({event, id, type, detail}) that the drawer's history tab renders
-    natively (added/status/text/note/comment/removed)."""
+    natively (added/status/text/note/comment/removed).
+    1.0.138: every non-host locus kind writes ITS central `todos` rows."""
     vm = await _sidecar_vm(request)
-    loc = _central_locus(vm)
-    if loc:
-        return await _central_todo_post(request, loc)
-    resp = await _sidecar_proxy(request)
-    if resp is not None:
-        return resp
+    if vm:
+        loc = _central_locus(vm)
+        if not loc:
+            return _retired(request.path, vm)
+        if loc != _keeper_locus():
+            return await _central_todo_post(request, loc)
+    if not _keeper_locus():          # 1.0.141: no silent write into another locus's slice
+        return _unconfigured_response("board")
     try:
         body = await request.json()
     except Exception:
@@ -4564,6 +5769,8 @@ def _todo_assist_call(mode, text):
 
 async def _run_timeout(args, timeout):
     """_run with a hard timeout: the child is killed when it overruns (rc -1)."""
+    if _tmux_missing(args):
+        return 127, "", TMUX_MISSING_MSG
     proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE,
                                                 stderr=asyncio.subprocess.PIPE)
     try:
@@ -4612,10 +5819,15 @@ async def mct_todo_ping(request):
     """POST /api/mct/todo/ping {id, text?} — board t2 (operator 2026-09-10): the
     📨 button on a board row pings the keeper about THAT item. Types one line
     into the live frontier seat naming the item, its status/priority and text
-    (plus an optional operator note), and journals it. Not a board mutation."""
-    resp = await _sidecar_proxy(request)
-    if resp is not None:
-        return resp
+    (plus an optional operator note), and journals it. Not a board mutation.
+    1.0.138: a non-host locus is pinged on its central board (comms lane)."""
+    vm = await _sidecar_vm(request)
+    if vm:
+        loc = _central_locus(vm)
+        if not loc:
+            return _retired(request.path, vm)
+        if loc != _keeper_locus():
+            return await _central_todo_ping(request, loc)
     try:
         body = await request.json()
         tid = str(body.get("id") or "").strip()
@@ -4643,10 +5855,9 @@ async def mct_todo_ping(request):
 
 async def mct_todo_assist(request):
     """POST /api/mct/todo/assist {mode, text} - LLM reword/split/tidy via the hugpy
-    gateway. Returns {result} (a preview the operator applies); never mutates the board."""
-    resp = await _sidecar_proxy(request)
-    if resp is not None:
-        return resp
+    gateway. Returns {result} (a preview the operator applies); never mutates the board.
+    Pure text in / text out on this station's LLM, so it serves EVERY locus
+    (1.0.138: no longer 404s off-host)."""
     try:
         body = await request.json()
         mode = (body.get("mode") or "reword").strip()
@@ -4815,7 +6026,8 @@ with every signature is **./docs/STATION-TOOLS.md** — read it first. Families:
   handoff_state, prompts, board, canvas, assessments, seat_state, compute_actions, call_metrics,
   call_metrics_by_task, load_metrics.
 - **Loci** — `loci_list {kind,status}`, `loci_register {locus,kind,goal,endpoint,pointer}`, `loci_pointers`.
-- **Seats & sessions** — `handoff_request {ssh,dir,user,seat,brief}`, `session_pull {brief,name,fork}`,
+- **Seats & sessions** — `handoff_request {locus,text,task,fork}` (the toolserver row IS the handoff;
+  `handoff_pull {locus|id}` = /resume: the successor pulls it, consumed once per session), `session_pull {brief,name,fork}`,
   `exchange_list {locus,limit,since}`, `assess_state {locus}`, `seat_state {locus,seat}`.
 - **Prompt inbox** — `prompt_list {locus,status}`, `prompt_get {id,with_files}`, `prompt_done {id,status}`.
 - **Execute ON the toolserver host (ae), NOT on this locus** — `fs_*`, `sys_run_cmd`, `ui_*`, `media_*`,
@@ -5134,7 +6346,69 @@ async def _require_station(request):
     return name
 
 
+async def _fs_locus(request):
+    """1.0.141: the 📁 files API works on EVERY locus kind. An LXD guest keeps
+    its lxc file path (None here); the host (@self/@keeper/own name) and any
+    ssh locus go through locus_exec.fs — one python on the target, fenced
+    under that user's $HOME, payloads on stdin."""
+    name = request.match_info["name"]
+    if _is_host_vm(name) or name in ("@keeper", "@self"):
+        return _locus_target("")
+    await _loci_ready()
+    if _ssh_host(name):
+        return _locus_target(name)
+    if name in await _known_names_safe():
+        return None
+    raise web.HTTPNotFound(text=json.dumps({"error": f"unknown locus {name}"}),
+                           content_type="application/json")
+
+
+def _fs_reply(d):
+    if not isinstance(d, dict):
+        return web.json_response({"error": "bad reply"}, status=502)
+    if d.get("error"):
+        st = 403 if "outside the locus home" in d["error"] or "refusing" in d["error"] else 400
+        return web.json_response(d, status=st)
+    return web.json_response(d)
+
+
+async def _fs_via(t, op, request):
+    if op in ("list", "read", "download"):
+        arg = {"path": request.query.get("path", "")}
+        d = await LX.fs(t, op, arg, cap=(FS_READ_LIMIT if op == "read" else 64 * 1024 * 1024))
+        if op == "download" and isinstance(d, dict) and d.get("b64") is not None:
+            fname = os.path.basename(request.query.get("path", "")) or "download"
+            return web.Response(body=base64.b64decode(d["b64"]),
+                                headers={"Content-Type": "application/octet-stream",
+                                         "Content-Disposition": f'attachment; filename="{fname}"'})
+        return _fs_reply(d)
+    if op == "upload":
+        dest = request.query.get("path", "")
+        saved = []
+        reader = await request.multipart()
+        async for part in reader:
+            if part.name != "file":
+                continue
+            rel = _safe_relname(part.filename) or "upload"
+            data = await part.read(decode=False)
+            d = await LX.fs(t, "write", {"path": (dest.rstrip("/") + "/" + rel) if dest else rel}, data=bytes(data))
+            if d.get("error"):
+                return _fs_reply(d)
+            saved.append(rel)
+        return web.json_response({"ok": True, "saved": saved})
+    body = await request.json()
+    if op == "write":
+        return _fs_reply(await LX.fs(t, "write", {"path": body.get("path", "")},
+                                     data=str(body.get("content", "")).encode("utf-8")))
+    if op == "rename":
+        return _fs_reply(await LX.fs(t, "rename", {"src": body.get("src", ""), "dst": body.get("dst", "")}))
+    return _fs_reply(await LX.fs(t, op, {"path": body.get("path", "")}))
+
+
 async def fs_list(request):
+    _t = await _fs_locus(request)
+    if _t is not None:
+        return await _fs_via(_t, "list", request)
     name = await _require_station(request)
     path = _safe_path(request.query.get("path", ""))
     # %y = file type, %Y = type after symlink deref, %s size, %T@ mtime, %p path
@@ -5165,6 +6439,9 @@ async def fs_list(request):
 
 
 async def fs_read(request):
+    _t = await _fs_locus(request)
+    if _t is not None:
+        return await _fs_via(_t, "read", request)
     name = await _require_station(request)
     path = _safe_path(request.query.get("path", ""))
     rc, out, _ = await _lxc(name, "stat", "-c", "%s", path)
@@ -5197,6 +6474,9 @@ async def _push_bytes(name, path, data):
 
 
 async def fs_write(request):
+    _t = await _fs_locus(request)
+    if _t is not None:
+        return await _fs_via(_t, "write", request)
     name = await _require_station(request)
     body = await request.json()
     path = _safe_path(body.get("path", ""))
@@ -5208,6 +6488,9 @@ async def fs_write(request):
 
 
 async def fs_mkdir(request):
+    _t = await _fs_locus(request)
+    if _t is not None:
+        return await _fs_via(_t, "mkdir", request)
     name = await _require_station(request)
     path = _safe_path((await request.json()).get("path", ""))
     uid, gid = _fs_owner(name)
@@ -5219,6 +6502,9 @@ async def fs_mkdir(request):
 
 
 async def fs_rename(request):
+    _t = await _fs_locus(request)
+    if _t is not None:
+        return await _fs_via(_t, "rename", request)
     name = await _require_station(request)
     body = await request.json()
     src, dst = _safe_path(body.get("src", "")), _safe_path(body.get("dst", ""))
@@ -5229,6 +6515,9 @@ async def fs_rename(request):
 
 
 async def fs_delete(request):
+    _t = await _fs_locus(request)
+    if _t is not None:
+        return await _fs_via(_t, "delete", request)
     name = await _require_station(request)
     path = _safe_path((await request.json()).get("path", ""))
     if path in ("/", SH_HOME):
@@ -5240,6 +6529,9 @@ async def fs_delete(request):
 
 
 async def fs_download(request):
+    _t = await _fs_locus(request)
+    if _t is not None:
+        return await _fs_via(_t, "download", request)
     name = await _require_station(request)
     path = _safe_path(request.query.get("path", ""))
     proc = await asyncio.create_subprocess_exec(
@@ -5264,6 +6556,9 @@ async def fs_download(request):
 
 
 async def fs_upload(request):
+    _t = await _fs_locus(request)
+    if _t is not None:
+        return await _fs_via(_t, "upload", request)
     name = await _require_station(request)
     dest_dir = _safe_path(request.query.get("path", ""))
     saved = []
@@ -5592,27 +6887,114 @@ _PROXY_HOP = {"host", "connection", "keep-alive", "transfer-encoding",
               "content-length", "te", "trailer", "upgrade"}
 
 
-async def _ssh_vm_reroute(request):
-    """ssh-host loci must never fall through to the lxc-only sidecars
-    (console-api / bugreport-api answer "unknown vm" for them — operator hit
-    this queueing a todo on hugpy, 2026-08-27): /api/vm/<ssh-host>/<tail> is
-    rewritten to that locus's OWN workbench as /api/vm/keeper/<tail> — the
-    same rewrite vm_keeper_alias does for stations. None = not an ssh host,
-    caller proceeds to its sidecar."""
+# /api/vm/<locus>/<tail> tails the central DB serves for EVERY locus kind
+# (1.0.138). An LXD guest's OTHER tails (power, keeper launch/gate, compose,
+# steward, bugreport, …) still go to the lxc sidecars: they act on the machine.
+_CENTRAL_VM_TAILS = ("todo", "design", "flow", "messages", "todo/brief",
+                     "todo/assist", "todo-history")
+
+
+async def api_station_identity(request):
+    """GET /api/station/identity — who THIS station is (1.0.141): its own locus
+    (STATION_LOCUS / the registry; '' = not configured), every spelling that
+    means "this host" on the wire, and the reserved host token the UI uses."""
+    await _loci_ready(3.0)
+    own = _station_locus()
+    return web.json_response({
+        "ok": True, "locus": own, "configured": bool(own),
+        "self_names": sorted(_self_locus_names()),
+        "host_token": HOST_TOKEN, "host_tokens": [t for t in _HOST_VMS if t],
+        "legacy_aliases": dict(_LEGACY_LOCUS_ALIASES),
+        "source": ("STATION_LOCUS" if (os.environ.get("STATION_LOCUS") or "").strip()
+                   else "registry" if own else ""),
+        "error": "" if own else LOCUS_UNCONFIGURED})
+
+
+def _write_state_pointer():
+    """1.0.141: tell any peer that reaches this user over ssh where this
+    station's state dir is (locus_exec.STATE_SH reads it), and pin it into
+    this process's env so the self target resolves the same dir."""
+    os.environ.setdefault("HUGPY_STATION_STATE", str(FV_STATE_HOME))
+    default = Path.home() / ".config" / "hugpy-station"
+    try:
+        ptr = default / "state-dir"
+        if FV_STATE_HOME.resolve() == default.resolve():
+            if ptr.exists():
+                ptr.unlink()
+            return
+        default.mkdir(parents=True, exist_ok=True)
+        if not ptr.exists() or ptr.read_text().strip() != str(FV_STATE_HOME):
+            ptr.write_text(str(FV_STATE_HOME) + "\n")
+    except OSError:
+        pass
+
+
+async def _host_vm_dispatch(request, tail):
+    """/api/vm/<this station's own locus>/<tail> -> the host handler for tail
+    (the same handlers /api/vm/@self/<tail> is routed to)."""
+    meth = request.method
+    if tail == "todo":
+        return await (mct_todo_post(request) if meth == "POST" else mct_todo_get(request))
+    if tail in ("design", "flow"):
+        return await api_host_canvas(request, tail)
+    table = {"todo-history": keeper_todo_history, "todo/assist": keeper_todo_assist,
+             "todo-revision": keeper_todo_revision, "todo/discord": keeper_todo_discord,
+             "messages": keeper_messages_get}
+    h = table.get(tail)
+    if h is None:
+        return web.json_response({"ok": False, "error": f"no host route for {tail}"}, status=404)
+    return await h(request)
+
+
+async def _central_vm_reroute(request):
+    """/api/vm/<locus>/<tail> for a NON-host locus: the board (todo), canvas
+    (design/flow), ✉ messages (comms inbox), ⧉ brief (comms ping) and ✨ assist
+    are answered from the locus's CENTRAL rows (toolserver DB) — never from a
+    workbench or an lxc-exec'd file on the locus (operator 2026-09-30: one
+    station, every other locus is a DB key). ssh-host loci never fall through to
+    the lxc-only sidecars. None = not ours, the caller proceeds to its sidecar."""
     m = re.match(r"^/api/vm/([^/]+)/(.+)$", request.path)
-    if not m or not _ssh_host(m.group(1)):
+    if not m:
         return None
-    if m.group(2) == "todo":
-        return await _central_todo_route(request, m.group(1))
-    if m.group(2) in ("design", "flow"):
-        return await _central_canvas_route(request, m.group(1), m.group(2))
-    return _retired(m.group(2), m.group(1))
+    if _is_host_vm(m.group(1)):
+        # 1.0.141: this station's own locus NAME (e.g. `keeper` on vm_mgr's
+        # station) is answered by the host routes in-process; the reserved
+        # tokens have their own literal routes.
+        if m.group(1) not in _HOST_VMS:
+            return await _host_vm_dispatch(request, m.group(2))
+        return None
+    name, tail = m.group(1), m.group(2)
+    ssh = bool(_ssh_host(name))
+    if not ssh and tail not in _CENTRAL_VM_TAILS:
+        return None
+    loc = await _known_locus_key(name)
+    if not loc:
+        if not ssh:
+            return web.json_response({"ok": False, "error": f"unknown locus {name}"}, status=404)
+        return _retired(tail, name)
+    if loc and loc == _keeper_locus() and tail in _CENTRAL_VM_TAILS:
+        # a dropdown pointer at THIS station → the host routes (file failsafe),
+        # answered in-process (no redirect: a POST must not need a 307 follow)
+        return await _host_vm_dispatch(request, tail)
+    if tail == "todo":
+        return await _central_todo_route(request, loc)
+    if tail in ("design", "flow"):
+        return await _central_canvas_route(request, loc, tail)
+    if tail == "messages":
+        return await _central_messages(request, loc)
+    if tail == "todo/brief":
+        return await _central_todo_brief(request, loc)
+    if tail == "todo/assist":
+        return await _todo_assist(request, loc)
+    if tail == "todo-history":
+        return _retired("todo-history (the central todos table keeps no event journal yet)", name)
+    return _retired(tail, name)
 
 
 async def api_proxy(request):
-    """Forward a request to the console-api sidecar, verbatim (ssh-host loci
-    reroute to their own workbench first)."""
-    resp = await _ssh_vm_reroute(request)
+    """Forward a request to the console-api sidecar, verbatim (a locus's
+    central tails — board, canvas, messages — reroute to the DB first)."""
+    resp = await _central_vm_reroute(request)
     if resp is not None:
         return resp
     sess = request.app.get("proxy_sess")
@@ -5873,21 +7255,89 @@ def _ac_loci():
 
 def _ac_locus_key(vm):
     vm = (vm or "").strip()
-    return "" if vm in ("", "@keeper", "keeper", "host") else vm
+    return "" if _is_host_vm(vm) else vm
+
+
+_AC_FORWARDS = LX.ServeForwards()      # 1.0.141: locus -> ssh -L forward to its serve
+_AC_BRIDGES = LX.BridgeForwards()      # 1.0.144: lxd guest -> stdio bridge to its serve
+_AC_DISCOVERED = {}                    # locus -> {url, unit, port, source, error, ts}
+_AC_TS_APP = {}                        # a private toolserver client session for discovery
+_AC_DISCOVER_TTL = 30
 
 
 def _ac_target(vm=""):
     """(upstream url, unit, console base path, locus key) for a locus's serve.
-    url '' = that locus has no serve configured (keeps its tmux seat)."""
+    url '' = that locus has no reachable serve. Sync view: the host, an
+    ac-loci.json override, else the last _ac_resolve() discovery (1.0.141)."""
     key = _ac_locus_key(vm)
     if not key:
         return AC_UPSTREAM, AC_SERVE_UNIT, "/ac/", ""
     ent = _ac_loci().get(key)
-    if not ent:
-        return "", "", "", key
-    return ((ent.get("url") or "").rstrip("/"),
-            ent.get("unit") or "abstract-claude-serve-station.service",
-            f"/ac/@{key}/", key)
+    if ent:
+        return ((ent.get("url") or "").rstrip("/"),
+                ent.get("unit") or "abstract-claude-serve-station.service",
+                f"/ac/@{key}/", key)
+    d = _AC_DISCOVERED.get(key) or {}
+    return d.get("url") or "", d.get("unit") or "abstract-claude-serve@station.service", f"/ac/@{key}/", key
+
+
+async def _ac_discover_port(t):
+    """The target's own serve port: 1) its central seat_state row (seat
+    'keeper', status.port — published by abstract-claude-serve-run's
+    seat-report), 2) the same probe script run ON the target (its
+    <state>/ac-serve-*.json, else its own listening abstract-claude serve).
+    -> (port|None, source, error)."""
+    if t.locus:
+        try:
+            rows = await _ts_call(_AC_TS_APP, "seat/state", {"locus": t.locus, "seat": "keeper"}, timeout=6)
+            for r in (rows or []):
+                st = (r or {}).get("status") or {}
+                if (isinstance(st, dict) and st.get("surface") == "serve" and st.get("port")
+                        and r.get("alive") and not r.get("stale")):
+                    return int(st["port"]), "seat_state", ""
+        except Exception:                                # noqa: BLE001
+            pass
+    d = await LX.probe_serve(t)
+    if d.get("ok") and d.get("port"):
+        return int(d["port"]), "probe:" + str(d.get("source") or ""), ""
+    return None, "", str(d.get("error") or "no serve found")
+
+
+async def _ac_resolve(vm):
+    """1.0.141: a remote locus's serve WITHOUT a hand-made ac-loci.json. The
+    url is always 127.0.0.1:<port> as seen ON the target; an ssh locus is
+    reached through `ssh -O forward -L` on the existing mux, so the station
+    talks to http://127.0.0.1:<local forward>. -> _ac_target() tuple."""
+    key = _ac_locus_key(vm)
+    if not key or _ac_loci().get(key):
+        return _ac_target(vm)
+    t = _locus_target(key)
+    if not t.remote:
+        return AC_UPSTREAM, AC_SERVE_UNIT, "/ac/", ""
+    d = _AC_DISCOVERED.get(key) or {}
+    fresh = d.get("ts") and time.time() - d["ts"] < _AC_DISCOVER_TTL
+    if fresh and d.get("url") and LX.port_open(d.get("lport") or 0):
+        return _ac_target(vm)
+    if fresh and d.get("error") and not d.get("url"):
+        return _ac_target(vm)
+    port, src, err = await _ac_discover_port(t)
+    rec = {"ts": time.time(), "port": port, "source": src, "error": err, "url": "",
+           "unit": "abstract-claude-serve@station.service"}
+    if port:
+        try:
+            if t.kind == LX.KIND_SSH:
+                lport = await _AC_FORWARDS.ensure(t, port)
+                via = f"ssh -L 127.0.0.1:{lport} -> {key}:127.0.0.1:{port}"
+            else:
+                # 1.0.144: an lxd guest's serve listens on the GUEST's loopback —
+                # reached through a local listener bridged by `lxc exec` per connection
+                lport = await _AC_BRIDGES.ensure(t, port)
+                via = f"lxc bridge 127.0.0.1:{lport} -> {key}:127.0.0.1:{port}"
+            rec.update(url=f"http://127.0.0.1:{lport}", lport=lport, via=via)
+        except (LX.LocusError, OSError) as e:
+            rec["error"] = str(e)
+    _AC_DISCOVERED[key] = rec
+    return _ac_target(vm)
 
 
 async def _ac_get(path, timeout=8, base=None):
@@ -5920,13 +7370,17 @@ async def _ac_serve_state(vm=""):
     the console uses to decide whether serve leads or the tmux seat does.
     vm '' / @keeper = this host's keeper serve; another locus = its own serve
     from _ac_target (1.0.101), framed at path (/ac/@<locus>/)."""
-    url, unit, path, key = _ac_target(vm)
+    url, unit, path, key = await _ac_resolve(vm)
     ent = _ac_loci().get(key) if key else None
+    disc = _AC_DISCOVERED.get(key) or {} if key else {}
     base = {"url": url, "path": path, "unit": unit, "locus": key or "@keeper",
-            "label": (ent or {}).get("label") or AC_SERVE_LABEL}
+            "label": (ent or {}).get("label") or AC_SERVE_LABEL,
+            "source": ("ac-loci" if ent else disc.get("source") or ("host" if not key else "")),
+            "via": disc.get("via") or ""}
     if key and not url:
-        return dict(base, ok=False, error="no abstract-claude serve configured for locus "
-                    + key + " (ac-loci.json / STATION_CONSOLE_AC_LOCI)")
+        return dict(base, ok=False, error="no reachable abstract-claude serve on locus "
+                    + key + ": " + (disc.get("error") or "not discovered")
+                    + " (override: ac-loci.json / STATION_CONSOLE_AC_LOCI)")
     doc = await _ac_get("/api/state", timeout=2.5, base=url)
     if not isinstance(doc, dict):
         return dict(base, ok=False, error="no /api/state from " + url)
@@ -5943,7 +7397,7 @@ async def _ac_serve_restart(reason="", vm=""):
     touched. Waits for /api/state to answer again before reporting ok.
     1.0.101: vm = another locus restarts THAT locus's unit as its seat user
     (ssh / lxd grounding via _locus_run)."""
-    url, unit, _path, key = _ac_target(vm)
+    url, unit, _path, key = await _ac_resolve(vm)
     if key and not url:
         return {"ok": False, "surface": "serve", "unit": "", "locus": key,
                 "error": "no abstract-claude serve configured for locus " + key}
@@ -5984,20 +7438,400 @@ async def _keeper_surface_now(vm=""):
     return ("serve" if KEEPER_SURFACE == "serve" else "tmux"), ac
 
 
-async def _ac_serve_cache_doc():
+# ── 1.0.144: provision + start a locus's OWN serve, from the station ─────────
+# "Every locus needs a serve chat and a keeper" (operator 2026-10-01). The serve
+# is provisioned ON the locus, AS its user, through the locus transport
+# (locus_exec: bash -s / ssh / lxc) by the SHIPPED resources/bin/station-serve-
+# provision, shipped on stdin — the same script whatever the locus kind. Every
+# artifact it lays down is derived from shipped resources (see its header); the
+# locus's sessions then run its own rendered directives (the runner calls
+# directives.py --locus <locus> on every start).
+SERVE_PROVISION_SH = ROOT.parent / "bin" / "station-serve-provision"
+_SERVE_PROVISION_LOCK = asyncio.Lock()
+
+
+async def _resolve_vm_name(v):
+    """A wire locus name -> '' (this host) | the dropdown name | None (unknown).
+    The body-safe twin of _sidecar_vm (which reads ?vm= only)."""
+    v = (v or "").strip()
+    if not v or _is_host_vm(v):
+        return ""
+    await _loci_ready()
+    if _ssh_host(v):
+        return v
+    try:
+        names = await known_names()
+    except Exception:                                    # noqa: BLE001
+        names = set()
+    return v if v in names else None
+
+
+async def _locus_seats(vm):
+    """(ok, [{name, attached, created}], err) — the tmux sessions on the
+    locus's OWN console socket, listed AS that locus's user."""
+    try:
+        return await LX.list_seats(_locus_target(vm))
+    except Exception as e:                               # noqa: BLE001
+        return False, [], str(e)[:200]
+
+
+async def api_locus_serve(request):
+    """GET /api/locus/serve?vm= — the locus's serve + seats, one call:
+    {locus, kind, who, serve: _ac_serve_state, seats: [...], managed: {...}}."""
+    vm = await _sidecar_vm(request)
+    t = _locus_target(vm)
+    ac = await _ac_serve_state(vm)
+    ok, seats, err = await _locus_seats(vm)
+    return web.json_response({"locus": t.locus or _station_locus(), "vm": vm or "@self", "kind": t.kind,
+                              "serve": ac, "seats": seats, "seats_ok": ok, "seats_error": err,
+                              "managed": _serve_managed().get(vm) if vm else None,
+                              "provision": {"path": "/api/locus/serve/provision", "method": "POST"}})
+
+
+async def api_locus_serve_provision(request):
+    """POST /api/locus/serve/provision[?vm=] {vm?, instance?, port?} — run the
+    shipped station-serve-provision ON the locus as its user; on success the
+    station delivers that locus's comms pings + digest to its keeper session
+    (serve-managed.json). Idempotent: a healthy serve is reported, not restarted."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    body = body if isinstance(body, dict) else {}
+    want = str(request.query.get("vm") or body.get("vm") or "").strip()
+    vm = await _resolve_vm_name(want)
+    if vm is None:
+        return web.json_response({"ok": False, "error": "unknown locus " + want}, status=404)
+    inst = str(body.get("instance") or "station")
+    if not re.match(r"^[A-Za-z0-9_-]{1,32}$", inst):
+        return web.json_response({"ok": False, "error": "bad instance"}, status=400)
+    port = body.get("port")
+    try:
+        port = int(port) if port else None
+    except (TypeError, ValueError):
+        return web.json_response({"ok": False, "error": "bad port"}, status=400)
+    try:
+        text = SERVE_PROVISION_SH.read_text(encoding="utf-8")
+    except OSError as e:
+        return web.json_response({"ok": False, "error": "station-serve-provision not shipped: %s" % e}, status=500)
+    t = _locus_target(vm)
+    if _SERVE_PROVISION_LOCK.locked():
+        return web.json_response({"ok": False, "error": "a provision is already running"}, status=409)
+    async with _SERVE_PROVISION_LOCK:
+        res = await LX.serve_provision(t, text, instance=inst, locus=t.locus or _station_locus(), port=port)
+    key = _ac_locus_key(vm)
+    _AC_DISCOVERED.pop(key, None)                       # rediscover through the transport now
+    if res.get("ok") and vm:
+        _serve_managed_put(vm, {"locus": t.locus or vm, "kind": t.kind, "instance": inst,
+                                "port": res.get("port"), "user": res.get("user"),
+                                "app": res.get("app"), "version": res.get("version"),
+                                "provisioned": int(time.time()), "by": _station_id()})
+    if res.get("ok"):
+        # 1.0.146 (t4250): the standing roles' permission mode + cwd into the locus's
+        # config.json and the keeper's LOCUS NUANCES block — idempotent (missing keys only)
+        try:
+            res["standing"] = await _locus_standing_apply(request.app, vm, t, instance=inst, port=res.get("port"))
+        except Exception as e:                           # noqa: BLE001 — the serve is up; say what is missing
+            res["standing"] = {"ok": False, "error": str(e)[:300]}
+    res["serve"] = await _ac_serve_state(vm)
+    res.update(vm=vm or "@self", kind=t.kind)
+    audit(request, "serve-provision", "%s (%s) → %s %s" % (vm or "@self", t.kind,
+          "ok" if res.get("ok") else "FAILED", (res.get("error") or res.get("port") or "")),
+          ok=bool(res.get("ok")))
+    return web.json_response(res, status=200 if res.get("ok") else 502)
+
+
+# ── t4262: the locus's KEEPER = its serve roster Keeper role ─────────────────
+# The steward › sessions keeper card used to show the tmux seat (keeper-claude:
+# three native sessions on three models, "delegate-only", and the cumulative
+# relayed-token total drawn as a 1M context gauge). The Keeper is the serve
+# roster's keeper role: ONE session, ONE model (+ a staged pending_model), and
+# the context gauge that session's own rollover gauge. The tmux seat is the
+# emergency surface and rides along, marked as such.
+async def _ac_call(path, payload=None, base=None, timeout=8):
+    """One serve request with the error KEPT: (ok, status, body) where body is
+    the decoded JSON, else the upstream text. Unlike _ac_get/_ac_post nothing is
+    swallowed — the card shows the upstream's own words (t4262)."""
+    url = (base or AC_UPSTREAM).rstrip("/") + path
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=timeout)) as s:
+            req = s.post(url, json=(payload or {})) if payload is not None else s.get(url)
+            async with req as r:
+                text = await r.text()
+                try:
+                    body = json.loads(text) if text else {}
+                except ValueError:
+                    body = text
+                return r.status == 200, r.status, body
+    except Exception as e:                               # noqa: BLE001
+        return False, 0, "%s: %s" % (type(e).__name__, e)
+
+
+def _ac_err_text(status, body):
+    """The upstream's own error words for a failed _ac_call."""
+    if isinstance(body, dict):
+        msg = body.get("error") or body.get("message") or json.dumps(body)[:300]
+    else:
+        msg = str(body)[:300]
+    return ("HTTP %d: " % status if status else "") + msg
+
+
+async def _locus_keeper_base(vm):
+    """(serve url, console path, locus key, error) for the keeper route."""
+    url, _unit, path, key = await _ac_resolve(vm)
+    if vm and not url:
+        return "", path, key, ("no reachable serve on " + vm + ": "
+                               + ((_AC_DISCOVERED.get(key) or {}).get("error") or "not discovered"))
+    return url or AC_UPSTREAM, path, key, ""
+
+
+async def _locus_keeper_seat(app, vm):
+    """The tmux seat summary (frontier state) — the EMERGENCY surface, best
+    effort and bounded so a slow toolserver never holds the serve card."""
+    seat = {"emergency": True, "surface": "tmux",
+            "session": (_tmux_session_for("frontier", "claude-code") or "keeper-claude") if not vm else "keeper-claude"}
+    try:
+        st = await asyncio.wait_for(_rolling_state(app, vm), timeout=6)
+    except Exception as e:                               # noqa: BLE001
+        return dict(seat, ok=False, error=str(e)[:200])
+    if not isinstance(st, dict):
+        return dict(seat, ok=False, error="no frontier state")
+    seat.update(ok=bool(st.get("ok")), error=st.get("error") or "",
+                session=st.get("seat_session") or seat["session"],
+                busy=bool(st.get("busy")), locus=st.get("locus") or "",
+                idle_relaunch=st.get("idle_relaunch"))
+    return seat
+
+
+async def _locus_keeper_doc(app, vm):
+    """The /api/locus/keeper payload for vm ('' = this host)."""
+    base, path, key, err = await _locus_keeper_base(vm)
+    locus = key or _station_locus() or "host"
+    out = {"ok": False, "locus": locus, "vm": vm or "@self",
+           "serve": {"url": base, "path": path}, "keeper": None, "models": [], "relayed": None}
+    if err:
+        out["error"] = err
+        out["seat"] = await _locus_keeper_seat(app, vm)
+        return out
+    ok, st, roster = await _ac_call("/api/session/roster", base=base)
+    if not ok or not isinstance(roster, dict):
+        out["error"] = "serve roster: " + _ac_err_text(st, roster)
+        out["seat"] = await _locus_keeper_seat(app, vm)
+        return out
+    role = next((r for r in (roster.get("roles") or []) if isinstance(r, dict) and r.get("role") == "keeper"), None)
+    if not role:
+        out["error"] = "serve roster has no keeper role"
+        out["seat"] = await _locus_keeper_seat(app, vm)
+        return out
+    sid = str(role.get("live_session_id") or role.get("session_id") or "")
+    keeper = {"session_id": sid, "native_id": "", "backend": role.get("backend") or "",
+              "model": role.get("model") or "", "pending_model": role.get("pending_model") or "",
+              "default_model": role.get("default_model") or "",
+              "label": role.get("label") or "Keeper", "model_by": role.get("model_by") or "",
+              "model_at": role.get("model_at"), "gauge": None, "busy": None, "last_turn_ts": None,
+              "cwd": ""}
+    errors = []
+    ok, st, sess = await _ac_call("/api/console/sessions", base=base)
+    if ok and isinstance(sess, dict):
+        rows = sess.get("sessions") if isinstance(sess.get("sessions"), list) else []
+        row = next((s for s in rows if isinstance(s, dict) and (s.get("id") == sid or s.get("session_id") == sid)), None)
+        if row:
+            g = ((row.get("rollover") or {}).get("gauge") or {}) if isinstance(row.get("rollover"), dict) else {}
+            keeper.update(native_id=row.get("native_id") or "", busy=bool(row.get("busy")),
+                          last_turn_ts=row.get("updated") or row.get("created"),
+                          label=row.get("label") or keeper["label"], cwd=row.get("cwd") or "",
+                          actual_model=row.get("actual_model") or "",
+                          gauge={"tokens": g.get("tokens") or 0, "window": g.get("window") or 0,
+                                 "pct": g.get("pct") or 0, "source": g.get("source") or "",
+                                 "model": g.get("model") or ""} if g else None)
+        else:
+            errors.append("keeper session %s not in /api/console/sessions" % (sid or "(none)"))
+    else:
+        errors.append("serve sessions: " + _ac_err_text(st, sess))
+    ok, st, cat = await _ac_call("/api/console/models", base=base)
+    if ok and isinstance(cat, dict) and isinstance(cat.get("models"), list):
+        out["models"] = [{"backend": m.get("backend") or "", "model": m.get("model") or "",
+                          "label": m.get("label") or m.get("model") or "", "source": "serve"}
+                         for m in cat["models"] if isinstance(m, dict)]
+    else:
+        errors.append("serve models: " + _ac_err_text(st, cat))
+    # the cumulative relayed total — the number the old gauge mislabelled as
+    # context; from the serve's own usage DB, shown as a separate line.
+    cache = await _ac_serve_cache_doc(base=base)
+    if isinstance(cache, dict):
+        tot = cache.get("totals") or {}
+        out["relayed"] = {"tokens": tot.get("total_tokens") or 0, "runs": cache.get("requests_total") or 0,
+                          "cost_usd": tot.get("cost_usd") or 0, "source": "serve:/api/usage/report"}
+    out.update(ok=True, keeper=keeper, errors=errors, seat=await _locus_keeper_seat(app, vm))
+    return out
+
+
+async def api_locus_keeper(request):
+    """GET /api/locus/keeper?vm=<locus> → {locus, serve:{url,path}, keeper:{session_id,
+    native_id, backend, model, pending_model, label, gauge:{tokens,window,pct,source},
+    busy, last_turn_ts}, models:[{backend, model, label, source}], relayed, seat:{…,
+    emergency:true}}.
+    POST /api/locus/keeper {vm, action:"set_model", model, backend?} → forwards to
+    that serve's roster (set_provider first when the backend changes, then
+    set_model) and returns the roster status. Errors: {ok:false, error:<upstream text>}."""
+    if request.method == "POST":
+        try:
+            body = await request.json()
+        except Exception:                                # noqa: BLE001
+            body = {}
+        body = body if isinstance(body, dict) else {}
+        want = str(request.query.get("vm") or body.get("vm") or "").strip()
+    else:
+        body = {}
+        want = str(request.query.get("vm") or "").strip()
+    vm = await _resolve_vm_name(want)
+    if vm is None:
+        return web.json_response({"ok": False, "error": "unknown locus " + want}, status=404)
+    if request.method == "GET":
+        return web.json_response(await _locus_keeper_doc(request.app, vm))
+    action = str(body.get("action") or "set_model").strip()
+    if action != "set_model":
+        return web.json_response({"ok": False, "error": "unknown action %r" % action}, status=400)
+    model = str(body.get("model") or "").strip()
+    if model and not re.match(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,255}$", model):
+        return web.json_response({"ok": False, "error": "bad model id"}, status=400)
+    backend = str(body.get("backend") or "").strip()
+    by = str(body.get("by") or "station-ui")[:40]
+    base, _path, key, err = await _locus_keeper_base(vm)
+    if err:
+        return web.json_response({"ok": False, "error": err, "locus": key or vm}, status=502)
+    steps = []
+    if backend:
+        ok, st, roster = await _ac_call("/api/session/roster", base=base)
+        if not ok or not isinstance(roster, dict):
+            return web.json_response({"ok": False, "error": "serve roster: " + _ac_err_text(st, roster)}, status=502)
+        role = next((r for r in (roster.get("roles") or []) if isinstance(r, dict) and r.get("role") == "keeper"), {})
+        if backend != (role.get("backend") or ""):
+            ok, st, res = await _ac_call("/api/session/roster",
+                                         {"action": "set_provider", "role": "keeper", "backend": backend,
+                                          "model": model, "by": by}, base=base)
+            if not ok or not isinstance(res, dict) or not res.get("ok", True):
+                return web.json_response({"ok": False, "step": "set_provider",
+                                          "error": "serve set_provider: " + _ac_err_text(st, res)}, status=502)
+            steps.append("set_provider:" + backend)
+    ok, st, res = await _ac_call("/api/session/roster",
+                                 {"action": "set_model", "role": "keeper", "model": model, "by": by}, base=base)
+    if not ok or not isinstance(res, dict) or not res.get("ok", True):
+        return web.json_response({"ok": False, "step": "set_model", "steps": steps,
+                                  "error": "serve set_model: " + _ac_err_text(st, res)}, status=502)
+    steps.append("set_model:" + (model or "(serve default)"))
+    audit(request, "keeper-model", "%s → %s%s" % (key or "@self", model or "(serve default)",
+          (" [" + backend + "]") if backend else ""), ok=True)
+    role = next((r for r in (res.get("roles") or []) if isinstance(r, dict) and r.get("role") == "keeper"), {})
+    return web.json_response({"ok": True, "locus": key or _station_locus() or "host", "steps": steps,
+                              "staged": bool(res.get("staged")), "model": res.get("model", role.get("model")),
+                              "pending_model": res.get("pending_model", role.get("pending_model")) or "",
+                              "session_id": res.get("session_id") or role.get("session_id") or "",
+                              "roster": res})
+
+
+# ── 1.0.146 (t4250): "every locus has a keeper that knows its locus" ────────────
+STANDING_ROLES = ("keeper", "chat", "worker")
+STANDING_PERMISSION_MODE = os.environ.get("STATION_STANDING_PERMISSION_MODE") or "bypassPermissions"
+
+
+def _standing_config_keys():
+    """What every managed locus's AC_ROOT/config.json must carry for its standing
+    sessions (serve-core >= 0.1.4 permission_mode_by_label; 0.1.15 standing_*).
+    '~' = that locus user's $HOME, resolved ON the locus."""
+    return {"standing_permission_mode": STANDING_PERMISSION_MODE, "standing_cwd": "~",
+            "permission_mode_by_label": {r: STANDING_PERMISSION_MODE for r in STANDING_ROLES}}
+
+
+def _nuances_from(facts, pointer, managed, vm, t, instance="", port=None):
+    """The LOCUS NUANCES record (directives.nuances_block renders it) from the
+    facts read ON the locus (standing_config), the loci registry pointer
+    (toolserver loci/pointers) and the station's serve-managed record."""
+    pointer = pointer if isinstance(pointer, dict) else {}
+    managed = managed if isinstance(managed, dict) else {}
+    goal = str(pointer.get("goal") or "")
+    rules = [r for r in (pointer.get("tree_rules") or pointer.get("rules") or []) if isinstance(r, str)]
+    for ln in goal.splitlines():                     # a registry goal may spell tree rules inline
+        if re.match(r"^\s*(trees?|source|src)\b.*:", ln, re.I):
+            rules.append(ln.strip()[:200])
+    inst = instance or managed.get("instance") or "station"
+    return {"home": facts.get("home") or _locus_home(pointer.get("user") or managed.get("user") or ""),
+            "user": facts.get("user") or pointer.get("user") or managed.get("user") or "",
+            "hostname": pointer.get("host") or ("this host" if not t.remote else t.name),
+            "kind": t.kind, "state": facts.get("state") or "", "gate": facts.get("gate") or "",
+            "sudo_n": bool(facts.get("sudo_n")), "units": list(facts.get("units") or []),
+            "trees": list(facts.get("trees") or []), "tree_rules": rules[:8],
+            "serve": {"instance": inst, "port": port or managed.get("port") or "",
+                      "unit": "abstract-claude-serve@%s.service" % inst,
+                      "permission_mode": STANDING_PERMISSION_MODE, "cwd": facts.get("home") or "~"},
+            "goal": goal[:600], "registry": "toolserver loci/pointers" if pointer else "station serve-managed.json",
+            "updated": time.strftime("%Y-%m-%d %H:%M")}
+
+
+async def _locus_standing_apply(app, vm, t, instance="", port=None):
+    """Ship the standing roles' config into the locus's AC_ROOT/config.json
+    (missing keys only), record the LOCUS NUANCES in its directives/station.json
+    and re-render its directives (the keeper reads them next turn). Idempotent."""
+    facts = await LX.standing_config(t, _standing_config_keys())
+    pointer = {}
+    try:
+        feed = await _ts_call(app, "loci/pointers", {}, timeout=8)
+        pointer = ((feed or {}).get("ssh_hosts") or {}).get(t.locus or vm) or {}
+    except Exception:                                    # noqa: BLE001 — registry down: facts only
+        pointer = {}
+    nuances = _nuances_from(facts, pointer, _serve_managed().get(vm) if vm else {}, vm, t, instance, port)
+    try:
+        cfg = await _seat_cfg(t)
+        cur = _cfg_json(cfg, "station")
+    except LX.LocusError:
+        cur = None
+    st = dict(cur if isinstance(cur, dict) else {}, nuances=nuances)
+    if not t.remote:
+        st.update(port=PORT, locus=_station_locus())
+    path = await LX.write_cfg(t, "station", json.dumps(st))
+    if t.remote:
+        rendered, why = await _remote_render(t)
+    else:
+        rendered, why = bool(_render_session_directives()), "host render"
+    _audit_line("locus-standing", "%s: config %s added %s; nuances → %s; render %s (%s)"
+                % (vm or "@self", facts.get("path"), ",".join(facts.get("added") or []) or "nothing (all present)",
+                   path, "ok" if rendered else "FAILED", (why or "")[:120]))
+    return {"ok": True, "config": {"path": facts.get("path"), "added": facts.get("added") or [],
+                                   "present": facts.get("present") or []},
+            "nuances": nuances, "station_json": path, "rendered": rendered, "render_detail": why}
+
+
+async def api_locus_serve_standing(request):
+    """POST /api/locus/serve/standing[?vm=] — (re)apply the standing roles'
+    config + LOCUS NUANCES to a locus without re-provisioning its serve."""
+    want = str(request.query.get("vm") or "").strip()
+    vm = await _resolve_vm_name(want) if want else ""
+    if vm is None:
+        return web.json_response({"ok": False, "error": "unknown locus " + want}, status=404)
+    t = _locus_target(vm)
+    try:
+        res = await _locus_standing_apply(request.app, vm, t)
+    except LX.LocusError as e:
+        return web.json_response({"ok": False, "vm": vm or "@self", "error": str(e)}, status=502)
+    audit(request, "locus-standing", "%s added=%s" % (vm or "@self", ",".join(res["config"]["added"]) or "-"))
+    return web.json_response(dict(res, vm=vm or "@self"))
+
+
+async def _ac_serve_cache_doc(base=None):
     """The /api/frontier/cache shape, built from the keeper serve's OWN usage DB
     (/api/usage/report + /api/usage/cache) instead of a tmux seat transcript.
     Same keys the SeatMeter already renders, so the token meter keeps working
-    when serve is the surface. Best-effort: None when serve is unreachable."""
-    rep = await _ac_get("/api/usage/report?last=50")
+    when serve is the surface. Best-effort: None when serve is unreachable.
+    base (1.0.141) = the SELECTED locus's serve (its forward), default host."""
+    rep = await _ac_get("/api/usage/report?last=50", base=base)
     if not isinstance(rep, dict):
         return None
-    cache = await _ac_get("/api/usage/cache") or {}
+    cache = await _ac_get("/api/usage/cache", base=base) or {}
     totals = rep.get("totals") or {}
     recent = rep.get("recent") or []
     newest = recent[0] if recent else {}
     doc = {"ok": True, "backend": "serve", "seat": "abstract-claude serve",
-           "seat_live": True, "surface": "serve", "upstream": AC_UPSTREAM,
+           "seat_live": True, "surface": "serve", "upstream": base or AC_UPSTREAM,
            "unit": AC_SERVE_UNIT, "busy": False,
            "session_id": newest.get("session_id") or "",
            "model": newest.get("model") or "",
@@ -6088,9 +7922,10 @@ async def ac_proxy(request):
     # 1.0.101: /ac/@<locus>/... frames that locus's OWN serve (ac-loci.json)
     m = re.match(r"@([A-Za-z0-9_.-]+)(?:/(.*))?$", tail)
     if m:
-        url, unit2, path, key = _ac_target(m.group(1))
+        url, unit2, path, key = await _ac_resolve(m.group(1))
         if not url:
-            return web.json_response({"error": "no abstract-claude serve configured for locus " + key,
+            return web.json_response({"error": "no reachable abstract-claude serve on locus " + key + ": "
+                                      + ((_AC_DISCOVERED.get(key) or {}).get("error") or "not discovered"),
                                       "hint": "add it to " + str(AC_LOCI_PATH) + " or STATION_CONSOLE_AC_LOCI"}, status=404)
         if m.group(2) is None:                      # /ac/@hugpy -> /ac/@hugpy/ (relative asset paths)
             raise web.HTTPFound(path)
@@ -6200,7 +8035,8 @@ async def ts_proxy(request):
 # ── SESSION-PULL-PATCH 2026-09-02: session pull + resume-capable seats ───────────────────────────
 _PULL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,40}$")
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
-HANDOFF_SPAWN_FEATURES = ["resume", "fork", "name", "ssh-hosts", "probe"]
+HANDOFF_SPAWN_FEATURES = ["resume", "fork", "name", "ssh-hosts", "probe", "verify", "session-id"]
+HANDOFF_SPAWN_VERIFY_S = 2.5     # seconds a fresh seat must stay alive before it is reported spun
 
 
 def _station_id():
@@ -6294,7 +8130,13 @@ async def handoff_spawn(request):
     `name` picks the tmux session (default handoff-h<id>). An ssh target that
     matches a registered ssh-host (local or toolserver-distributed) is reached
     with that host's key/port. Called by the toolserver (HANDOFF_SPAWN_URL) with
-    X-Console-Token, or by an operator session; auth_mw has gated this route."""
+    X-Console-Token, or by an operator session; auth_mw has gated this route.
+    1.0.146: the reply is VERIFIED — the seat must still be alive after
+    HANDOFF_SPAWN_VERIFY_S (a dead pane is reported with its last lines and the
+    session is killed, never left as a ghost 'spun' seat); a fresh seat is
+    given its Claude session id (`--session-id`, returned as session_id) and
+    the env HANDOFF_ID=<handoff> / EXCHANGE_LOCUS=<locus> so its SessionStart
+    hook pulls exactly this handoff row from the toolserver."""
     if request.method == "GET":
         return web.json_response({"ok": True, "features": HANDOFF_SPAWN_FEATURES,
                                   "station": _station_id(), "socket": KEEPER_TMUX_SOCK})
@@ -6318,15 +8160,25 @@ async def handoff_spawn(request):
         fork = str(fork).strip().lower() in ("1", "true", "yes", "on")
     if ssh_t and not re.match(r"^[A-Za-z0-9._@:-]+$", ssh_t):
         return web.json_response({"ok": False, "error": "bad ssh target"}, status=400)
-    inner = (f"cd {shlex.quote(dirp)} 2>/dev/null; "
+    locus = _canon_locus(str(body.get("locus") or "")) or ""
+    handoff_id = re.sub(r"[^A-Za-z0-9_-]", "", str(body.get("handoff") or ""))[:16]
+    session_id = "" if resume else str(uuid.uuid4())
+    env_pre = ""
+    if locus:
+        env_pre += f"export EXCHANGE_LOCUS={shlex.quote(locus)}; "
+    if handoff_id:
+        env_pre += f"export HANDOFF_ID={shlex.quote(handoff_id)}; "
+    inner = (env_pre + f"cd {shlex.quote(dirp)} 2>/dev/null; "
              # 1.0.63: pre-seed folder trust (same snippet the frontier seat uses) so a
              # freshly spawned seat never stalls at Claude Code's trust dialog
              f'printf %s {_SEAT_TRUST_B64} | base64 -d | python3 - "$HOME/.claude.json" "$(pwd)" {shlex.quote(_ts_configured_url())} >/dev/null 2>&1 || true; '
              "claude")
     if resume:
         inner += " --resume " + shlex.quote(resume) + (" --fork-session" if fork else "")
-    elif brief:
-        inner += " " + shlex.quote(brief)
+    else:
+        inner += " --session-id " + session_id
+        if brief:
+            inner += " " + shlex.quote(brief)
     via = "local"
     if ssh_t and _is_self_target(ssh_t):
         via = "local-self"          # the session runs as THIS station's own user@host
@@ -6345,23 +8197,53 @@ async def handoff_spawn(request):
         cmd = " ".join(shlex.quote(a) for a in argv_ssh)
     else:
         cmd = inner
+    if not _tmux_available():
+        return web.json_response({"ok": False, "error": TMUX_MISSING_MSG}, status=503)
+    # remain-on-exit is set in the SAME tmux command so a seat that dies at once
+    # leaves its last lines readable instead of vanishing with the session.
     argv = _scope_prefix() + ["tmux", "-L", KEEPER_TMUX_SOCK, "new-session", "-d", "-s", name,
-                              "bash", "-lc", cmd]
+                              "bash", "-lc", cmd, ";", "set-option", "-t", "=" + name, "remain-on-exit", "on"]
     proc = await asyncio.create_subprocess_exec(
         *argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT)
     out, _ = await proc.communicate()
     if proc.returncode != 0:
         return web.json_response(
             {"ok": False, "error": (out or b"").decode()[:300] or
-             f"tmux exited {proc.returncode} (duplicate session?)"}, status=502)
+             f"tmux exited {proc.returncode} (duplicate session, or the seat exited at once)"}, status=502)
+    alive, tail = await _seat_verify_alive(name, HANDOFF_SPAWN_VERIFY_S)
+    if not alive:
+        audit(request, "handoff-spawn", f"{name} DIED at launch via={via} target={ssh_t or 'local'}:{dirp}: {tail[:160]}", ok=False)
+        return web.json_response({"ok": False, "error": "seat exited at launch: " + (tail or "no output")[:400],
+                                  "session": name, "via": via}, status=502)
     handle = f"tmux -L {KEEPER_TMUX_SOCK} attach -t {name}"
     audit(request, "handoff-spawn",
-          f"{name} seat={seat} via={via} target={ssh_t or 'local'}:{dirp}"
-          + (f" resume={resume[:8]} fork={fork}" if resume else ""))
-    return web.json_response({"ok": True, "handle": handle, "session": name,
+          f"{name} seat={seat} via={via} target={ssh_t or 'local'}:{dirp} verified"
+          + (f" resume={resume[:8]} fork={fork}" if resume else f" session_id={session_id[:8]}")
+          + (f" handoff={handoff_id}" if handoff_id else ""))
+    return web.json_response({"ok": True, "handle": handle, "session": name, "verified": True,
+                              "session_id": session_id, "handoff": handoff_id, "locus": locus,
                               "socket": KEEPER_TMUX_SOCK, "resumed": resume, "fork": fork,
                               "via": via, "station": _station_id(),
                               "attach": f"/wsterm?surface=shell&vm=@keeper&tmux={name}"})
+
+
+async def _seat_verify_alive(name, wait_s):
+    """(alive, tail): after wait_s, is the seat's pane still running? A dead
+    pane's last lines are captured and the session is killed (no ghost seat);
+    a live one gets remain-on-exit switched back off."""
+    await asyncio.sleep(wait_s)
+    rc, out, _ = await _run("tmux", "-L", KEEPER_TMUX_SOCK, "display-message", "-p", "-t", "=" + name,
+                            "#{pane_dead} #{pane_dead_status}")
+    if rc != 0:
+        return False, "tmux session vanished (" + (out or "").strip()[:200] + ")"
+    dead, _, status = (out or "").strip().partition(" ")
+    if dead == "1":
+        rc2, cap, _ = await _run("tmux", "-L", KEEPER_TMUX_SOCK, "capture-pane", "-p", "-t", "=" + name, "-S", "-12")
+        lines = [ln.rstrip() for ln in (cap or "").splitlines() if ln.strip()] if rc2 == 0 else []
+        await _run("tmux", "-L", KEEPER_TMUX_SOCK, "kill-session", "-t", "=" + name)
+        return False, f"rc={status or '?'}: " + " | ".join(lines[-6:])
+    await _run("tmux", "-L", KEEPER_TMUX_SOCK, "set-option", "-t", "=" + name, "remain-on-exit", "off")
+    return True, ""
 
 
 async def api_sessions_pulled(request):
@@ -6422,9 +8304,9 @@ async def _stop_bugreport_api(app):
 
 
 async def bugreport_proxy(request):
-    """Forward a request to the bugreport-api sidecar, verbatim (ssh-host
-    loci reroute to their own workbench first)."""
-    resp = await _ssh_vm_reroute(request)
+    """Forward a request to the bugreport-api sidecar, verbatim (a locus's
+    central tails reroute to the DB first)."""
+    resp = await _central_vm_reroute(request)
     if resp is not None:
         return resp
     sess = request.app.get("proxy_sess")
@@ -6504,7 +8386,7 @@ _AC_ENSURE = (
 _SEAT_TRUST_B64 = "aW1wb3J0IGpzb24sc3lzLG9zLHJlCnAsd3M9c3lzLmFyZ3ZbMV0sc3lzLmFyZ3ZbMl0KdXJsPXN5cy5hcmd2WzNdIGlmIGxlbihzeXMuYXJndik+MyBlbHNlICIiCnRyeToKICAgIGQ9anNvbi5sb2FkKG9wZW4ocCkpCmV4Y2VwdCBFeGNlcHRpb246CiAgICBkPXt9CmQuc2V0ZGVmYXVsdCgnaGFzQ29tcGxldGVkT25ib2FyZGluZycsVHJ1ZSkKZC5zZXRkZWZhdWx0KCdieXBhc3NQZXJtaXNzaW9uc01vZGVBY2NlcHRlZCcsVHJ1ZSkKZC5zZXRkZWZhdWx0KCdwcm9qZWN0cycse30pLnNldGRlZmF1bHQod3Mse30pWydoYXNUcnVzdERpYWxvZ0FjY2VwdGVkJ109VHJ1ZQojIHRvb2xzZXJ2ZXIgTUNQIGJyaWRnZSAoMS4wLjcwKTogZXZlcnkgY2xhdWRlLWNvZGUgc2VhdCBnZXRzIGl0LCBmcm9tIHRoZSBzZWF0IHVzZXIncyBPV04KIyBjcmVkZW50aWFsIGZpbGVzIChkZWItcHJvdmlzaW9uZWQpIC0gdGhlIHRva2VuIG5ldmVyIHJpZGVzIHRoZSBsYXVuY2ggY29tbWFuZCBsaW5lLgp0b2s9IiIKaG9tZT1vcy5wYXRoLmV4cGFuZHVzZXIoIn4iKQpmb3IgZiBpbiAob3MucGF0aC5qb2luKGhvbWUsIi5jb25maWciLCJodWdweSIsIm9wZXJhdG9yLmVudiIpLCBvcy5wYXRoLmpvaW4oaG9tZSwiLmNvbmZpZyIsImh1Z3B5LXN0YXRpb24iLCJ0b29sc2VydmVyLmVudiIpKToKICAgIHRyeToKICAgICAgICBmb3IgbG4gaW4gb3BlbihmKToKICAgICAgICAgICAgbT1yZS5tYXRjaChyIl4oVE9PTFNFUlZFUl9UT0tFTnxIVUdQWV9PUEVSQVRPUl9UT0tFTnxUT09MU0VSVkVSX09QRVJBVE9SX1RPS0VOKT0oLispJCIsbG4uc3RyaXAoKSkKICAgICAgICAgICAgaWYgbSBhbmQgbS5ncm91cCgyKS5zdHJpcCgpOiB0b2s9bS5ncm91cCgyKS5zdHJpcCgpLnN0cmlwKCciJyk7IGJyZWFrCiAgICBleGNlcHQgT1NFcnJvcjoKICAgICAgICBwYXNzCiAgICBpZiB0b2s6IGJyZWFrCmlmIHRvazoKICAgIG1zPWQuc2V0ZGVmYXVsdCgnbWNwU2VydmVycycse30pCiAgICBjdXI9bXMuZ2V0KCd0b29sc2VydmVyJykgb3Ige30KICAgIGlmIG5vdCBjdXIgb3IgY3VyLmdldCgnY29tbWFuZCcpPT0nYWJzdHJhY3QtY2xhdWRlJzoKICAgICAgICAjIDIwMjYtMDktMzA6IFVSTCBvbmx5IHdoZW4gY29uZmlndXJlZCAoZWxzZSB0aGUgYnJpZGdlIGRpc2NvdmVycyB0aGUgbG9jYWwgdG9vbHNlcnZlcikKICAgICAgICB1PXVybCBvciAoY3VyLmdldCgnZW52Jykgb3Ige30pLmdldCgnVE9PTFNFUlZFUl9VUkwnKSBvciAnJwogICAgICAgIGVudj17J1RPT0xTRVJWRVJfVE9LRU4nOnRva30KICAgICAgICBpZiB1OiBlbnZbJ1RPT0xTRVJWRVJfVVJMJ109dQogICAgICAgIG1zWyd0b29sc2VydmVyJ109eyd0eXBlJzonc3RkaW8nLCdjb21tYW5kJzonYWJzdHJhY3QtY2xhdWRlJywnYXJncyc6WydtY3AnXSwnZW52JzplbnZ9Cmpzb24uZHVtcChkLG9wZW4ocCwndycpKQo="
 
 
-def _claude_seat_cmd(label: str, model_key: str = "claude-code") -> str:
+def _claude_seat_cmd(label: str, model_key: str = "claude-code", cfg=None) -> str:
     """The interactive Claude seat, launched EXACTLY like the MCT's A
     (hugpy_agent claude_adapter — operator, 2026-08-20: the two must not
     differ): a FRESH per-seat config dir on every spawn (wiped cache), the A
@@ -6523,23 +8405,30 @@ def _claude_seat_cmd(label: str, model_key: str = "claude-code") -> str:
     silently dropping to a shell, and (d) passes the operator's model and the
     frontier directive (--append-system-prompt) — the same text the steward
     tab shows."""
-    tmpl = shlex.quote(_claude_seat_settings_json())
-    sysp = shlex.quote(_claude_seat_system_prompt())
+    # 1.0.141: cfg = the TARGET locus's seat-config snapshot (read ON the
+    # target by locus_exec.read_cfg) — directive, models, fs/delegate switches,
+    # template and handoff are the target's own, never the viewing station's.
+    tmpl = shlex.quote(_claude_seat_settings_json(cfg))
+    _sysp_text = _claude_seat_system_prompt(cfg)
+    sysp = shlex.quote(_sysp_text)
+    ts_url_q = (shlex.quote(_ts_configured_url()) if not (cfg or {}).get("remote")
+                else '"${HUGPY_TOOLSERVER_URL:-${TOOLSERVER_URL:-}}"')
     # mct v2: the native seat launched FOR the mct mode runs the operator's
     # "mct" model (frontier-models.json); the plain claude-code mode keeps its own.
-    models = _frontier_models()
+    models = _frontier_models(cfg)
     model = models.get(model_key) if model_key in models else None
     if model is None:
         model = models["claude-code"]
     mflag = (" --model " + shlex.quote(model)) if model else ""
-    fs = "MEDIATED (file tools denied; route via B)" if _frontier_fs_mediated() else "DIRECT"
+    fs = "MEDIATED (file tools denied; route via B)" if _frontier_fs_mediated(cfg) else "DIRECT"
     banner = (
         'echo "── hugpy-station claude seat ─────────────────────────────────"; '
         'echo "  seat      : ' + label + '"; '
         'echo "  user@host : $(id -un)@$(hostname)"; '
         'echo "  model     : ' + (model or "Claude Code default") + '"; '
         'echo "  fs switch : ' + fs + '"; '
-        'echo "  directive : ' + str(len(_frontier_directive_text()[0])) + ' chars via --append-system-prompt (see 🛡 steward → frontier directive)"; '
+        'echo "  directive : tmux seat (fallback / inference arm) · ' + str(len(_sysp_text)) + ' chars via --append-system-prompt (see 🛡 steward → directive)"; '
+        'echo "  handoff   : toolserver row (handoff_pull) — injected by the SessionStart hook, never a file"; '
         'echo "  config    : FRESH per launch — abstract-claude launch → ~/.claude-sessions/<stamp>-<pid>-' + label + ' (login/identity carried from ~/.claude; legacy $c only if abstract-claude is unavailable)"; ')
     nologin = (
         'if [ ! -s "$HOME/.claude/.credentials.json" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then '
@@ -6570,7 +8459,6 @@ def _claude_seat_cmd(label: str, model_key: str = "claude-code") -> str:
     fresh = ('__sid="$(python3 -c "import uuid;print(uuid.uuid4())" 2>/dev/null || cat /proc/sys/kernel/random/uuid)"; '
              'export MCT_SEAT_SID="$__sid"; '
              'if [ "$ac_ok" = 1 ]; then '
-             f'rm -f {shlex.quote(str(FRONTIER_HANDOFF_PATH))} 2>/dev/null; '
              f'AC_SETTINGS_JSON={tmpl} AC_SESSION_LABEL={shlex.quote(label)} '
              f'exec abstract-claude launch -- --dangerously-skip-permissions{mflag} '
              '--session-id "$__sid" --append-system-prompt "$__SYSP"; fi; '
@@ -6596,11 +8484,8 @@ def _claude_seat_cmd(label: str, model_key: str = "claude-code") -> str:
             'ln -sf "$j" "$c/.claude.json"; '
             # seed folder-trust for the workspace (see _SEAT_TRUST_B64) so a
             # fresh locus's first claude-code seat does not die at the trust dialog
-            f'printf %s {_SEAT_TRUST_B64} | base64 -d | python3 - "$j" "$(pwd)" {shlex.quote(_ts_configured_url())} >/dev/null 2>&1 || true; '
+            f'printf %s {_SEAT_TRUST_B64} | base64 -d | python3 - "$j" "$(pwd)" {ts_url_q} >/dev/null 2>&1 || true; '
             f'printf %s {tmpl} > "$c/settings.json"; '
-            # 1.0.65: the session init prompt was folded into {sysp} above; this
-            # launch consumes it — the file goes so it never rides a later session.
-            f'rm -f {shlex.quote(str(FRONTIER_HANDOFF_PATH))} 2>/dev/null; '
             # mct v2: even the LEGACY (no abstract-claude launch) path attaches
             # the toolserver MCP explicitly — operator: "the keeper processes
             # need to be launched with the toolserver MCP". Same server entry
@@ -6803,8 +8688,8 @@ async def _loci_sync_once(app):
         # station reappear in its own dropdown) OR <this user>@<one of this
         # host's ips> on the plain ssh port — a guest reached by a port-forward
         # on our own IP (op@192.168.1.113:2222) is a different machine.
-        me, my_ips, self_locus = getpass.getuser(), _local_ips_cached(), ""
-        env_locus = (os.environ.get("STATION_LOCUS") or "").strip().lower()
+        me, my_ips, self_rows = getpass.getuser(), _local_ips_cached(), {}
+        env_locus = _canon_locus(os.environ.get("STATION_LOCUS") or "")
         for n, h in (feed.get("ssh_hosts") or {}).items():
             if not _SSH_NAME_RE.match(n) or n in lxd or not isinstance(h, dict):
                 continue
@@ -6817,21 +8702,30 @@ async def _loci_sync_once(app):
                 port = 22
             is_self = (n == env_locus) or (user == me and host in my_ips and port == 22)
             if is_self:                            # 1.0.85: this station itself
-                self_locus = env_locus or self_locus or n
+                self_rows[n] = h
                 continue
             key = str(h.get("key") or "")
             hosts[n] = {"host": host, "user": user, "port": port,
                         "key": key if key and os.path.isfile(os.path.expanduser(key)) else "",
-                        "added": "", "source": "toolserver", "goal": str(h.get("goal") or "")}
+                        "added": "", "source": "toolserver", "goal": str(h.get("goal") or ""),
+                        "kind": str(h.get("kind") or "")}
+        # 1.0.141: several rows on this station's own endpoint (keeper + ae-mgr)
+        # resolve to ONE name deterministically, never dict order.
+        self_locus = env_locus or _pick_endpoint_locus(list(self_rows), self_rows)
         _TS_LOCI.update(hosts=hosts, sessions=list(feed.get("sessions") or []),
                         ts=int(time.time()), error="", lxd=lxd, self=self_locus)   # 1.0.85: self
     except Exception as e:
         _TS_LOCI["error"] = str(e)[:200]
-    try:
-        await _deliver_pings(app)
-        await _nudge_frontier(app, _station_locus() or "")
-    except Exception as e:  # noqa: BLE001
-        _rlog.warning("ping delivery: %s", e)
+    _TS_LOCI["synced"] = True    # 1.0.138: first attempt done (see _loci_ready)
+    for tgt in _delivery_targets("ping"):
+        try:
+            if tgt["host"]:
+                await _deliver_pings(app)
+                await _nudge_frontier(app, _station_locus() or "")
+            else:
+                await _deliver_pings_locus(app, tgt)
+        except Exception as e:  # noqa: BLE001
+            _rlog.warning("ping delivery %s: %s", tgt.get("locus"), e)
 
 
 # ── 1.0.69: comms delivery — board pings reach THIS station's seat ─────────────
@@ -6844,17 +8738,83 @@ _PINGS_SEEN_PATH = FV_STATE_HOME / "comms-delivered.json"
 _NUDGE_PENDING_PATH = FV_STATE_HOME / "comms-nudge-pending.json"
 
 
-def _pings_seen():
-    doc = _read_json(_PINGS_SEEN_PATH, {}) or {}
+def _pings_seen(path=None):
+    doc = _read_json(path or _PINGS_SEEN_PATH, {}) or {}
     return set(doc.get("ids") or [])
 
 
-def _pings_seen_write(ids):
+def _pings_seen_write(ids, path=None):
+    path = path or _PINGS_SEEN_PATH
     try:
-        _PINGS_SEEN_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _PINGS_SEEN_PATH.write_text(json.dumps({"ids": sorted(ids)[-2000:]}), encoding="utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"ids": sorted(ids)[-2000:]}), encoding="utf-8")
     except OSError:
         pass
+
+
+# ── 1.0.144: delivery to EVERY locus's keeper serve session ─────────────────────
+# Operator 2026-10-01: "being the station's host should have NO bearing on having a
+# serve chat and a keeper". Until 1.0.143 the comms leg (comms/inbox -> 📨 nudge into
+# the keeper's serve session) ran for THIS station's own locus only, against
+# AC_UPSTREAM, so a ping to any other locus (hugpy: r4165) reached no session at all.
+# Now the same leg runs per locus: the host (its own files, as before) plus every
+# locus whose serve this station provisioned (serve-managed.json) or that
+# STATION_DELIVERY_LOCI names — through that locus's own serve (_ac_resolve: ssh -L
+# forward / lxd bridge). A remote locus's pings are CLAIMED centrally (comms/claim)
+# first, so a locus that also runs its own station is never nudged twice, and marked
+# comms/delivered once the nudge landed. Per-locus state: <state>/loci/<locus>/.
+SERVE_MANAGED_PATH = FV_STATE_HOME / "serve-managed.json"
+
+
+def _serve_managed():
+    doc = _read_json(SERVE_MANAGED_PATH, {}) or {}
+    return {str(k): v for k, v in doc.items() if isinstance(v, dict) and _SSH_NAME_RE.match(str(k))}
+
+
+def _serve_managed_put(vm, rec):
+    doc = _serve_managed()
+    doc[vm] = dict(doc.get(vm) or {}, **rec)
+    _write_json_atomic(SERVE_MANAGED_PATH, doc)
+
+
+def _delivery_targets(kind=""):
+    """[{vm, locus, host}] — the loci whose keeper serve session THIS station
+    delivers to (kind 'ping': comms pings, 'digest': the open-todos digest).
+    STATION_<KIND>_LOCI, else STATION_DELIVERY_LOCI (comma list; '@self' = this
+    station's own locus) replaces the default: the host locus (not in a
+    STATION_DEV_QUIET copy) + every managed locus."""
+    own = _station_locus()
+    env = os.environ.get("STATION_%s_LOCI" % kind.upper()) if kind else None
+    if env is None:
+        env = os.environ.get("STATION_DELIVERY_LOCI")
+    if env is not None:
+        names = [n.strip() for n in env.split(",") if n.strip()]
+    else:
+        names = ([] if os.environ.get("STATION_DEV_QUIET") == "1" else ["@self"]) + sorted(_serve_managed())
+    out, seen = [], set()
+    for n in names:
+        if _is_host_vm(n):
+            if own and own not in seen:
+                seen.add(own)
+                out.append({"vm": "", "locus": own, "host": True})
+            continue
+        loc = _central_locus(n) or n
+        if loc and loc not in seen:
+            seen.add(loc)
+            out.append({"vm": n, "locus": loc, "host": False})
+    return out
+
+
+def _locus_state_dir(locus):
+    return FV_STATE_HOME / "loci" / re.sub(r"[^a-z0-9._-]+", "-", (locus or "").lower())
+
+
+def _nudge_paths(target):
+    """(seen, pending) files of one delivery target (the host keeps its own)."""
+    if target.get("host"):
+        return _PINGS_SEEN_PATH, _NUDGE_PENDING_PATH
+    d = _locus_state_dir(target["locus"])
+    return d / "comms-delivered.json", d / "comms-nudge-pending.json"
 
 
 async def _live_frontier_session():
@@ -6889,18 +8849,27 @@ async def _deliver_pings(app):
     new = [p for p in pings if str(p["id"]) not in seen]
     if not new:
         return
+    # 2026-10-01 (operator): a BUG REPORT never reaches the keeper — an older
+    # station still posts findings / loops / B proposals as [ping] requests; they
+    # are re-routed to the worker (bug_route), not mailed, not nudged.
+    bugs = [p for p in new if _bugr is not None and _bugr.is_bug_ping(p)]
+    bug_ids = {str(p["id"]) for p in bugs}
+    mail = [p for p in new if str(p["id"]) not in bug_ids]
     rows = _keeper_mail_rows()
-    for p in new:
+    for p in mail:
         frm = re.sub(r"^\[ping\](?:\[msg\])?\s*(?:from\s+)?", "", str(p.get("note") or "")).split(" ")[0] or "board"
         rows.append(_mail_row(frm[:24], "keeper", f"[board {p['id']}] {str(p.get('text') or '')[:2000]}", unread=True))
-    _keeper_mail_write(rows)
+    if mail:
+        _keeper_mail_write(rows)
     # mail is delivered; remember the ids so a sync never re-appends them.
     seen.update(str(p["id"]) for p in new)
     _pings_seen_write(seen)
+    if bugs:
+        await _reroute_bug_pings(app, bugs)
     # A conversational [ping][msg] (fleet ✉ compose) is now in the ✉ inbox above and
     # needs no board footprint — CLOSE it so it never sits in the WORK queue. A real
     # request-ping has no [msg] marker and stays open as its durable backstop.
-    for p in new:
+    for p in mail:
         if "[msg]" in str(p.get("note") or "").lower():
             try:
                 await _ts_call(app, "todo/done", {"id": p["id"]}, timeout=10)
@@ -6910,24 +8879,119 @@ async def _deliver_pings(app):
     # non-empty input line only defers it to the next sync — the keeper must
     # eventually see one 📨 line (2026-09-03: hugpy's keeper was mid-turn when its
     # first pings arrived and would never have been told).
+    # 2026-10-01 (t4178): EVERY request ping is nudged — no gate, no B; the flood
+    # guards are the batch window + one hand-off in flight (_nudge_frontier).
+    nudge = await _gate_pings(app, mail, locus=locus)
     pend = _nudge_pending()
-    pend.extend(p for p in new if str(p["id"]) not in {str(q["id"]) for q in pend})
+    pend.extend(p for p in nudge if str(p["id"]) not in {str(q["id"]) for q in pend})
     _nudge_pending_write(pend)
     await _nudge_frontier(app, locus)
 
 
-def _nudge_pending():
-    doc = _read_json(_NUDGE_PENDING_PATH, {}) or {}
+async def _reroute_bug_pings(app, bugs):
+    """Legacy bug-report pings -> the bug outbox (worker of the origin locus when
+    that locus is known here, else this station's own worker); the keeper's
+    [ping] request is closed with a note saying where it went (never silent)."""
+    box = _bug_outbox()
+    if box is None:
+        return
+    hosts = set((_TS_LOCI.get("hosts") or {}).keys()) | set(_TS_LOCI.get("lxd") or [])
+    for p in bugs:
+        origin = _bugr.ping_origin(p)
+        vm = origin if origin and origin in hosts else ""
+        text = str(p.get("text") or "")
+        first = (text.strip().splitlines() or [""])[0]
+        box.offer("ping:" + str(p["id"]), vm=vm, locus=_bug_locus(vm), kind="rerouted-ping",
+                  title=first[:400], body=text[:4000] + "\n\n(re-routed from keeper board %s%s)"
+                  % (p["id"], (", origin " + origin) if origin else ""),
+                  severity="medium", count=1, source=_ping_sender(p))
+        try:
+            await _ts_call(app, "todo/update", {"id": p["id"], "status": "done",
+                                                "note": str(p.get("note") or "") + "\n\nre-routed by the station "
+                                                "(operator 2026-10-01): bug reports go to the WORKER session of "
+                                                "locus %s, not the keeper — see its `finding` board item."
+                                                % (_bug_locus(vm) or vm or "this station")}, timeout=10)
+        except Exception as e:                           # noqa: BLE001 — still in the outbox; board item stays open
+            _rlog.warning("reroute bug ping %s: %s", p.get("id"), e)
+        _audit_line("comms-bug-reroute", "%s → worker of %s" % (p.get("id"), vm or "host"))
+    box.save()
+    await _bug_pump(app)
+
+
+def _ping_sender(p):
+    return re.sub(r"^\[ping\](?:\[msg\])?\s*(?:from\s+)?", "", str(p.get("note") or "")).split(" ")[0] or "board"
+
+
+async def _gate_pings(app, pings, include_msg=False, locus=None):
+    """Which new comms pings nudge the keeper: EVERY request ping (a
+    conversational [ping][msg] is filed in ✉ and closed instead, unless
+    include_msg). 2026-10-01 (no silent suppression, d4187 / t4178): the 1.0.140
+    issue-gate decision — nudge only on page=true, fail closed when the toolserver
+    is down — is gone; the gate is consulted for ANNOTATION only (issue_fp rides
+    along when known) and can never withhold a ping. Bug reports never get here
+    (_deliver_pings re-routes them to the worker). 1.0.144: a ping delivered to
+    ANOTHER locus is observed as `sender->receiver` so the gate's self-origin
+    globs do not file a keeper -> hugpy delegation as that locus's own run."""
+    gate = _issue_gate(app)
+    out = []
+    for p in pings or []:
+        if "[msg]" in str(p.get("note") or "").lower() and not include_msg:
+            continue
+        pid = str(p.get("id"))
+        fp = _ig.fp_of(p) if gate is not None else None
+        if fp:
+            out.append(dict(p, issue_fp=fp))
+            continue
+        if gate is not None:
+            try:
+                frm = _ping_sender(p)
+                chan = _is_channel_ping(p)
+                ref = str(p.get("ref") or "")
+                if chan and not ref.startswith("ch_"):
+                    m = _CHANNEL_REF_RE.search(str(p.get("note") or ""))
+                    ref = m.group(1) if m else ref
+                text = str(p.get("text") or "")
+                caller = frm if (not locus or _canon_locus(frm) == locus) else "%s->%s" % (frm, locus)
+                res = await gate.observe(source=("channel:%s" % ref) if chan else ("comms:%s" % frm),
+                                         kind="channel" if chan else "comms",
+                                         subject=_ig.ping_subject(p) or text[:200], text=text[:600], severity=1,
+                                         caller=caller, meta={"ping": pid, "ref": ref, "from": frm},
+                                         locus=locus)
+                if res and res.get("fp"):
+                    p = dict(p, issue_fp=res["fp"])
+                    if not res.get("page"):
+                        _audit_line("comms-gate", "%s: %s %s — annotated, still nudged (no suppression)"
+                                    % (pid, res.get("fp"), res.get("reason")))
+            except Exception as e:                       # noqa: BLE001 — annotation only; never blocks delivery
+                _audit_line("comms-gate", "%s: gate observe failed (%s) — nudged anyway" % (pid, e))
+        out.append(p)
+    return out
+
+
+def _nudge_pending(path=None):
+    doc = _read_json(path or _NUDGE_PENDING_PATH, {}) or {}
     return [p for p in (doc.get("pings") or []) if isinstance(p, dict) and p.get("id")]
 
 
-def _nudge_pending_write(pings, last_sent=None):
+_KEEP = object()
+
+
+def _nudge_pending_write(pings, last_sent=None, inflight=_KEEP, path=None):
+    """pings + last_sent + (1.0.140) the in-flight serve hand-off being watched
+    until it drains (``inflight`` = {sid, message_ids, items, at}; kept unless
+    given; None clears it)."""
+    _NUDGE_PENDING_PATH = path or globals()["_NUDGE_PENDING_PATH"]
+    doc = _read_json(_NUDGE_PENDING_PATH, {}) or {}
     if last_sent is None:
-        last_sent = (_read_json(_NUDGE_PENDING_PATH, {}) or {}).get("last_sent") or 0
+        last_sent = doc.get("last_sent") or 0
+    if inflight is _KEEP:
+        inflight = doc.get("inflight")
+    body = {"pings": pings[-50:], "last_sent": last_sent}
+    if inflight:
+        body["inflight"] = inflight
     try:
         _NUDGE_PENDING_PATH.parent.mkdir(parents=True, exist_ok=True)
-        _NUDGE_PENDING_PATH.write_text(json.dumps({"pings": pings[-50:], "last_sent": last_sent}),
-                                       encoding="utf-8")
+        _NUDGE_PENDING_PATH.write_text(json.dumps(body), encoding="utf-8")
     except OSError:
         pass
 
@@ -6941,26 +9005,38 @@ except ImportError:                                  # pragma: no cover — pack
 # the legacy tmux pane is only the fallback when serve is unreachable/unhealthy.
 NUDGE_SERVE_ROLE = (os.environ.get("STATION_NUDGE_SERVE_ROLE") or "keeper").strip().lower()
 NUDGE_MIN_INTERVAL = max(0, int(os.environ.get("STATION_NUDGE_MIN_INTERVAL") or "300"))
+# 1.0.138 channel push for any harness: a comms ping whose ref is a CHANNEL id
+# (`ch_…` — toolserver channel_bind pings the bound locus with comms_ping
+# ref=<channel>, kind=request) is live conversation, not board mail: it skips the
+# NUDGE_MIN_INTERVAL batch window and is pushed at once through the same serve-
+# first / tmux-fallback nudge. comms_ping stores the ref in the note "(ref <ref>)".
+_CHANNEL_REF_RE = re.compile(r"\(ref (ch_[A-Za-z0-9_.:-]+)")
 
 
-async def _nudge_serve(app, line):
+def _is_channel_ping(p):
+    if not isinstance(p, dict):
+        return False
+    if str(p.get("ref") or "").startswith("ch_"):
+        return True
+    return bool(_CHANNEL_REF_RE.search(str(p.get("note") or "")))
+
+
+async def _nudge_serve(app, line, base=None):
     """Hand the nudge to serve's standing keeper session: POST
     /api/session/<role>/message (wait=false, lossless). Serve runs it at once
-    when idle and queues it for the turn boundary when busy — never interrupts."""
+    when idle and queues it for the turn boundary when busy — never interrupts.
+    base (1.0.144) = the target locus's serve (default: this host's)."""
     sess = app.get("proxy_sess")
     if sess is None:
         sess = app["proxy_sess"] = aiohttp.ClientSession()
-    base = AC_UPSTREAM.rstrip("/")
+    base = (base or AC_UPSTREAM).rstrip("/")
     to = aiohttp.ClientTimeout(total=8)
-    async with sess.get(base + "/api/session/roster", timeout=to) as r:
-        if r.status != 200:
-            return False, "serve roster HTTP %d" % r.status
-        doc = await r.json(content_type=None)
-    role = next((e for e in (doc or {}).get("roles") or [] if isinstance(e, dict)
-                 and e.get("role") == NUDGE_SERVE_ROLE), None)
-    if not role or not role.get("session_id"):
-        return False, "no live %s session in serve" % NUDGE_SERVE_ROLE
-    sid = str(role["session_id"])
+    app["_rt"]["nudge_last_submit"] = None
+    # 1.0.140: the keeper SESSION, resolved fresh on EVERY send (roster role ->
+    # rollover chain head) — it changes across rollover, restart and wipe.
+    sid, why = await _keeper_console_head(app, base)
+    if not sid:
+        return False, why
     if sid.startswith("cs-"):
         # 1.0.126: a CONSOLE session (claude/gpt/hugpy via console_service) is fed
         # through its own submit — POST /api/console/chat runs it now when idle and
@@ -6971,7 +9047,13 @@ async def _nudge_serve(app, line):
                              timeout=to) as r:
             res = await r.json(content_type=None) if r.content_type and "json" in r.content_type else {}
             if r.status == 200 and (res or {}).get("message_ids"):
-                return True, "serve:%s %s (%s)" % (NUDGE_SERVE_ROLE, sid, "queued" if res.get("queued") else "sent")
+                # watched until it drains (_nudge_drain): an auto=off session does not
+                # pick a queued message up at the turn boundary by itself
+                app["_rt"]["nudge_last_submit"] = {"sid": str(res.get("session_id") or sid),
+                                                   "message_ids": [str(m) for m in res["message_ids"]],
+                                                   "queued": bool(res.get("queued"))}
+                return True, "serve:%s %s via %s (%s)" % (NUDGE_SERVE_ROLE, sid, why,
+                                                          "queued" if res.get("queued") else "sent")
             return False, "serve console chat HTTP %d %s" % (r.status, str((res or {}).get("error") or "")[:120])
     body = {"text": line, "from": "station", "by": "station-relay", "wait": False, "via_b": False}
     async with sess.post(base + "/api/session/%s/message" % NUDGE_SERVE_ROLE, json=body, timeout=to) as r:
@@ -6993,6 +9075,131 @@ async def _nudge_serve(app, line):
         except Exception:                                # noqa: BLE001 — no log = still running
             pass
     return True, "serve:%s %s (%s)" % (NUDGE_SERVE_ROLE, sid, how)
+
+
+async def _keeper_console_head(app, base=None):
+    """(sid, why): the keeper head as its CONSOLE session. 1.0.144: a NATIVE
+    keeper id (a roster-started keeper on a freshly provisioned locus) is
+    resolved to the console session that wraps it — adopted the way serve's own
+    console adopts it (an existing one is returned) — so every prompt to that
+    transcript rides ONE queue (console chat / prompt_send / nudge), and the
+    drain compares like with like (a native head vs a cs- in-flight id read as
+    "rolled over" and re-queued the nudge every tick)."""
+    sid, why = await (_keeper_serve_session(app, base) if base else _keeper_serve_session(app))
+    if sid and not sid.startswith("cs-"):
+        try:
+            st, ad = await (_serve_post(app, "/api/console/sessions", {"backend": "claude", "native_id": sid},
+                                        base=base) if base else
+                            _serve_post(app, "/api/console/sessions", {"backend": "claude", "native_id": sid}))
+            if st == 200 and isinstance(ad, dict) and str(ad.get("id") or "").startswith("cs-"):
+                sid, why = str(ad["id"]), why + " (console)"
+        except Exception:                                # noqa: BLE001 — older serve: the native id
+            pass
+    return sid, why
+
+
+async def _serve_get(app, path, timeout=8, base=None):
+    """GET a serve JSON route -> (status, doc). base = a locus's serve (1.0.144)."""
+    sess = app.get("proxy_sess")
+    if sess is None:
+        sess = app["proxy_sess"] = aiohttp.ClientSession()
+    async with sess.get((base or AC_UPSTREAM).rstrip("/") + path, timeout=aiohttp.ClientTimeout(total=timeout)) as r:
+        doc = await r.json(content_type=None) if r.content_type and "json" in r.content_type else None
+        return r.status, doc
+
+
+async def _serve_post(app, path, body, timeout=8, base=None):
+    sess = app.get("proxy_sess")
+    if sess is None:
+        sess = app["proxy_sess"] = aiohttp.ClientSession()
+    async with sess.post((base or AC_UPSTREAM).rstrip("/") + path, json=body,
+                         timeout=aiohttp.ClientTimeout(total=timeout)) as r:
+        doc = await r.json(content_type=None) if r.content_type and "json" in r.content_type else None
+        return r.status, doc
+
+
+async def _keeper_serve_session(app, base=None):
+    """(sid, why) of the keeper's live serve session: the roster's role binding
+    followed down serve's rollover chain. Never cached across sends."""
+    st, roster = await _serve_get(app, "/api/session/roster", base=base)
+    if st != 200:
+        return "", "serve roster HTTP %d" % st
+    try:
+        _st2, roll = await _serve_get(app, "/api/session/rollover", base=base)
+    except Exception:                                    # noqa: BLE001 — no chain info: the roster wins
+        roll = None
+    return _knudge.resolve_keeper_session(roster, roll if isinstance(roll, dict) else None, NUDGE_SERVE_ROLE)
+
+
+async def _nudge_drain(app, base=None, path=None):
+    """1.0.140: follow the last serve hand-off until it DRAINS. -> True while it
+    is still in flight (no new nudge is sent on top of it). A message queued
+    behind a turn on an auto=off session is kicked (POST /api/console/queue
+    action=retry) once the session is idle; one stranded on a session that is
+    no longer the keeper head (rollover / wipe), a gone session, or behind
+    someone else's hold is pulled out and its pings re-pended for the head."""
+    doc = _read_json(path or _NUDGE_PENDING_PATH, {}) or {}
+    w = doc.get("inflight")
+    if not w or _knudge is None:
+        return False
+    sid = str(w.get("sid") or "")
+    kb = {"base": base} if base else {}                  # 1.0.144: a remote locus's serve
+    try:
+        head, _why = await _keeper_console_head(app, base)
+        st, q = await _serve_get(app, "/api/console/queue?id=" + sid, **kb)
+        q = q if (st == 200 and isinstance(q, dict) and "items" in q) else None
+    except Exception as e:                               # noqa: BLE001 — serve down: keep watching
+        _rlog.warning("nudge drain %s: %s", sid, e)
+        return True
+    now = time.time()
+    act = _knudge.drain_action(w, q, head, now)
+    hkey = "hold:comms-nudge-inflight@" + (base or "host")
+    if act == "done":
+        _nudge_pending_write(_nudge_pending(path), inflight=None, path=path)
+        _audit_line("comms-nudge-drained", "%s %s" % (sid, ",".join(w.get("message_ids") or [])))
+        _hold_clear(hkey)
+        return False
+    if act == "wait":
+        # 1.0.146: a bounded wait, visible on the strip while it lasts
+        waited = now - float(w.get("at") or now)
+        hold = (q or {}).get("hold") if isinstance((q or {}).get("hold"), dict) else None
+        _hold_note(hkey, _sh.SOURCE_HOLD if _sh else "station:hold",
+                   "📨 nudge queued behind %s" % (("a hold by %s" % hold.get("by")) if hold else "a busy turn"),
+                   "%d ping(s) handed to keeper session %s %s ago; re-pended after %d min"
+                   % (len(w.get("items") or []), sid[:12], _sh.fmt_age(waited) if _sh else "%ds" % waited,
+                      _knudge.WAIT_MAX_S // 60), "nothing to do — it goes out at the turn boundary",
+                   count=len(w.get("items") or []))
+        return True
+    if act == "kick":
+        try:
+            st, r = await _serve_queue_release(lambda m, p, b: _serve_post(app, p, b, **kb), sid, by="station-nudge")
+            _audit_line("comms-nudge-kick", "%s queued nudge started (release HTTP %d%s)"
+                        % (sid, st, "" if _knudge.queue_action_ok(st, r) else " — not accepted"))
+        except Exception as e:                           # noqa: BLE001
+            _rlog.warning("nudge kick %s: %s", sid, e)
+        return True
+    # requeue: take ours out of that queue, hand the pings back for the head
+    for mid in w.get("message_ids") or []:
+        try:
+            if q is not None:
+                await _serve_post(app, "/api/console/queue", {"session_id": sid, "action": "remove", "id": mid}, **kb)
+        except Exception:                                # noqa: BLE001
+            pass
+    pend = _nudge_pending(path)
+    have = {str(p.get("id")) for p in pend}
+    pend = [p for p in (w.get("items") or []) if str(p.get("id")) not in have] + pend
+    _nudge_pending_write(pend, last_sent=0, inflight=None, path=path)
+    expired = _knudge.wait_expired(w, now) and q is not None and (q.get("busy") or q.get("paused"))
+    why = ("waited %d min behind a busy turn (bound %d min)" % ((now - float(w.get("at") or now)) // 60,
+                                                             _knudge.WAIT_MAX_S // 60)
+           if expired else "session is not the keeper head / gone / holds other originals")
+    _audit_line("comms-nudge-requeue", "%s → head %s: %d ping(s) re-pended — %s"
+                % (sid, head or "?", len(w.get("items") or []), why))
+    _hold_clear(hkey)
+    _hold_note("count:comms-nudge-requeue@" + (base or "host"), _sh.SOURCE_HOLD if _sh else "station:hold",
+               "📨 nudge re-pended (wait bound / head moved)", why,
+               "re-sent on the next tick to the live keeper head", inc=True)
+    return False
 
 
 async def _nudge_tmux(app, line):
@@ -7026,37 +9233,139 @@ async def _nudge_tmux(app, line):
     return True, f"tmux:{sess}"
 
 
-async def _nudge_frontier(app, locus):
+async def _nudge_frontier(app, locus, base=None, path=None, remote=False):
     """ONE 📨 line for everything pending — at most every NUDGE_MIN_INTERVAL,
     only items STILL OPEN at send time (re-read from the board), deduped by
-    (source, signature) across stations; serve first, tmux only as fallback."""
-    pend = _nudge_pending()
-    if not pend or _knudge is None:
+    (source, signature) across stations; serve first, tmux only as fallback.
+    1.0.144: base/path = a remote locus's serve + its pending file; a remote
+    locus never gets a tmux nudge, and its delivered pings are marked
+    comms/delivered centrally."""
+    if _knudge is None:
         return
+    if await _nudge_drain(app, base, path):              # 1.0.140: one hand-off in flight at a time
+        return
+    pend = _nudge_pending(path)
+    if not pend:
+        return
+    skip_key = "comms_nudge_skip_reason" + ("@" + locus if remote else "")
+    hkey = "skip:comms-nudge@" + locus
+    ts_err = ""
     try:
         res = await _ts_call(app, "todo/list", {"status": "open", "locus": locus, "limit": 500}, timeout=10)
         open_ids = {str(r.get("id")) for r in (res or []) if isinstance(r, dict)}
-    except Exception:                                    # noqa: BLE001 — cannot verify: send nothing
+    except Exception as e:                               # noqa: BLE001 — cannot verify: nothing is sent
         open_ids = None
-    doc = _read_json(_NUDGE_PENDING_PATH, {}) or {}
-    pl = _knudge.plan(pend, open_ids, time.time(), float(doc.get("last_sent") or 0), NUDGE_MIN_INTERVAL)
+        ts_err = str(e)[:120]
+    doc = _read_json(path or _NUDGE_PENDING_PATH, {}) or {}
+    # a pending CHANNEL ping (ref ch_…) is pushed now — no batch window
+    interval = 0 if any(_is_channel_ping(p) for p in pend) else NUDGE_MIN_INTERVAL
+    pl = _knudge.plan(pend, open_ids, time.time(), float(doc.get("last_sent") or 0), interval)
     if pl["dropped"]:
         _nudge_pending_write([p for p in pend if str(p["id"]) not in set(pl["dropped"])],
-                             last_sent=doc.get("last_sent"))
+                             last_sent=doc.get("last_sent"), path=path)
         _audit_line("comms-nudge-drop", "closed since arrival: " + ", ".join(pl["dropped"][:20]))
     if not pl["send"]:
+        if pl.get("why") == "board status unknown":
+            # 1.0.146 (t4260): never a silent no-send — audit (once per reason) + strip row
+            detail = "toolserver unreachable (%s): %d ping(s) pending, open set unverifiable" % (ts_err, len(pend))
+            if app["_rt"].get(skip_key) != detail:
+                app["_rt"][skip_key] = detail
+                _audit_line("comms-nudge-skip", f"{locus}: {detail}")
+            _hold_note(hkey, _sh.SOURCE_SKIP if _sh else "station:skip", "📨 nudge for %s not sent" % locus,
+                       detail, "check the toolserver (/healthz); the pings stay pending and go out when it answers",
+                       count=len(pend))
+        elif pl.get("why") == "batch window" and pl["items"]:
+            # S12: the 5-min batch window is a coalesce, shown with its countdown
+            _hold_note("hold:comms-nudge-window@" + locus, _sh.SOURCE_HOLD if _sh else "station:hold",
+                       "📨 %d ping(s) for %s batched" % (len(pl["items"]), locus),
+                       "next nudge in %ds (NUDGE_MIN_INTERVAL %ds)" % (pl.get("wait_s") or 0, interval),
+                       "nothing to do — coalesced into one line", count=len(pl["items"]))
+        else:
+            _hold_clear("hold:comms-nudge-window@" + locus)
         return
+    _hold_clear("hold:comms-nudge-window@" + locus)
     line = _knudge.summarize(pl["items"], locus)
-    out = await _knudge.deliver(line, lambda ln: _nudge_serve(app, ln), lambda ln: _nudge_tmux(app, ln))
+    if remote:
+        out = await _knudge.deliver(line, lambda ln: _nudge_serve(app, ln, base),
+                                    lambda ln: _no_tmux(ln), allow_tmux=False)
+    else:
+        out = await _knudge.deliver(line, lambda ln: _nudge_serve(app, ln), lambda ln: _nudge_tmux(app, ln))
     if out["target"] == "none":
-        if app["_rt"].get("comms_nudge_skip_reason") != out["detail"]:
-            app["_rt"]["comms_nudge_skip_reason"] = out["detail"]
-            _audit_line("comms-nudge-skip", f"{len(pl['items'])} pending; {out['detail']}")
+        if app["_rt"].get(skip_key) != out["detail"]:
+            app["_rt"][skip_key] = out["detail"]
+            _audit_line("comms-nudge-skip", f"{locus}: {len(pl['items'])} pending; {out['detail']}")
+        # 1.0.146 (t4260): the skip reason + pending count on the ⚠ strip, not only audit.log
+        _hold_note(hkey, _sh.SOURCE_SKIP if _sh else "station:skip", "📨 nudge for %s not sent" % locus,
+                   "%d pending; %s" % (len(pl["items"]), out["detail"]),
+                   "bring the keeper serve session up (/api/locus/serve/provision) — the pings stay pending",
+                   count=len(pl["items"]))
         return
-    app["_rt"]["comms_nudge_skip_reason"] = ""
-    _nudge_pending_write([], last_sent=time.time())
-    _audit_line("comms-nudge", f"{len(pl['items'])} ping(s) → {out['target']} [{out['detail']}]; "
+    app["_rt"][skip_key] = ""
+    _hold_clear(hkey)
+    sub = app["_rt"].get("nudge_last_submit") if out["target"] == "serve" else None
+    inflight = ({"sid": sub["sid"], "message_ids": sub["message_ids"], "items": pl["items"],
+                 "at": int(time.time())} if sub else None)
+    _nudge_pending_write([], last_sent=time.time(), inflight=inflight, path=path)
+    _audit_line("comms-nudge", f"{locus}: {len(pl['items'])} ping(s) → {out['target']} [{out['detail']}]; "
                                f"latest {pl['items'][-1]['id']}")
+    if remote:
+        for p in pl["items"]:
+            try:
+                await _ts_call(app, "comms/delivered", {"id": str(p["id"]), "by": _station_id()}, timeout=10)
+            except Exception as e:                       # noqa: BLE001 — older toolserver: no ledger
+                _rlog.warning("comms/delivered %s: %s", p.get("id"), e)
+
+
+async def _no_tmux(_line):
+    return False, "remote locus: tmux nudges are off"
+
+
+async def _deliver_pings_locus(app, target):
+    """1.0.144: the comms leg for ANOTHER locus (target = _delivery_targets()
+    row): comms/inbox to=<locus> -> claim each new ping centrally -> the issue
+    gate -> ONE 📨 line into that locus's keeper serve session. Conversational
+    [ping][msg] rows have no ✉ tab on a remote locus, so they ride the nudge
+    (gated like the rest) and stay open for that keeper to close."""
+    locus, vm = target["locus"], target["vm"]
+    seen_p, pend_p = _nudge_paths(target)
+    doc = await _ts_call(app, "comms/inbox", {"to": locus}, timeout=10)
+    pings = [p for p in (doc.get("pings") or []) if isinstance(p, dict) and p.get("id")]
+    seen = _pings_seen(seen_p)
+    new = [p for p in pings if str(p["id"]) not in seen]
+    won = []
+    for p in new:
+        try:
+            c = await _ts_call(app, "comms/claim", {"id": str(p["id"]), "by": _station_id(),
+                                                    "lease_s": 3600}, timeout=10)
+        except Exception as e:                           # noqa: BLE001 — no claim ledger: deliver
+            c = {"won": True, "reason": str(e)[:80]}
+        c = c or {}
+        if c.get("won") or (str(c.get("claimed_by") or "") == _station_id() and not c.get("delivered_by")):
+            won.append(p)                                # ours (or our own earlier lease)
+        else:
+            _audit_line("comms-claim-lost", "%s %s: %s" % (locus, p["id"], (c or {}).get("claimed_by")
+                                                          or (c or {}).get("delivered_by") or (c or {}).get("reason")))
+    if new:
+        seen.update(str(p["id"]) for p in new)
+        _pings_seen_write(seen, seen_p)
+    if won:
+        nudge = await _gate_pings(app, won, include_msg=True, locus=locus)
+        pend = _nudge_pending(pend_p)
+        have = {str(q["id"]) for q in pend}
+        pend.extend(p for p in nudge if str(p["id"]) not in have)
+        _nudge_pending_write(pend, path=pend_p)
+    if not _nudge_pending(pend_p) and not (_read_json(pend_p, {}) or {}).get("inflight"):
+        return
+    url = (await _ac_resolve(vm))[0]
+    if not url:
+        err = (_AC_DISCOVERED.get(_ac_locus_key(vm)) or {}).get("error") or "not discovered"
+        _audit_line("comms-nudge-skip", "%s: no reachable serve (%s)" % (locus, err))
+        _hold_note("skip:comms-nudge@" + locus, _sh.SOURCE_SKIP if _sh else "station:skip",
+                   "📨 nudge for %s not sent" % locus, "%d pending; no reachable serve (%s)"
+                   % (len(_nudge_pending(pend_p)), err),
+                   "provision / start that locus's serve — the pings stay pending", count=len(_nudge_pending(pend_p)))
+        return
+    await _nudge_frontier(app, locus, base=url, path=pend_p, remote=True)
 
 
 # ── live change bus (1.0.77): ONE subscription to the toolserver's SSE stream
@@ -7229,39 +9538,36 @@ async def _ssh_run(name, script, timeout=30, stdin=None):
 
 
 async def _locus_run(vm, script, timeout=30):
-    """Run a bash script in a locus as its seat user: '' host, VM (ubuntu), or ssh host."""
-    if not vm:
-        return await _run("bash", "-lc", script)
-    if _ssh_host(vm):
-        return await _ssh_run(vm, "bash -lc " + shlex.quote(script), timeout)
-    return await _run("lxc", "exec", vm, "--", "sudo", "-u", "ubuntu", "-H", "bash", "-lc", script)
+    """Run a bash script in a locus as its seat user: '' host, VM (ubuntu), or
+    ssh host. 1.0.141: one transport (locus_exec) — the script rides stdin."""
+    return await LX.run(_locus_target(vm), "exec bash -lc " + shlex.quote(script) + "\n",
+                        timeout=timeout)
 
 
 async def _locus_run_fast(vm, script, timeout=10):
     """_locus_run minus the host login shell: `bash -lc` sources the
     operator's full profile (~1.2s here) — fine for kill/wipe, hopeless for
-    interactive paths like wheel scrolling. Host runs plain `bash -c`;
-    VM/ssh grounding keeps the normal path (the transport dominates there)."""
-    if not vm:
-        return await _run("bash", "-c", script)
+    interactive paths like wheel scrolling. Host runs plain bash; VM/ssh
+    grounding keeps the login shell (the transport dominates there)."""
+    t = _locus_target(vm)
+    if not t.remote:
+        return await LX.run(t, script + "\n", timeout=timeout)
     return await _locus_run(vm, script, timeout)
 
 
 async def _locus_spawn(vm, script):
     """The STREAMING twin of _locus_run: start a long-running bash script in a
     locus with stdout/stderr piped, instead of waiting for it to finish. Same
-    grounding — '' host, ssh host, lxd guest. Used by the journal follow."""
+    grounding — '' host, ssh host, lxd guest. Used by the journal follow.
+    1.0.141: the same locus_exec transport (script on stdin, then closed)."""
     pipe = asyncio.subprocess.PIPE
-    if not vm:
-        return await asyncio.create_subprocess_exec(
-            "bash", "-lc", script, stdout=pipe, stderr=pipe)
-    h = _ssh_host(vm)
-    if h:
-        return await asyncio.create_subprocess_exec(
-            *_ssh_argv(h), "bash", "-lc", script, stdout=pipe, stderr=pipe)
-    return await asyncio.create_subprocess_exec(
-        "lxc", "exec", vm, "--", "sudo", "-u", "ubuntu", "-H", "bash", "-lc", script,
-        stdout=pipe, stderr=pipe)
+    proc = await asyncio.create_subprocess_exec(
+        *LX.script_argv(_locus_target(vm)), stdin=pipe, stdout=pipe, stderr=pipe)
+    with contextlib.suppress(Exception):
+        proc.stdin.write(("exec bash -lc " + shlex.quote(script) + "\n").encode())
+        await proc.stdin.drain()
+        proc.stdin.close()
+    return proc
 
 
 # ── 📜 locus journal (operator 2026-09-15: "the log, it should be a journalctl
@@ -7298,10 +9604,10 @@ if [ -n "$sysunit" ] && [ "$inst" = "$me" ]; then
   unit=$sysunit; mode=system; u=$inst
 elif [ -n "$useru" ]; then
   unit=$useru; mode=user; u=$me
-elif [ -n "$sysunit" ]; then
-  unit=$sysunit; mode=system; u=$inst
 else
-  unit=hugpy-station-web.service; mode=user; u=$me
+  # 1.0.141: NEVER another user's station unit (hugpy resolved to hugpy-demo's).
+  # No station unit of our own -> this user's own journal: every unit it owns.
+  unit=""; mode=user; u=$me
 fi
 if [ "$mode" = system ]; then uid=$(id -u "$u" 2>/dev/null || id -u); else uid=$(id -u); fi
 echo "user=$u"; echo "uid=$uid"; echo "mode=$mode"; echo "unit=$unit"; echo "host=$(hostname)"
@@ -7563,17 +9869,32 @@ try:                                                 # 1.0.124: findings are PUS
     import b_propose as _bprop
 except ImportError:                                  # pragma: no cover — packaging error
     _kn = _bprop = None
+try:                                                 # 1.0.140: the toolserver issue gate
+    import issue_gate as _ig
+except ImportError:                                  # pragma: no cover — packaging error
+    _ig = None
+try:                                                 # 2026-10-01: bug reports -> the locus's WORKER
+    import bug_route as _bugr
+except ImportError:                                  # pragma: no cover — packaging error
+    _bugr = None
 
-# The keeper's locus: findings + loops of EVERY station land on its board / ✉.
-# A station whose own locus differs delivers remotely (keeper_notify.RemoteSink).
+# The keeper's locus. 2026-10-01 (operator): bug reports (findings, loops, issue
+# raises, B proposals) NO LONGER go to the keeper — they go to the WORKER serve
+# session of the locus they concern (bug_route.py); KEEPER_TARGET only names the
+# issue registry's locus now.
 KEEPER_TARGET = (os.environ.get("STATION_KEEPER_LOCUS") or "keeper").strip().lower() or "keeper"
-B_PROPOSE_ON = (os.environ.get("STATION_B_PROPOSE", "1").strip().lower()
-                not in ("0", "false", "off", "no"))       # B proposes fixes for new findings
+# B proposes fixes for new findings — OFF by default since 2026-10-01 (operator:
+# "take B out of it for now", board t4178 [F2.5]); STATION_B_PROPOSE=1 turns it
+# back on, and its proposals then go to the worker like every bug report.
+B_PROPOSE_ON = (os.environ.get("STATION_B_PROPOSE", "0").strip().lower()
+                in ("1", "true", "on", "yes"))
 B_PROPOSE_PER_SCAN = max(1, int(os.environ.get("STATION_B_PROPOSE_PER_SCAN") or "2"))  # the rest stay due
 _NOTIFY = None
 _METER = None
 _PROPOSE_BUSY = False
 _PROPOSE_TASK = None
+_BUG_OUTBOX = None
+_BUG_LOCK = None
 
 
 def _notify_book():
@@ -7616,18 +9937,232 @@ def _notify_origin():
     return _station_locus() or _station_id()
 
 
-def _notify_sink(app):
-    """LocalSink on the keeper itself; RemoteSink (toolserver board on the
-    keeper's slice + comms ping ✉) everywhere else."""
-    async def post(path, body):
-        return await _ts_call(app, path, body, timeout=15)
+def _issue_gate(app):
+    """The toolserver issue registry (abstract_toolserver >= 0.0.39). Since
+    2026-10-01 (t4178) it is an ANNOTATION only: a sighting is observed (fail
+    OPEN — no answer changes nothing) so the registry keeps the history and the
+    report carries the issue's state; it never decides whether anything is sent."""
+    if _ig is None:
+        return None
 
-    def write_mail(frm, text):
-        _keeper_mail_write(_keeper_mail_rows() + [_mail_row(frm, "keeper", text, unread=True)])
+    async def call(path, body):
+        return await _ts_call(app, path, body, timeout=10)
+    return _ig.Gate(call, locus=KEEPER_TARGET)
 
-    origin = _notify_origin()
-    cls = _kn.LocalSink if origin == KEEPER_TARGET else _kn.RemoteSink
-    return cls(post, write_mail, keeper_locus=KEEPER_TARGET, origin=origin, station=_station_id())
+
+# ── bug reports -> the locus's WORKER serve session (operator 2026-10-01) ──────────
+def _bug_outbox():
+    global _BUG_OUTBOX
+    if _BUG_OUTBOX is None and _bugr is not None:
+        _BUG_OUTBOX = _bugr.Outbox(
+            state_path=str(FV_STATE_HOME / "bugreport-outbox.json"),
+            min_interval=int(os.environ.get("STATION_BUGREPORT_MIN_INTERVAL") or _bugr.MIN_INTERVAL_S),
+            self_interval=int(os.environ.get("STATION_BUGREPORT_SELF_INTERVAL") or _bugr.SELF_INTERVAL_S),
+            inflight_max=int(os.environ.get("STATION_BUGREPORT_INFLIGHT_MAX") or _bugr.INFLIGHT_MAX_S))
+    return _BUG_OUTBOX
+
+
+def _bug_locus(vm):
+    """The central board slice a bug report of dropdown locus `vm` lands on."""
+    return (_central_locus(vm) if vm else _keeper_locus()) or ""
+
+
+class _BugIO:
+    """bug_route I/O for one locus: board writes on the locus's own slice (type
+    `finding`, never a [ping]) and delivery to that locus's WORKER serve session
+    through the ✍ prompt bar's per-locus serve path (prompt_send.deliver_serve)."""
+
+    def __init__(self, app, vm):
+        self.app, self.vm = app, vm or ""
+
+    async def board_add(self, e, text, note):
+        loc = e.get("locus") or _bug_locus(self.vm)
+        if not loc:
+            raise RuntimeError(LOCUS_UNCONFIGURED)
+        res = await _ts_call(self.app, "todo/add", {"text": text, "type": _bugr.BOARD_TYPE,
+                                                    "priority": e.get("priority") or "medium", "note": note,
+                                                    "by": "bugscan@" + (_notify_origin() or "station")[:14],
+                                                    "locus": loc, "source": _bugr.SOURCE}, timeout=15)
+        if isinstance(res, dict) and res.get("error"):
+            raise RuntimeError(res["error"])
+        return str((res or {}).get("id") or "") if isinstance(res, dict) else ""
+
+    async def board_update(self, e, note):
+        await _ts_call(self.app, "todo/update", {"id": e["board_id"], "note": note}, timeout=15)
+
+    async def board_done(self, e, note):
+        await _ts_call(self.app, "todo/update", {"id": e["board_id"], "status": "done", "note": note}, timeout=15)
+
+    async def _serve(self):
+        url, _unit, _path, _key = await _ac_resolve(self.vm)
+        if not url:
+            return None, "no abstract-claude serve for locus " + (self.vm or "host")
+        return _serve_caller(self.app, url), ""
+
+    async def deliver(self, text):
+        call, why = await self._serve()
+        if call is None:
+            return PS.result("failed", "serve", why)
+        res = await PS.deliver_serve(call, text, [], session_id="",
+                                     head=lambda: _serve_head_of(call, role=_bugr.ROLE))
+        if res.get("ok") or "not a console session" not in str(res.get("reason") or ""):
+            return res
+        # a native (non console-service) worker session: serve's role relay runs it,
+        # or queues it on that session; the relay log has the outcome
+        try:
+            st, doc = await call("POST", "/api/session/%s/message" % _bugr.ROLE,
+                                 {"text": text, "from": "station", "by": "station-bug-report",
+                                  "wait": False, "via_b": False})
+        except Exception as ex:                          # noqa: BLE001
+            return PS.result("failed", "serve", "serve relay unreachable: %s" % ex)
+        if st in (200, 202) or (st == 409 and (doc or {}).get("queued")):
+            return PS.result("queued", "serve", "", session_id=str((doc or {}).get("session_id") or ""),
+                             detail="accepted by serve's %s relay (id %s)" % (_bugr.ROLE, (doc or {}).get("id")))
+        return PS.result("failed", "serve", "serve relay HTTP %s %s" % (st, str((doc or {}).get("error") or "")[:160]))
+
+    async def inflight_busy(self, w):
+        call, _why = await self._serve()
+        if call is None:
+            return True
+        st, q = await call("GET", "/api/console/queue?id=" + str(w.get("sid") or ""), None)
+        if st != 200 or not isinstance(q, dict):
+            return False                                 # the session is gone: nothing is queued behind
+        ids = {str(i.get("id")) for i in q.get("items") or [] if isinstance(i, dict)}
+        return bool(ids & {str(m) for m in w.get("message_ids") or []})
+
+    async def inflight_cancel(self, w):
+        """1.0.146: the drain deadline passed — pull our stale report out of the
+        worker queue (a fresh coalesced one goes out instead)."""
+        call, _why = await self._serve()
+        if call is None:
+            return
+        for mid in w.get("message_ids") or []:
+            await call("POST", "/api/console/queue", {"session_id": str(w.get("sid") or ""),
+                                                      "action": "remove", "id": str(mid)})
+
+
+async def _bug_pump(app):
+    """One delivery pass per locus with pending bug reports. Never raises."""
+    global _BUG_LOCK
+    box = _bug_outbox()
+    if box is None:
+        return []
+    if _BUG_LOCK is None:
+        _BUG_LOCK = asyncio.Lock()
+    out = []
+    async with _BUG_LOCK:
+        for vm in box.vms():
+            try:
+                st = await box.run_pass(vm, _BugIO(app, vm), locus_label=_bug_locus(vm) or vm or "this station")
+                out.append(st)
+                hk = "hold:bug-report@" + (vm or "host")
+                if st.get("requeued"):
+                    _audit_line("bug-report-requeue", "%s: %s" % (vm or "host", st["requeued"]))
+                    _hold_note("count:bug-report-requeue@" + (vm or "host"), _sh.SOURCE_HOLD if _sh else "station:hold",
+                               "🐞 bug report re-sent (worker drain deadline)", st["requeued"],
+                               "nothing to do — the worker gets a fresh coalesced report", inc=True)
+                if st.get("sent") or (st.get("state") == "pending" and st.get("reason")):
+                    _audit_line("bug-report", "%s → worker: %s %s %s" % (vm or "host", st.get("state"),
+                                                                          st.get("sent"), st.get("reason") or ""))
+                if st.get("state") in ("deferred", "pending") and st.get("reason"):
+                    _hold_note(hk, _sh.SOURCE_HOLD if _sh else "station:hold",
+                               "🐞 bug report(s) for %s %s" % (vm or "host", st["state"]), st["reason"],
+                               "retried every pass; worker session via /api/locus/serve/provision",
+                               count=len(box.pending(vm)))
+                else:
+                    _hold_clear(hk)
+            except Exception as e:                       # noqa: BLE001
+                _bslog.warning("bug report pass %s: %s", vm or "host", e)
+    return out
+
+
+async def _bug_observe(gate, kw):
+    """Annotation only (fail OPEN): the issue registry's state for this sighting."""
+    if gate is None or not kw:
+        return None
+    res = await gate.observe(**kw)
+    return res if isinstance(res, dict) else None
+
+
+def _finding_observe_spec(r, origin):
+    src = str(r.get("source") or "")
+    cnt, last = int(r.get("count") or 0), int(r.get("gate_count") or 0)
+    return {"source": "%s@%s" % (src or "log", r.get("locus") or origin),
+            "kind": "finding:%s" % (r.get("kind") or "other"),
+            "subject": r.get("signature") or "", "text": (r.get("sample_lines") or [""])[0],
+            "severity": r.get("severity"), "caller": src,
+            "meta": {"unit": src, "finding": r.get("key"), "origin": origin}, "n": max(1, cnt - last)}
+
+
+async def _report_findings(app, vm, book, ev, now):
+    """Findings -> bug reports for the WORKER of locus `vm` (bug_route). Every
+    reported row (severity >= medium, not seat-pane prose — classification, both
+    still on the ⚠ strip) is offered; the outbox coalesces and retries, so a
+    report is never dropped. The issue registry only annotates (fail open)."""
+    box = _bug_outbox()
+    if box is None:
+        return 0
+    gate, origin, n = _issue_gate(app), _notify_origin(), 0
+    fresh = {id(r) for r in (ev.get("mail") or [])}
+    seen = set()
+    for r in list(ev.get("mail") or []) + list(ev.get("board") or []):
+        if id(r) in seen or not book.notify_row(r):
+            continue
+        seen.add(id(r))
+        r["vm"] = vm or ""
+        res = await _bug_observe(gate, _finding_observe_spec(r, origin)) if id(r) in fresh else None
+        if res:
+            r["issue_fp"], r["issue_state"] = res.get("fp"), res.get("state")
+            r["gate_count"] = int(r.get("count") or 0)
+        text, _note = _kn.fmt_board(r, book.sig(r["sigkey"]))
+        ann = " · ".join(x for x in (book.annotation(r), (res or {}).get("annotation") or "") if x)
+        if r.get("issue_fp"):
+            ann = (ann + " · " if ann else "") + "issue_fp=" + r["issue_fp"]
+        box.offer("finding:" + r["key"], vm=vm or "", locus=_bug_locus(vm), kind="finding:%s" % r.get("kind"),
+                  title=text, body=_kn.fmt_mail(r, book.sig(r["sigkey"])), severity=r.get("severity"),
+                  count=r.get("count"), source=r.get("source"), annotation=ann, priority=book.priority_of(r),
+                  fresh=id(r) in fresh)
+        r["mailed_at"], r["pending_mail"] = now, False
+        n += 1
+    for r in ev.get("cleared") or []:
+        box.clear("finding:" + r["key"], _kn.fmt_resolve(r))
+    box.save()
+    return n
+
+
+def _bug_link_board(book, idx):
+    """Copy the outbox's board ids back onto the NotifyBook rows / findings records."""
+    box = _bug_outbox()
+    if box is None:
+        return
+    for k, r in book.rows.items():
+        e = box.items.get("finding:" + k)
+        if e and e.get("board_id") and r.get("board_id") != e["board_id"]:
+            r["board_id"] = e["board_id"]
+            rec = idx.get(k)
+            if rec and rec.get("board") != e["board_id"]:
+                _bugscan_append(dict(rec, board=e["board_id"]))
+
+
+class _BugBoard:
+    """closed(ids) over every board slice the outbox writes to (disposition reads)."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def closed(self, ids):
+        box, want, out = _bug_outbox(), {str(i) for i in ids}, {}
+        loci = {e.get("locus") for e in (box.items.values() if box else []) if e.get("locus")}
+        loci.add(_keeper_locus() or KEEPER_TARGET)
+        for loc in sorted(x for x in loci if x):
+            res = await _ts_call(self.app, "todo/list", {"status": "done", "locus": loc, "limit": 500}, timeout=15)
+            for r in res or []:
+                if isinstance(r, dict) and str(r.get("id")) in want:
+                    out[str(r["id"])] = r.get("note") or ""
+        if box is not None:
+            for bid in out:
+                box.board_closed(bid)
+        return out
 
 _BUGSCAN_ERR_RE = re.compile(
     r"(?i)\b(error|traceback|exception|denied|refused|failed|fatal|429|rate.?limit|timed out)\b")
@@ -7722,6 +10257,16 @@ def _bugscan_locus_state(vm):
     return row
 
 
+def _bugscan_on(row):
+    """1.0.140: STATION_BUGSCAN=0 is a MASTER off for this station — it wins over
+    the persisted per-locus ``on`` (state.json is left as the operator set it, so
+    re-enabling the env restores the panel's choice)."""
+    return bool(BUGSCAN_ON and (row or {}).get("on"))
+
+
+BUGSCAN_OFF_NOTE = "disabled by STATION_BUGSCAN=0"
+
+
 async def _bugscan_seat_tails(vm):
     """Cheap: the last error-ish lines of each seat pane on the keeper socket.
     Host locus only — a remote locus's panes are its own station's business."""
@@ -7799,6 +10344,8 @@ async def _bugscan_run(app, vm):
     becomes the row's `note` and the next interval tries again."""
     vm = vm or ""
     row = _bugscan_locus_state(vm)
+    if not BUGSCAN_ON:                                   # 1.0.140: the env switch is final
+        return {"ok": False, "note": BUGSCAN_OFF_NOTE}
     if _BUGSCAN_BUSY.get(vm):
         return {"ok": False, "note": "a review is already running"}
     _BUGSCAN_BUSY[vm] = True
@@ -7850,8 +10397,10 @@ async def _bugscan_run(app, vm):
 
 
 async def _notify_findings(app, vm, pairs, now):
-    """Push this scan's findings to the keeper (✉ + board + strip), apply the
-    keeper's dispositions, and kick B's fix proposals. Never raises."""
+    """This scan's findings -> bug reports for the WORKER session of locus `vm`
+    (operator 2026-10-01: never the keeper), the ⚠ strip, the dispositions read
+    back from the board, and (STATION_B_PROPOSE=1 only) B's fix proposals.
+    Never raises."""
     book = _notify_book()
     if book is None:
         return
@@ -7859,21 +10408,15 @@ async def _notify_findings(app, vm, pairs, now):
         idx = _bugscan_load()
         live = {h: r.get("last_seen") for h, r in idx.items() if (r.get("vm") or "") == (vm or "")}
         ev = book.step(pairs, live, now)
-        sink = _notify_sink(app)
-        await _kn.fanout(ev, sink, now=now, by="station-findings", board=BUGSCAN_BOARD,
-                         fmt_mail=lambda r: _kn.fmt_mail(r, book.sig(r["sigkey"])),
-                         fmt_board=lambda r: _kn.fmt_board(r, book.sig(r["sigkey"])),
-                         fmt_resolve=_kn.fmt_resolve,
-                         priority_of=lambda r: "high" if _kn.sev_rank(r.get("severity")) >= 2 else "medium")
-        for r in ev.get("board") or []:                  # link the board id onto the findings record
-            rec = idx.get(r["key"])
-            if r.get("board_id") and rec and rec.get("board") != r["board_id"]:
-                _bugscan_append(dict(rec, board=r["board_id"]))
+        await _report_findings(app, vm, book, ev, now)
+        book.save()
+        await _bug_pump(app)
+        _bug_link_board(book, idx)
         book.save()
         if not vm:
-            await _notify_poll_dispositions(app, book, sink)
-        if ev.get("propose") or _propose_undelivered(book):
-            _propose_kick(app, book, list(ev.get("propose") or []))
+            await _notify_poll_dispositions(app, book, _BugBoard(app))
+        if B_PROPOSE_ON and (ev.get("propose") or _propose_undelivered(book)):
+            _propose_kick(app, book, [r for r in ev.get("propose") or [] if r.get("issue_fp")])
     except Exception as e:                               # noqa: BLE001 — the scan itself must finish
         _bslog.warning("notify: %s", e)
 
@@ -7884,7 +10427,7 @@ async def _notify_poll_dispositions(app, book, sink):
     proposal = accepted). Read the closed items once per scan."""
     ids = {}
     for k, r in book.rows.items():
-        if r.get("board_id") and r.get("active"):
+        if r.get("board_id") and r.get("active") and r.get("disp_read") != r["board_id"]:
             ids[str(r["board_id"])] = ("finding", k)
     for sk, sg in book.sigs.items():
         for pr in sg.get("proposals") or []:
@@ -7896,6 +10439,7 @@ async def _notify_poll_dispositions(app, book, sink):
         closed = await sink.closed(list(ids))
     except Exception:                                    # noqa: BLE001 — toolserver down: next scan
         return
+    gate = _issue_gate(app)
     for bid, note in closed.items():
         what, ref = ids[bid]
         disp, reason = _kn.parse_disposition(note)
@@ -7903,8 +10447,33 @@ async def _notify_poll_dispositions(app, book, sink):
             book.set_disposition(ref, disp or "accepted", reason, by="keeper", proposal_id=bid)
         elif disp == "inert":
             book.set_disposition(ref, "inert", reason, by="keeper")
+        final = disp or ("accepted" if what == "proposal" else "closed")
+        # 1.0.140: the decision goes to the issue registry (fail open)
+        if what == "proposal":
+            fp = _book_issue_fp(book, ref)
+        else:
+            row = book.rows.get(ref) or {}
+            row["disp_read"] = bid                      # one close = one disposition, not one per scan
+            fp = row.get("issue_fp") or _book_issue_fp(book, row.get("sigkey"))
+        if gate is not None and fp and not (disp is None and _ig.is_auto_resolve(note)):
+            if what == "proposal":
+                await gate.record_action(fp, "keeper %s B proposal %s" % (final, bid), by="keeper", note=reason,
+                                         proposal_id=bid, disposition=final, board_id=bid)
+            await gate.disposition(fp, final, reason or final, by="keeper", board_id=bid)
         _todo_hist({"event": "finding-disposition", "board": bid, "what": what, "ref": ref,
-                    "disposition": disp or ("accepted" if what == "proposal" else "closed"), "reason": reason})
+                    "disposition": final, "reason": reason, "fp": fp or ""})
+    book.save()
+
+
+def _book_issue_fp(book, sigkey):
+    """The issue fp a NotifyBook signature was last gated under (or '')."""
+    if not sigkey:
+        return ""
+    s = book.sigs.get(sigkey) or {}
+    if s.get("issue_fp"):
+        return s["issue_fp"]
+    return next((r.get("issue_fp") for r in book.rows.values()
+                 if r.get("sigkey") == sigkey and r.get("issue_fp")), "")
 
 
 async def api_findings_disposition(request):
@@ -7925,6 +10494,10 @@ async def api_findings_disposition(request):
                              by=str(body.get("by") or "keeper"))
     if s is None:
         return web.json_response({"ok": False, "error": "unknown signature"}, status=404)
+    fp = _book_issue_fp(book, book.resolve_sig(request.match_info["sig"]))
+    gate = _issue_gate(request.app)
+    if gate is not None and fp:                          # 1.0.140: mirrored into the registry (fail open)
+        await gate.disposition(fp, disp, body.get("reason") or disp, by=str(body.get("by") or "keeper"))
     audit(request, "finding-disposition", f"{request.match_info['sig']}={disp}", ok=True)
     return web.json_response({"ok": True, "sig": book.resolve_sig(request.match_info["sig"]),
                               **{k: v for k, v in s.items() if k not in ("hist",)}})
@@ -7941,7 +10514,14 @@ async def api_findings_notify(request):
                               "rows": book.strip_rows(),
                               "sigs": {k: {kk: vv for kk, vv in v.items() if kk != "hist"}
                                        for k, v in book.sigs.items()},
-                              "token_burn": (_token_meter().rates() if _token_meter() else {})})
+                              "token_burn": (_token_meter().rates() if _token_meter() else {}),
+                              # 2026-10-01: bug reports go to the locus's WORKER session; the
+                              # outbox shows every report's delivery state (nothing hidden)
+                              "routing": "worker",
+                              "outbox": ([{k: v for k, v in e.items() if k not in ("body",)}
+                                          for e in _bug_outbox().items.values()] if _bug_outbox() else []),
+                              "b_propose": B_PROPOSE_ON,
+                              "inert_silences": bool(_kn.inert_silences())})
 
 
 # ── B proposes fixes (1.0.124) ────────────────────────────────────────────────
@@ -8056,16 +10636,30 @@ def _propose_kick(app, book, rows):
 
 
 async def _propose_deliver(app, book, sink, row, sk, p, entry=None):
+    """A B proposal (STATION_B_PROPOSE=1 only) is a bug report too: a `finding`
+    board item for the finding's locus, delivered to that locus's WORKER session
+    (bug_route) — never a keeper ping or keeper mail (operator 2026-10-01)."""
     origin = _notify_origin()
     tb, nb = _bprop.fmt_board(p, row, origin)
-    bid = await sink.board(row, tb, nb, by="B@" + origin, type="proposal", priority="medium")
+    fp = row.get("issue_fp") or _book_issue_fp(book, sk)
+    box = _bug_outbox()
+    if box is None:
+        raise RuntimeError("bug_route module missing")
+    vm = row.get("vm") or ""
+    key = "proposal:%s:%d" % (row.get("key"), int(time.time()))
+    box.offer(key, vm=vm, locus=_bug_locus(vm), kind="b-proposal", title=tb, body=nb,
+              severity=row.get("severity"), count=row.get("count"), source="b-propose",
+              annotation=("issue_fp=" + fp) if fp else "", priority="medium")
+    await _bug_pump(app)
+    bid = (box.items.get(key) or {}).get("board_id")
     if not bid:
         raise RuntimeError("board add returned no id")
-    try:
-        await sink.mail(row, _bprop.fmt_mail(p, row, bid), by="B@" + origin)
-    except Exception:                                    # noqa: BLE001 — the board item is the record
-        pass
+    gate = _issue_gate(app)
+    if gate is not None and fp:
+        await gate.record_b(fp, p, status="delivered", proposal_id=bid, model="b")
     sg = book.sig(sk)
+    if fp:
+        sg["issue_fp"] = fp
     if entry is None:
         entry = _bprop.record(sg, p, "delivered", bid=bid)
     else:
@@ -8085,7 +10679,7 @@ async def _propose_run(app, book, rows):
     global _PROPOSE_BUSY
     _PROPOSE_BUSY = True
     try:
-        sink = _notify_sink(app)
+        sink = None                                      # proposals go through bug_route (worker)
         for sk, entry in _propose_undelivered(book):     # a proposal whose board post failed earlier
             row = next((r for r in book.rows.values() if r["sigkey"] == sk), None)
             if row is None:
@@ -8096,14 +10690,21 @@ async def _propose_run(app, book, rows):
                 return
         loop = asyncio.get_event_loop()
         calls = 0
+        gate = _issue_gate(app)
         for row in rows:
             if calls >= B_PROPOSE_PER_SCAN:              # first scan after install: no burst
                 break
             sk = row["sigkey"]
             sg = book.sig(sk)
-            why = _bprop.gate(sg, row, time.time(), sev_rank=_kn.sev_rank)
-            if why:
-                row["propose_due"] = False
+            if not row.get("propose_due"):
+                continue
+            # 1.0.140: B is asked ONLY when the issue gate says so (raised, no B answer
+            # for this raise yet, weekly cap) — never for benign/processed/self issues.
+            fp = row.get("issue_fp") or ""
+            ok = await gate.b_query_ok(fp) if (gate is not None and fp) else None
+            if not ok:
+                if ok is False:                          # an explicit no: stop asking for this row
+                    row["propose_due"] = False
                 continue
             try:                                         # the fleet is busy: retry on the next scan
                 q = await _loops_get(app, "/api/llm/queue")
@@ -8114,7 +10715,11 @@ async def _propose_run(app, book, rows):
                 _bslog.info("B proposal deferred: central queue has %d waiting", waiting)
                 break
             ctx = await loop.run_in_executor(None, lambda: _bprop.locate_source(row, _propose_roots(row)))
-            msgs = _bprop.build_messages(row, ctx, sg)
+            # B's memory is THIS issue only (issue_memory(fp)); the NotifyBook signature
+            # record is the read-through fallback when the toolserver does not answer
+            mem = await gate.memory(fp) if gate is not None else None
+            priors = _ig.memory_priors(mem) if mem else sg.get("proposals")
+            msgs = _bprop.build_messages(row, ctx, sg, memory=mem)
             calls += 1
             text, tokens, err = await loop.run_in_executor(None, _b_propose_call, msgs)
             _meter_tokens(_bprop.TASK, tokens)
@@ -8124,15 +10729,19 @@ async def _propose_run(app, book, rows):
                 book.save()
                 continue
             p = _bprop.parse(text)
+            sg["issue_fp"] = fp
             if p is None:                                # junk: the finding was already delivered
                 _bprop.record(sg, None, "junk", why=(text or "")[:300])
+                await gate.record_b(fp, {"why": (text or "")[:300]}, status="junk")
             elif p.get("no_new_fix"):
                 _bprop.record(sg, None, "no_new_fix", why=p.get("why"))
                 sg["note"] = "B: no new fix — " + (p.get("why") or "")[:300]
+                await gate.record_b(fp, {"why": p.get("why")}, status="no_new_fix")
             else:
-                dup = _bprop.novelty(p, sg.get("proposals"))
+                dup = _bprop.novelty(p, priors)
                 if dup:
                     _bprop.record(sg, p, "duplicate", dup_of=dup.split()[-1])
+                    await gate.record_b(fp, dict(p, dup_of=dup.split()[-1]), status="duplicate")
                 else:
                     try:
                         await _propose_deliver(app, book, sink, row, sk, p)
@@ -8150,7 +10759,7 @@ async def _bugscan_loop(app):
         while True:
             now = time.time()
             for vm, row in list(_bugscan_state().get("loci", {}).items()):
-                if not row.get("on"):
+                if not _bugscan_on(row):
                     continue
                 if now - float(row.get("last") or 0) < max(60, int(row.get("interval")
                                                                    or BUGSCAN_INTERVAL)):
@@ -8276,9 +10885,39 @@ def _b_findings_reply(rows, started):
     return f"{body.rstrip()}\n{_b_meta_line(_B_LOOKUP_MODEL, 0, started)}"
 
 
+def _locus_scope(request):
+    """1.0.141: (remote_vm, central_key) for a ?vm= that names ANOTHER locus,
+    else ('', ''). Station-process sources (findings, loops, logs) are this
+    station's own; for another locus they are filtered to rows that carry
+    that locus, never shown as if they were its."""
+    vm = (request.query.get("vm") or "").strip()
+    if not vm or _is_host_vm(vm):
+        return "", ""
+    return vm, (_central_locus(vm) or vm)
+
+
+def _rows_for_locus(rows, key):
+    out = []
+    for r in rows or []:
+        if not isinstance(r, dict):
+            continue
+        loc = str(r.get("locus") or "")
+        src = str(r.get("source") or "")
+        if loc == key or src.endswith("@" + key):
+            out.append(r)
+    return out
+
+
 async def api_b_findings(request):
-    """GET /api/b/findings — the set B answers "what's broken" from."""
-    return web.json_response({"ok": True, "findings": _b_findings_rows(),
+    """GET /api/b/findings — the set B answers "what's broken" from.
+    ?vm=<another locus> (1.0.141): only findings tagged with that locus."""
+    vm, key = _locus_scope(request)
+    rows = _b_findings_rows()
+    if vm:
+        return web.json_response({"ok": True, "findings": _rows_for_locus(rows, key),
+                                  "locus": key, "scope": "this station's detector, filtered to " + key,
+                                  "path": str(_b_findings_path())})
+    return web.json_response({"ok": True, "findings": rows, "scope": "this station",
                               "path": str(_b_findings_path())})
 
 
@@ -8298,6 +10937,9 @@ async def api_bugscan(request):
         vm = "" if vm == "@keeper" else vm
         op = (b.get("op") or "").strip()
         row = _bugscan_locus_state(vm)
+        if not BUGSCAN_ON and op in ("on", "now"):
+            return web.json_response({"ok": False, "error": BUGSCAN_OFF_NOTE + " on this station (env wins)"},
+                                     status=409)
         if op in ("on", "off"):
             row["on"] = (op == "on")
         elif op == "interval":
@@ -8325,10 +10967,11 @@ async def api_bugscan(request):
     interval = max(60, int(row.get("interval") or BUGSCAN_INTERVAL))
     return web.json_response({
         "ok": True, "vm": vm, "locus": src.get("locus") or (vm or "this station"),
-        "on": bool(row.get("on")), "interval": interval,
+        "on": _bugscan_on(row), "env_off": not BUGSCAN_ON, "interval": interval,
         "last": int(row.get("last") or 0),
-        "next": (int(row["last"]) + interval) if (row.get("on") and row.get("last")) else 0,
-        "running": bool(_BUGSCAN_BUSY.get(vm)), "note": row.get("note") or "",
+        "next": (int(row["last"]) + interval) if (_bugscan_on(row) and row.get("last")) else 0,
+        "running": bool(_BUGSCAN_BUSY.get(vm)),
+        "note": (BUGSCAN_OFF_NOTE if not BUGSCAN_ON else "") or row.get("note") or "",
         # the scan is deterministic (no B call) since 1.0.124 — never "skipped"
         "b": True, "detector": "log_findings", "window": BUGSCAN_WINDOW, "board": BUGSCAN_BOARD,
         "source": src, "findings": _bugscan_rows(vm)})
@@ -8354,15 +10997,14 @@ async def all_locus_names():
 
 
 def _in_vm(cmd: str, vm: str) -> str:
-    """Wrap a surface command to run inside a station as the dev user — or on
-    an ssh host as its login user."""
+    """Wrap a NON-seat surface command to run inside a station as the dev user
+    — or on an ssh host as its login user. 1.0.141: tmux seats never come
+    here (they go through _seat_launch, which writes the script on the
+    target); this path is for short commands only."""
     if not vm:            # workbench mode: the models ARE local to this host
         return cmd
-    h = _ssh_host(vm)
-    if h:
-        return _ssh_shell_cmd(h) + " -- bash -lc " + shlex.quote(shlex.quote(cmd))
-    return (f"lxc exec {shlex.quote(vm)} -- sudo -u ubuntu -H bash -lc "
-            + shlex.quote(cmd))
+    t = _locus_target(vm)
+    return LX.pty_wrap(t, ("bash -lc " + shlex.quote(cmd)) if t.kind == LX.KIND_SSH else cmd)
 
 
 async def api_ssh_hosts(request):
@@ -8662,45 +11304,44 @@ def _shell_persist(name: str, inner: str, scope: bool = False) -> str:
             + " || exec bash -lc " + shlex.quote(inner))
 
 
-def _tmux_persist(sess: str, cmd: str, remote: bool = False, surface: str = "") -> str:
-    """Shell command that attaches to tmux session `sess` (console socket),
-    starting `cmd` in it only when the session does not exist yet."""
-    pre = " ".join(_scope_prefix())
-    # 1.0.77: a claude-code seat gets a detached seat reporter (abstract-claude
-    # seat-report) beside it, so its locus's stations read alive/age/auth from
-    # the toolserver instead of probing over ssh. `$$` is the seat's own shell
-    # (tmux runs the command via sh -c; it lives exactly as long as the seat).
-    # mct seats report themselves (abstract-claude 0.1.23+). Silent no-op when
-    # abstract-claude is not on the seat's PATH.
-    if sess == "keeper-claude":
-        # t240: the sidecar reports abstract-claude's baked default_model unless
-        # told the REAL one — pass the model the seat command resolved.
-        mm = re.search(r" --model (\S+)", cmd)
-        real_model = (mm.group(1).strip("'\"") if mm else "") or _frontier_models().get("claude-code", "")
-        model_arg = (" --model " + shlex.quote(real_model)) if real_model else ""
-        cmd = ("(command -v abstract-claude >/dev/null 2>&1 && abstract-claude seat-report "
-               "--seat claude-code --watch-pid $$" + model_arg + " >/dev/null 2>&1 &); " + cmd)
-    # The tmux CLIENT refuses an argv larger than its 16 KB imsg buffer
-    # ("command too long", tmux 3.4) — the claude seat command (settings
-    # template + directive via --append-system-prompt) passes that, so the
-    # launch silently fell to the backend's bash prompt. mct v2 (2026-09-15):
-    # EVERY generated seat command is parked in a per-launch 0700 script and
-    # tmux runs `bash <file>`; `$$` above stays the seat's shell. Remote loci
-    # (lxc/ssh) get the script shipped inside the wrapper as base64 and
-    # materialised under their own $HOME — never a host path in a guest.
-    if remote:
-        if len(cmd) > _SEAT_LAUNCH_INLINE_MAX:
-            cmd = _seat_launch_remote(sess, cmd)
-    else:
-        # ALWAYS a file on the host: the script also exports the station's
-        # seat env (HUGPY_URL/BASE/API_KEY, toolserver, locus, state) — the
-        # pre-existing `console` tmux server's global env lacks them, which
-        # is why the local seat (hugpy-agent console) died with HTTP 401.
-        p = _seat_launch_script(sess, cmd, surface)
-        if p is not None:
-            cmd = "bash " + shlex.quote(str(p))
-    return ((pre + " " if pre else "") + f"tmux -L {KEEPER_TMUX_SOCK} " + _TMUX_OPTS
-            + "new-session -A -s " + shlex.quote(sess) + " " + shlex.quote(cmd))
+def _locus_target(vm):
+    """1.0.141: the ONE place a wire locus becomes an execution target.
+    host tokens / this station's own locus / an ssh pointer at this very
+    user@host -> self (no hop); a registered ssh host -> ssh over the mux; an
+    LXD guest -> lxc exec as ubuntu. Every seat action (launch, tmux keys,
+    config files, serve discovery) runs the SAME script through it."""
+    v = (vm or "").strip()
+    if not v or _is_host_vm(v):
+        return LX.Target(LX.KIND_SELF, "", _station_locus())
+    h = _ssh_host(v)
+    if h:
+        port = int(h.get("port") or 22)
+        if _is_self_target(f"{h.get('user') or 'root'}@{h.get('host')}:{port}"):
+            return LX.Target(LX.KIND_SELF, "", _station_locus())
+        return LX.Target(LX.KIND_SSH, v, _central_locus(v) or v,
+                         ssh_argv=_ssh_argv(h), ssh_tty=_ssh_shell_cmd(h))
+    return LX.Target(LX.KIND_LXC, v, _central_locus(v) or v)
+
+
+def _host_cfg_overrides():
+    """The host's guidance lives in the ACTIVE mct workspace; tell the snapshot
+    reader where (relative to the state dir) so the self target composes the
+    same text the host always did."""
+    try:
+        rel = _bg_user_path().resolve().relative_to(FV_STATE_HOME.resolve())
+        return {"guidance": str(rel)}
+    except Exception:                                    # noqa: BLE001
+        return {}
+
+
+async def _seat_cfg(target, runner=None):
+    """The target locus's seat-config snapshot, read ON the target by the same
+    script for every kind (locus_exec.read_cfg). Raises LX.LocusError."""
+    cfg = await LX.read_cfg(target, runner=runner,
+                            overrides=_host_cfg_overrides() if not target.remote else None)
+    cfg["remote"] = target.remote
+    cfg["locus"] = target.locus
+    return cfg
 
 
 # The station-process env a seat needs, exported at the top of every host
@@ -8721,72 +11362,62 @@ def _port_open(port, host="127.0.0.1", timeout=0.3):
         return False
 
 
-def _seat_env_block(surface=""):
-    env = {k: os.environ[k] for k in _SEAT_ENV_KEYS if os.environ.get(k)}
-    env.setdefault("HUGPY_STATION_STATE", str(FV_STATE_HOME))
-    if not env.get("TOOLSERVER_URL") and env.get("STATION_CONSOLE_TOOLSERVER"):
-        env["TOOLSERVER_URL"] = env["STATION_CONSOLE_TOOLSERVER"]
-    if not env.get("TOOLSERVER_TOKEN") and env.get("STATION_CONSOLE_TOOLSERVER_TOKEN"):
-        env["TOOLSERVER_TOKEN"] = env["STATION_CONSOLE_TOOLSERVER_TOKEN"]
-    if not env.get("EXCHANGE_LOCUS"):
-        try:
-            env["EXCHANGE_LOCUS"] = _station_locus() or ""
-        except Exception:
-            pass
-    if surface == "local" and _port_open(7002):
-        env["HUGPY_BASE"] = _LOCAL_HUGPY_FRONT      # opencode's ~84 KB requests need the local front
-    lines = ["# seat env from the station process (not tmux's inherited global env)"]
-    lines += [f"export {k}={shlex.quote(v)}" for k, v in env.items() if v]
+def _seat_env_block(surface="", target=None, cfg=None):
+    """The env prelude at the top of EVERY seat script (1.0.141: identical on
+    every target). On the target it resolves its own station state dir and
+    imports the seat keys from ITS env files; the self target then pins the
+    station process's own values on top (that IS the target's station)."""
+    target = target or LX.Target(LX.KIND_SELF, "", _station_locus())
+    keys = " ".join(_SEAT_ENV_KEYS + ("STATION_LOCUS",))
+    lines = ["# seat env (hugpy-station 1.0.141 — same prelude on every locus)",
+             LX.STATE_SH.rstrip("\n"),
+             'export HUGPY_STATION_STATE="$S"',
+             '__hs_env() { for __f in "$S/env/station.env" "$S/env/toolserver.env" "$S/toolserver.env"; do '
+             '[ -r "$__f" ] || continue; ( set -a; . "$__f" >/dev/null 2>&1; '
+             'for __k in ' + keys + '; do __v="${!__k:-}"; '
+             '[ -n "$__v" ] && printf "export %s=%q\\n" "$__k" "$__v"; done ); done; }',
+             'eval "$(__hs_env)"; unset -f __hs_env']
+    if not target.remote:
+        env = {k: os.environ[k] for k in _SEAT_ENV_KEYS if os.environ.get(k)}
+        env["HUGPY_STATION_STATE"] = str(FV_STATE_HOME)
+        if surface == "local" and _port_open(7002):
+            env["HUGPY_BASE"] = _LOCAL_HUGPY_FRONT      # opencode's ~84 KB requests need the local front
+        lines += [f"export {k}={shlex.quote(v)}" for k, v in env.items() if v]
+    loc = target.locus or ""
+    if loc:
+        lines.append(f'export EXCHANGE_LOCUS="${{EXCHANGE_LOCUS:-{loc}}}" HUGPY_LOCUS="${{HUGPY_LOCUS:-{loc}}}"')
+    lines += ['[ -z "${TOOLSERVER_URL:-}" ] && [ -n "${STATION_CONSOLE_TOOLSERVER:-}" ] && export TOOLSERVER_URL="$STATION_CONSOLE_TOOLSERVER"',
+              '[ -z "${TOOLSERVER_TOKEN:-}" ] && [ -n "${STATION_CONSOLE_TOOLSERVER_TOKEN:-}" ] && export TOOLSERVER_TOKEN="$STATION_CONSOLE_TOOLSERVER_TOKEN"',
+              'true']
     return "\n".join(lines) + "\n"
 
 
-# Anything longer than this rides in a launch file, never in the tmux argv.
-# (tmux's hard limit is ~16 KB; the seat prelude alone is several KB.)
-_SEAT_LAUNCH_INLINE_MAX = 2000
-_SEAT_LAUNCH_KEEP_S = 24 * 3600
+def _seat_launch_body(sess, cmd, target, cfg=None, surface=""):
+    """env prelude + (claude-code seat: its seat-report sidecar) + the seat
+    command — the text parked in the target's launch script."""
+    if sess == "keeper-claude":
+        # t240: the sidecar reports the REAL model the seat command resolved.
+        mm = re.search(r" --model (\S+)", cmd)
+        real_model = (mm.group(1).strip("'\"") if mm else "") or _frontier_models(cfg).get("claude-code", "")
+        model_arg = (" --model " + shlex.quote(real_model)) if real_model else ""
+        cmd = ("(command -v abstract-claude >/dev/null 2>&1 && abstract-claude seat-report "
+               "--seat claude-code --watch-pid $$" + model_arg + " >/dev/null 2>&1 &); " + cmd)
+    return _seat_env_block(surface, target, cfg) + cmd
 
 
-def _seat_launch_script(sess, cmd, surface=""):
-    """Park a generated seat command in a per-launch script under
-    <state>/seat-launch (0700, service user), pruning stale ones, with the
-    station's seat env exported at the top. Returns the path, or None when
-    the state dir is unwritable (caller passes inline)."""
-    cmd = _seat_env_block(surface) + cmd
-    try:
-        d = FV_STATE_HOME / "seat-launch"
-        d.mkdir(parents=True, exist_ok=True)
-        os.chmod(d, 0o700)
-        now = time.time()
-        for old in d.glob(sess + "-*.sh"):
-            try:
-                if now - old.stat().st_mtime > _SEAT_LAUNCH_KEEP_S:
-                    old.unlink()
-            except OSError:
-                pass
-        p = d / f"{sess}-{int(now)}-{os.getpid()}.sh"
-        tmp = p.with_suffix(".sh.tmp")
-        tmp.write_text("#!/bin/bash\n# generated by hugpy-station for tmux session " + sess
-                       + " — safe to delete once the seat is up\n" + cmd + "\n", encoding="utf-8")
-        os.chmod(tmp, 0o700)
-        os.replace(tmp, p)
-        return p
-    except OSError as e:
-        print(f"seat-launch script for {sess} not written ({e}); passing inline", file=sys.stderr)
-        return None
+async def _seat_launch(target, sess, cmd, cfg=None, surface="", runner=None):
+    """The unified launcher: script ON the target, then the same short
+    `tmux -L console new-session -A -s <sess> "bash <file>"` everywhere.
+    -> (pty command, script path). Raises LX.LocusError."""
+    body = _seat_launch_body(sess, cmd, target, cfg, surface)
+    pre = " ".join(_scope_prefix()) if not target.remote else ""
+    return await LX.seat_launch(target, sess, body, runner=runner, pre=pre, opts=_TMUX_OPTS)
 
 
-def _seat_launch_remote(sess, cmd):
-    """The remote form: a short shell that writes the script (base64 payload,
-    ~1.4x the command) to the locus user's own ~/.config/hugpy-station/seat-launch
-    and execs it. The outer lxc/ssh argv can carry ~128 KB, tmux inside the
-    guest only ever sees `bash <file>`."""
-    import base64 as _b64
-    payload = _b64.b64encode(("#!/bin/bash\n" + cmd + "\n").encode("utf-8")).decode("ascii")
-    stamp = f"{int(time.time())}-{os.getpid()}"
-    return ('d="$HOME/.config/hugpy-station/seat-launch"; mkdir -p "$d"; chmod 700 "$d"; '
-            f'f="$d/{sess}-{stamp}.sh"; printf %s {payload} | base64 -d > "$f.tmp" && chmod 700 "$f.tmp" && mv -f "$f.tmp" "$f"; '
-            f'find "$d" -name {shlex.quote(sess + "-*.sh")} -mmin +1440 -delete 2>/dev/null; '
-            'exec bash "$f"')
+async def _tmux_on(vm, *args, timeout=15):
+    """`tmux -L console <args>` on the locus's own console socket (1.0.141:
+    unstick / paste / show / live /model act on the SELECTED locus)."""
+    return await LX.tmux(_locus_target(vm), list(args), timeout=timeout)
 
 
 def _surface_key(surface: str, ground_vm: str, session: str = "", backend: str = "") -> str:
@@ -8831,17 +11462,51 @@ async def _vm_ip(name):
     return cands[0] if cands else ""
 
 
+async def _vm_probe(vm, names):
+    """ONE exec in the locus as its seat user -> (reached, {name: bool}, who, err).
+    `who` is `user@host` exactly as the locus reports itself (the ⌂ shell label);
+    reached=False (rc != 0: ssh refused/unreachable, lxc unusable) is what
+    disables the ⌂ shell button, with `err` as the reason."""
+    probe = "; ".join(
+        [f'if command -v {n} >/dev/null 2>&1 || [ -x "$HOME/.local/bin/{n}" ]; '
+         f'then echo {n}=1; else echo {n}=0; fi' for n in names]
+        + ['echo "__who=$(id -un)@$(hostname -s 2>/dev/null || hostname)"'])
+    rc, out, err = await _locus_run(vm, probe, 20)
+    if rc != 0:
+        return False, {n: False for n in names}, "", (err or out or f"rc={rc}").strip()[-300:]
+    got = dict(line.split("=", 1) for line in out.split() if "=" in line)
+    return True, {n: got.get(n) == "1" for n in names}, got.get("__who", ""), ""
+
+
 async def _vm_which(vm, names):
     """{name: bool} — which of these binaries exist in the VM for the dev user
     (PATH + ~/.local/bin, where vm-new seeds claude/hugpy-agent). One exec."""
-    probe = "; ".join(
-        f'if command -v {n} >/dev/null 2>&1 || [ -x "$HOME/.local/bin/{n}" ]; '
-        f'then echo {n}=1; else echo {n}=0; fi' for n in names)
-    rc, out, _err = await _locus_run(vm, probe, 20)
-    if rc != 0:
-        return {n: False for n in names}
-    got = dict(line.split("=", 1) for line in out.split() if "=" in line)
-    return {n: got.get(n) == "1" for n in names}
+    return (await _vm_probe(vm, names))[1]
+
+
+def _self_who():
+    """user@host of THIS station's service user (the host locus's shell user)."""
+    return getpass.getuser() + "@" + (socket.gethostname().split(".")[0] or "localhost")
+
+
+def _shell_plan(vm):
+    """1.0.143 ⌂ shell: where the SHELL surface of locus `vm` runs and as whom.
+    Resolved by the 1.0.141 transport (_locus_target), so the host tokens, this
+    station's own locus name and an ssh pointer at this very user@host all give
+    the HOST shell (the service user, no ssh hop). `vm` is the already-validated
+    wire locus ('' / '@keeper' / a dropdown name). -> dict:
+      kind  host | ssh | lxc
+      key   the PTY record key (surf_key) — one persistent shell per locus
+      who   static user@host label (the probe's own `id -un@hostname` wins)
+      ssh   the interactive ssh login (kind ssh only)"""
+    t = _locus_target("" if vm == "@keeper" else vm)
+    if t.kind == LX.KIND_SELF:
+        return {"kind": "host", "key": "shell:@keeper", "who": _self_who(), "ssh": ""}
+    if t.kind == LX.KIND_SSH:
+        h = _ssh_host(vm) or {}
+        return {"kind": "ssh", "key": "shell-ssh:" + vm,
+                "who": f"{h.get('user') or 'root'}@{h.get('host') or vm}", "ssh": t.ssh_tty}
+    return {"kind": "lxc", "key": "shell:" + vm, "who": f"{t.lxc_user}@{vm}", "ssh": ""}
 
 
 async def term_backends(request):
@@ -8853,17 +11518,19 @@ async def term_backends(request):
     req_vm = (request.query.get("vm") or "").strip()
     # @keeper = the host seat: probe HOST availability (that is where its
     # backends actually run — the old fold to MODEL_VM probed the wrong box).
+    loci = await all_locus_names()
     if req_vm == "@keeper":
         ground_vm = ""
     else:
-        ground_vm = (req_vm if (req_vm and req_vm in await all_locus_names())
+        ground_vm = (req_vm if (req_vm and req_vm in loci)
                      else MODEL_VM)
     vm_avail = None
+    vm_reached, vm_who, vm_err = True, "", ""
     if ground_vm:
         names = sorted({shlex.split(cmd)[0]
                         for s2, spec2 in TERM_SURFACES.items() if s2 != "shell"
-                        for cmd in spec2["backends"].values()})
-        vm_avail = await _vm_which(ground_vm, names)
+                        for cmd in spec2["backends"].values()} | {"tmux"})
+        vm_reached, vm_avail, vm_who, vm_err = await _vm_probe(ground_vm, names)
     out = {}
     for s, spec in TERM_SURFACES.items():
         sess = _live_surface_session(_surface_key(s, ground_vm, _active_session()))
@@ -8884,6 +11551,25 @@ async def term_backends(request):
                 avail = any((vm_avail[a] if vm_avail is not None else bool(shutil.which(a)))
                             for a in native_argvs)
             out[s]["backends"][key] = {"available": avail}
+    # 1.0.143 ⌂ shell: WHO the shell surface would be on the selected locus and
+    # whether that locus is reachable — the same resolution ws_hostterm uses
+    # (_shell_plan), so the button's label is the shell it opens. Reported inside
+    # "shell" (a top-level key would become a phantom surface tab).
+    if "shell" in out:
+        shell_vm = req_vm if (req_vm == "@keeper" or req_vm in loci) else ""
+        plan = _shell_plan(shell_vm)
+        if plan["kind"] == "host":
+            reached, who, why = True, plan["who"], ""
+        else:
+            if shell_vm == ground_vm:
+                reached, who, why = vm_reached, vm_who, vm_err
+            else:
+                reached, _a, who, why = await _vm_probe(shell_vm, [])
+            who = who or plan["who"]
+            if not reached:
+                why = f"cannot reach {shell_vm} as {plan['who']} ({plan['kind']}): {why or 'no answer'}"
+        out["shell"].update({"available": bool(reached), "reason": why, "who": who,
+                             "kind": plan["kind"], "locus": shell_vm or "@keeper"})
     out["frontier_enabled"] = _frontier_enabled()
     out["b_enabled"] = _b_enabled()
     # t-serve: which keeper surface LEADS. "serve" = abstract-claude serve at
@@ -8898,6 +11584,13 @@ async def term_backends(request):
     if "frontier" in out:
         out["frontier"]["keeper_surface"] = surface_now
         out["frontier"]["serve"] = ac
+        # 1.0.139: the tmux seat needs tmux on the box that runs it (this host, or
+        # the grounding VM). Reported inside "frontier" — a top-level key would
+        # become a phantom surface tab — so the UI disables the tmux button with
+        # the reason instead of offering a seat that cannot start.
+        t_ok = (vm_avail.get("tmux", False) if vm_avail is not None else _tmux_available())
+        out["frontier"]["tmux"] = {"available": bool(t_ok),
+                                   "reason": "" if t_ok else TMUX_MISSING_MSG}
         labels = dict(TMUX_SEAT_LABELS)
         # t296: the picker lists the serve console as its FIRST frontier entry.
         # It is a surface, not a TERM_SURFACES backend (nothing spawns it as a
@@ -8905,6 +11598,17 @@ async def term_backends(request):
         # above — never in frontier.backends.
         labels["serve"] = ac.get("label") or "Serve console"
         out["frontier"]["backend_labels"] = labels
+        # 1.0.144: `live` above is THIS station's attached PTY — not whether the
+        # locus's seats exist. The seats themselves live on the locus's own
+        # console socket (/tmp/tmux-<its uid>/console), so list them THERE, as
+        # that user, through the locus transport: hugpy's keeper-claude /
+        # keeper-codex / keeper-hugpy read live=False while running.
+        s_ok, seats, s_err = await _locus_seats(ground_vm if (req_vm and req_vm == ground_vm) else "")
+        names = {x["name"] for x in seats}
+        sb = {b: bool(_tmux_session_for("frontier", b)) and _tmux_session_for("frontier", b) in names
+              for b in out["frontier"]["backends"]}
+        out["frontier"].update(seats=seats, seats_ok=s_ok, seats_error=s_err, seat_backends=sb,
+                               seat_live=any(sb.values()))
     if ground_vm:
         out["grounded_in"] = ground_vm
     return web.json_response(out)
@@ -8994,17 +11698,20 @@ async def ws_hostterm(request):
             term_cmd = (f"tmux -L {KEEPER_TMUX_SOCK} " + _TMUX_OPTS
                         + "attach -t " + shlex.quote("=" + tmux_name))
             surf_key = "shell-tmux:" + tmux_name
-        elif vm == "@keeper":
+        elif (plan := _shell_plan(vm))["kind"] == "host":
             # 1.0.41b (operator): the SHELL surface is a shell — a plain login
             # shell on THIS host as the service user (the host's own seat).
             # Claude on the host is the frontier surface's claude-code backend
             # (host-grounded), not something the shell tab silently starts.
+            # 1.0.143 (⌂ shell): every host spelling — no vm, @keeper, @self,
+            # this station's own locus name, an ssh pointer at this very
+            # user@host — is THIS persistent tmux shell (_locus_target).
             sh_inner = "exec bash -l"; sh_kind = "host"
-            surf_key = "shell:@keeper"
-        elif vm and _ssh_host(vm):
+            surf_key = plan["key"]
+        elif plan["kind"] == "ssh":
             # ⇅ ssh host: the shell IS ssh (interactive — password login allowed)
-            sh_inner = "exec bash -l"; sh_kind = "ssh"; sh_ssh = _ssh_shell_cmd(_ssh_host(vm))
-            surf_key = "shell-ssh:" + vm
+            sh_inner = "exec bash -l"; sh_kind = "ssh"; sh_ssh = plan["ssh"]
+            surf_key = plan["key"]
         elif vm and vm in await known_names():
             if backend == "ssh":
                 # A real sshd login as the dev user (vm-new enables sshd and
@@ -9064,75 +11771,85 @@ async def ws_hostterm(request):
             if _fv == "hugpy-agent mct":
                 _fv = ""
             term_cmd = _fv or term_cmd
+        # 1.0.141: ONE launch path for every locus. The target's OWN seat
+        # config (directive, models, switches, template, handoff) is read ON
+        # the target; the seat script is written ON the target; tmux only
+        # ever sees `bash <file>` (no payload in any argv — the "command too
+        # long" bug); local and remote differ only in the transport.
+        target = _locus_target(ground_vm)
+        cfg = None
+        _live = SESSIONS.get(FV_SESSIONS.get(surf_key) or "")
+        _reattach = _live is not None and getattr(_live, "alive", False)
+        if surface == "frontier" and not _reattach:
+            try:
+                cfg = await _seat_cfg(target)
+            except LX.LocusError as e:
+                if target.remote:
+                    cfg_err = str(e)
+                    await ws.send_str(json.dumps({"t": "error", "msg":
+                        f"seat config of {req_vm} unreadable — not launching with another locus's directive: {cfg_err[:300]}"}))
+                    await ws.close()
+                    return ws
+                cfg = None          # host: its own python reads are the same files
+            # 1.0.146: the handoff layer rides in from the toolserver, not a file
+            await _handoff_layer_refresh(request.app, target.locus)
         if term_cmd == "claude":   # Claude Code = the fresh templated A seat
             # bash -lc so the seat prelude runs under bash wherever it lands.
             inner = "bash -lc " + shlex.quote(_claude_seat_cmd(
-                "frontier", "mct" if (surface == "frontier" and backend == "mct") else "claude-code"))
+                "frontier", "mct" if (surface == "frontier" and backend == "mct") else "claude-code", cfg))
         elif term_cmd == "codex":
             # Keep the locus user's Codex auth/config and native model picker.
             # Pass standing guidance as configuration, without submitting a turn.
-            guidance = _frontier_directive_text()[0]
-            handoff = _frontier_handoff_pending()
-            if handoff:
-                guidance += "\n\n" + handoff
-            inner = _gpt_launch_cmd(guidance, remote=bool(ground_vm))
+            # 1.0.143: the tmux-seat directive (+ guidance, overlay, handoff) —
+            # the same composition as the claude-code seat, minus its switches.
+            guidance = _session_directive("tmux", cfg, backend="codex", with_handoff=True)
+            inner = _gpt_launch_cmd(guidance, remote=target.remote, cfg=cfg)
         elif term_cmd == "hugpy-agent harness":
             # A persistent OpenCode frontier seat backed by Hugpy. Its fleet
             # model is a launch setting, including a model served by a local
             # worker; the harness refreshes OpenCode's model map.
-            model = _frontier_models().get("hugpy", "")
+            model = _frontier_models(cfg).get("hugpy", "")
             inner = "hugpy-agent harness" + (" --model " + shlex.quote(model) if model else "")
         else:
             inner = term_cmd
-        if "abstract-claude mct " in inner:
-            inner = "MCT_LOCUS=" + shlex.quote(ground_vm or _station_locus() or "keeper") + " " + inner
+        if surface == "frontier" and "abstract-claude mct " in inner:
+            # mct pointer-exchange grounds (abstract-claude mct <ws>). Resolved
+            # BEFORE the script is written (1.0.141: the old post-wrap textual
+            # edits never reached the launch file). The REPL runs WITHIN the
+            # locus the seat is attributed to.
+            inner = "MCT_LOCUS=" + shlex.quote(target.locus or "") + " " + inner
+            if target.remote:
+                await _push_mct_to_locus(ground_vm)
+                inner = inner.replace("{ws}", "~/.config/hugpy-station/mct2/repl")
+            else:
+                ws2 = str(_active_ws())
+                inner = inner.replace("{ws}", ws2)
+                # the directive reaches mct via <ws>/operator-guidance.md, composed
+                # fresh at every launch — the init prompt rides in it exactly once.
+                _render_guidance(Path(ws2))
+            _m2 = _frontier_models(cfg).get("mct", "")
+            if _m2 and "--model" not in inner:
+                inner = inner.replace("abstract-claude mct ", "abstract-claude mct --model " + _m2 + " ", 1)
+            # per-backend session dirs: label mct's per-launch config dir
+            if "AC_SESSION_LABEL=" not in inner:
+                inner = inner.replace("abstract-claude mct ", "AC_SESSION_LABEL=mct abstract-claude mct ", 1)
         # One keeper per station: attach to (or create) the persistent tmux
-        # session instead of spawning a second process. The mct workspace is
-        # still injected below, textually, inside this wrapper's quoting.
+        # session instead of spawning a second process.
         tmux_sess = _tmux_session_for(surface, launch_backend)
-        if tmux_sess:
-            inner = _tmux_persist(tmux_sess, inner, remote=bool(ground_vm), surface=surface)
-        # Seat the surface in its station (no-op when host-grounded).
-        term_cmd = _in_vm(inner, ground_vm)
-    if surface == "frontier" and "abstract-claude mct" in term_cmd:
-        # mct pointer-exchange grounds. The bundled mct2_repl.py was RETIRED
-        # 2026-08-31: the REPL now lives in the `abstract-claude` package
-        # (single source of truth; `abstract-claude mct <ws>`), so there's no
-        # host script path to swap — only the {ws} to point at the locus/host
-        # workspace. Grounding rule (operator 2026-08-27) unchanged: the REPL
-        # runs WITHIN the locus the seat is attributed to; ensure the package +
-        # push guidance there. Workspace paths are kept (mct2 dirname) so the
-        # console's status tab reads the same <ws> as before.
-        if ground_vm:
-            await _push_mct_to_locus(ground_vm)
-            term_cmd = term_cmd.replace("{ws}", "~/.config/hugpy-station/mct2/repl")
+        if tmux_sess and _reattach:
+            term_cmd = ""            # a live PTY is reattached below: nothing to write anywhere
+        elif tmux_sess:
+            try:
+                term_cmd, _launch_path = await _seat_launch(target, tmux_sess, inner, cfg, surface)
+            except LX.LocusError as e:
+                # never an inline payload: say what failed, then the confinement
+                # fallback below (same locus) takes over
+                term_cmd = ("printf '%s\\n' " + shlex.quote("[hugpy-station] " + str(e)[:400])
+                            + "; sleep 5")
+                term_cmd = "bash -c " + shlex.quote(term_cmd)
         else:
-            # mct v2: the canonical workspace (FV_MCT_WS / active session) —
-            # the same dir /api/b/guidance writes, so a guidance update reaches
-            # the seat. The retired mct2/repl dir is migrated once by _bg_user_path.
-            ws2 = str(_active_ws())
-            term_cmd = term_cmd.replace("{ws}", ws2)
-            # the directive reaches mct via <ws>/operator-guidance.md, composed
-            # fresh at every launch — and the session init prompt rides in it
-            # exactly once (1.0.65): consumed right after it is composed.
-            _render_guidance(Path(ws2))
-            _frontier_handoff_consume("mct launch")
-        _m2 = _frontier_models().get("mct", "")
-        if _m2 and "--model" not in term_cmd:
-            term_cmd = term_cmd.replace("abstract-claude mct ",
-                                        "abstract-claude mct --model " + _m2 + " ", 1)
-        # Per-backend session dirs (operator 2026-09-10): LABEL mct's per-launch
-        # config dir (~/.claude-sessions/<stamp>-<pid>-mct) so the scoped seat
-        # wipe can target ONLY mct's dirs — mirroring claude-code's
-        # AC_SESSION_LABEL=frontier (set in _claude_seat_cmd). abstract-claude's
-        # cmd_mct → fresh_session → new_session_dir reads AC_SESSION_LABEL for the
-        # dir suffix. Injected once, before the invocation, inside whatever
-        # tmux/VM wrapping already applied. Caveat: only mct seats launched AFTER
-        # this change get the -mct suffix; pre-existing unlabeled mct dirs stay
-        # unmatched by the wipe glob (harmless — they are ephemeral per-launch).
-        if "AC_SESSION_LABEL=" not in term_cmd:
-            term_cmd = term_cmd.replace("abstract-claude mct ",
-                                        "AC_SESSION_LABEL=mct abstract-claude mct ", 1)
+            # Seat the surface in its station (no-op when host-grounded).
+            term_cmd = _in_vm(inner, ground_vm)
     if term_cmd:
         try:
             argv0 = shlex.split(term_cmd)[0]
@@ -9155,8 +11872,8 @@ async def ws_hostterm(request):
             if m:
                 fb = (f"exec lxc exec {m.group(1)} -- "
                       "sudo -u ubuntu -H bash -l")
-            elif (term_cmd.startswith("ssh ") and req_vm
-                  and req_vm != "@keeper" and _ssh_host(req_vm)):
+            elif (req_vm and req_vm != "@keeper" and _ssh_host(req_vm)
+                  and _locus_target(req_vm).remote):   # 1.0.143: a pointer at self is the host
                 # a dead ssh host session reconnects to the SAME host, never a
                 # host prompt (explicit confinement, same rule as VMs)
                 fb = ("echo; echo '[hugpy-station] ssh session ended — reconnecting to "
@@ -9367,9 +12084,9 @@ async def _frontier_fs_policy():
 
 
 async def api_frontier_fs_status(request):
-    resp = await _sidecar_proxy(request)
-    if resp is not None:
-        return resp
+    vm = await _sidecar_vm(request)
+    if vm:
+        return await _remote_fs(request, vm)            # 1.0.144: the locus's OWN policy
     doc, err = await _frontier_fs_policy()
     if err:
         return web.json_response({"ok": False, "error": err}, status=502)
@@ -9383,13 +12100,16 @@ async def api_frontier_fs_status(request):
 
 
 async def api_frontier_fs_toggle(request):
-    resp = await _sidecar_proxy(request)
-    if resp is not None:
-        return resp
     try:
         body = await request.json()
     except Exception:
         body = {}
+    vm = await _sidecar_vm(request)
+    if vm:
+        desired = body.get("desired")
+        if desired not in ("on", "off"):
+            return web.json_response({"ok": False, "error": 'remote toggle needs {"desired": "on"|"off"}'}, status=400)
+        return await _remote_fs(request, vm, desired)
     desired = body.get("desired")
     if desired not in ("on", "off"):
         doc, err = await _frontier_fs_policy()
@@ -9415,6 +12135,7 @@ async def api_frontier_fs_toggle(request):
         FRONTIER_FS_FLAG.write_text(json.dumps({"mediated": not allowed}) + "\n")
     except OSError:
         pass
+    _render_session_directives()
     return web.json_response({"ok": True, "allowed": allowed, "desired": desired,
                               "mediated": not allowed,
                               "applies_to": ["frontier:mct", "frontier:claude-code"],
@@ -9444,39 +12165,8 @@ _fleet_mail_last = 0.0
 # fleet-msg writer takes, so a message is never torn or double-read.
 _OUTBOX_DRAIN_SH = ('f="$HOME/.keeper-mail-out.jsonl"; [ -s "$f" ] || exit 0; '
                     'exec 9>>"$f.lock"; flock 9; cat "$f"; : > "$f"')
-# Append one JSON row ($1 — an argv element, never interpolated) to the
-# station's bridge-mail inbox, trimmed like view-push so it can't grow forever.
-_INBOX_APPEND_SH = ('f="$HOME/.bridge-mail.jsonl"; exec 9>>"$f.lock"; flock 9; '
-                    'printf "%s\\n" "$1" >> "$f"; '
-                    f'tail -n {FLEET_MAIL_MAX} "$f" > "$f.t" 2>/dev/null '
-                    '&& mv "$f.t" "$f"')
-# Ping the station's A: type the notice ($1) into its live keeper pane. The
-# session is ANCHORED exactly as console-api probes it — unanchored, tmux
-# prefix-matches and B's `keeper-local` session would swallow A's ping. NB
-# send-keys takes a target-PANE, where a bare '=keeper' does not parse — the
-# trailing ':' ('=keeper:') means "that exact session, its active pane".
-# rc 3 = no live keeper, a normal answer (the mail still sits in the inbox).
-_KEEPER_PING_SH = ('tmux -L console has-session -t =keeper 2>/dev/null || exit 3; '
-                   'tmux -L console send-keys -t =keeper: -l "$1"; sleep 0.3; '
-                   'tmux -L console send-keys -t =keeper: Enter')
-
-
-async def _ping_station_keeper(vm, frm, text):
-    """Type a one-line ✉ notice into the station's live A (the keeper tmux
-    session). Claude Code queues input that arrives mid-turn, so a turn in
-    flight is never corrupted — the ping simply lands as the next message.
-    No live keeper is a silent no-op: the mail waits in the inbox for
-    `fleet-msg --inbox`."""
-    note = "✉ fleet mail from %s: %s" % (frm, " ".join(str(text).split()))
-    if len(note) > 280:
-        note = note[:280] + " … (read the full message: fleet-msg --inbox)"
-    try:
-        rc, _out, _err = await _run(
-            "lxc", "exec", vm, "--", "sudo", "-u", "ubuntu", "-H",
-            "bash", "-c", _KEEPER_PING_SH, "fleet-mail-ping", note)
-        return rc == 0
-    except OSError:
-        return False
+# (1.0.138: the lxc bridge-mail append + in-guest keeper-pane ping that lived
+# here are gone — every non-host locus is messaged on the central comms lane.)
 
 
 def _mail_row(frm, to, text, unread=False):
@@ -9575,52 +12265,40 @@ async def fleet_message_post(request):
             {"error": 'body must be {"to": "<station>"|"keeper", "text": "..."}'},
             status=400)
     frm = (str(body.get("from") or "").strip() or "keeper")[:24]
-    if to == "keeper":
+    if _is_host_vm(to):
         row = _mail_row(frm, to, text, unread=True)
         _keeper_mail_write(_keeper_mail_rows() + [row])
         audit(request, "fleet-message", f"to=keeper from={frm}", ok=True)
         return web.json_response({"ok": True, "id": row["id"], "to": to})
-    if to not in await known_names():
-        return web.json_response({"error": f"unknown station {to}"}, status=404)
-    if _ssh_host(to):
-        # 2026-09-03: an ssh/toolserver locus (hugpy, ae-vm-mgr, ...) has no lxc
-        # exec path. Its channel is the toolserver board: comms/ping posts a
-        # [ping] request on THAT locus's board, and the locus's own station
-        # sync (_deliver_pings) turns it into keeper mail + a pane nudge.
-        sender = _station_locus() or re.sub(r"[^a-z0-9-]", "-", frm.lower()) or "keeper"
-        try:
-            res = await _ts_call(request.app, "comms/ping",
-                                 {"to": to, "text": text, "from_": sender,
-                                  "kind": "message"}, timeout=15)
-        except Exception as e:  # noqa: BLE001 — toolserver down / rejected id
-            audit(request, "fleet-message", f"to={to} via=board failed: {e}", ok=False)
-            return web.json_response({"ok": False, "error": f"board ping failed: {e}"}, status=502)
-        bid = (res or {}).get("id") if isinstance(res, dict) else None
-        audit(request, "fleet-message", f"to={to} from={sender} via=board id={bid}", ok=True)
-        return web.json_response({"ok": True, "id": bid, "to": to, "via": "board",
-                                  "pinged": False})
-    row = _mail_row(frm, to, text)      # no unread: nothing in-VM marks read
-    rc, out, err = await _run(
-        "lxc", "exec", to, "--", "sudo", "-u", "ubuntu", "-H",
-        "bash", "-c", _INBOX_APPEND_SH, "fleet-mail",
-        json.dumps(row, separators=(",", ":")))
-    if rc != 0:
-        audit(request, "fleet-message", f"to={to} failed", ok=False)
-        return web.json_response(
-            {"ok": False, "error": (err or out).strip() or "delivery failed"},
-            status=502)
-    pinged = await _ping_station_keeper(to, frm, text)
-    audit(request, "fleet-message",
-          f"to={to} from={frm} pinged={'yes' if pinged else 'no'}", ok=True)
-    return web.json_response({"ok": True, "id": row["id"], "to": to,
-                              "pinged": pinged})
+    # 1.0.138: every non-host locus — ssh host, LXD guest, registered locus —
+    # is messaged on the central comms lane: comms/ping files a [ping] request
+    # on THAT locus's board (its central key); the locus's keeper reads it via
+    # comms_inbox (or its own station sync, where one runs). No lxc exec into a
+    # guest mail file, no station on the locus required.
+    loc = await _known_locus_key(to)
+    if not loc:
+        return web.json_response({"error": f"unknown locus {to}"}, status=404)
+    if loc == _keeper_locus():          # a dropdown pointer at THIS station
+        row = _mail_row(frm, "keeper", text, unread=True)
+        _keeper_mail_write(_keeper_mail_rows() + [row])
+        audit(request, "fleet-message", f"to=keeper({to}) from={frm}", ok=True)
+        return web.json_response({"ok": True, "id": row["id"], "to": "keeper"})
+    sender = _station_locus() or re.sub(r"[^a-z0-9-]", "-", frm.lower()) or "keeper"
+    try:
+        res = await _ts_call(request.app, "comms/ping",
+                             {"to": loc, "text": text, "from_": sender,
+                              "kind": "message"}, timeout=15)
+    except Exception as e:  # noqa: BLE001 — toolserver down / rejected id
+        audit(request, "fleet-message", f"to={to}({loc}) via=board failed: {e}", ok=False)
+        return web.json_response({"ok": False, "error": f"board ping failed: {e}"}, status=502)
+    bid = (res or {}).get("id") if isinstance(res, dict) else None
+    audit(request, "fleet-message", f"to={to}({loc}) from={sender} via=board id={bid}", ok=True)
+    return web.json_response({"ok": True, "id": bid, "to": to, "locus": loc, "via": "board",
+                              "pinged": False})
 
 
-# ⧉ brief keeper: type the board brief INTO the station's live keeper (A) so the
-# model is prompted about the to-dos directly — no clipboard round-trip. Same
-# anchored pane as the ✉ ping, but the full text (no 280-char trim: the brief
-# IS the instruction) plus a snapshot of what currently stands open.
-_TODO_SNAPSHOT_SH = 'cat "$HOME/todo.json" 2>/dev/null || true'
+# ⧉ brief keeper: the board brief + a snapshot of what currently stands open,
+# filed on the locus's central board (comms ping) — see _central_todo_brief.
 
 
 def _todo_brief_summary(raw, cap=12):
@@ -9646,55 +12324,19 @@ def _todo_brief_summary(raw, cap=12):
 
 
 async def vm_todo_brief_post(request):
-    """POST /api/vm/<station>/todo/brief {"text": "<brief>"} -> {ok, pinged,
-    open}. Reads the station's ~/todo.json, appends a one-line snapshot of the
-    open items to the brief, and types the whole thing into the live keeper
-    pane (Claude Code queues mid-turn input, so it lands as the next message).
-    No live keeper: 409 — the operator starts the keeper first, nothing is
-    silently dropped."""
+    """POST /api/vm/<locus>/todo/brief {"text": "<brief>"} -> {ok, via, open}.
+    1.0.138: the brief + a snapshot of the locus's OPEN central items is filed
+    as ONE comms ping on that locus's board (_central_todo_brief) — it used to
+    lxc-exec ~/todo.json and a live keeper pane inside a guest."""
     vm = request.match_info.get("vm") or ""
-    if vm == "keeper":
+    if _is_host_vm(vm):
         return web.json_response(
             {"error": "the host keeper is briefed by its charge — there is no "
                       "station pane to prompt"}, status=400)
-    resp = await _ssh_vm_reroute(request)   # ssh locus: ITS workbench briefs
+    resp = await _central_vm_reroute(request)   # every non-host locus: central ping
     if resp is not None:
         return resp
-    if vm not in await known_names():
-        return web.json_response({"error": f"unknown station {vm}"}, status=404)
-    try:
-        body = await request.json()
-        text = " ".join(str(body.get("text") or "").split())
-        if not text:
-            raise ValueError
-    except Exception:
-        return web.json_response(
-            {"error": 'body must be {"text": "<brief>"}'}, status=400)
-    rc, out, _err = await _run(
-        "lxc", "exec", vm, "--", "sudo", "-u", "ubuntu", "-H",
-        "bash", "-c", _TODO_SNAPSHOT_SH)
-    summary = _todo_brief_summary(out if rc == 0 else "")
-    prompt = ("☑ board brief from the operator's console: " + text[:FLEET_MSG_MAX]
-              + " " + summary
-              + " Please read ~/todo.json now and act on the open items.")
-    try:
-        rc, out, err = await _run(
-            "lxc", "exec", vm, "--", "sudo", "-u", "ubuntu", "-H",
-            "bash", "-c", _KEEPER_PING_SH, "todo-brief", prompt)
-    except OSError as e:
-        rc, out, err = 1, "", str(e)
-    if rc == 3:
-        audit(request, "todo-brief", f"vm={vm} no live keeper", ok=False)
-        return web.json_response(
-            {"error": f"no live keeper in {vm} — start the keeper, then brief it"},
-            status=409)
-    if rc != 0:
-        audit(request, "todo-brief", f"vm={vm} failed", ok=False)
-        return web.json_response(
-            {"ok": False, "error": (err or out).strip() or "delivery failed"},
-            status=502)
-    audit(request, "todo-brief", f"vm={vm}", ok=True)
-    return web.json_response({"ok": True, "pinged": True, "to": vm})
+    return web.json_response({"error": f"unknown locus {vm}"}, status=404)
 
 
 async def _fleet_mail_loop(app):
@@ -9832,6 +12474,23 @@ def _dispatch_state_path():
     return FV_STATE_HOME / "handoff-dispatch.json"
 
 
+# 1.0.146 (t4260): the hand-off dedupe has an AGE FLOOR — an identical open set
+# is re-queued after this long, so a lost prompt is never lost forever.
+_HANDOFF_REQUEUE_S = max(600, int(os.environ.get("STATION_HANDOFF_REQUEUE_SECS") or str(6 * 3600)))
+
+
+def _dispatch_is_dup(prev, sig, now, floor=None):
+    """(dup, why): True while the last queued batch has the same signature AND
+    is younger than the floor; past the floor the same set is re-queued."""
+    floor = _HANDOFF_REQUEUE_S if floor is None else floor
+    if not isinstance(prev, dict) or str(prev.get("sig")) != sig:
+        return False, "new open set"
+    age = now - float(prev.get("ts") or 0)
+    if age < floor:
+        return True, "same open set queued %d min ago (re-queued after %d h)" % (age // 60, floor // 3600)
+    return False, "same open set but %d h old — re-queued (age floor)" % (age // 3600)
+
+
 def _prompt_inbox_sweep(keep=None):
     """Retention for the audit copies: keep the newest `keep` dirs, drop older.
     Names are timestamp-prefixed, so a lexical sort is a chronological sort."""
@@ -9906,8 +12565,15 @@ async def _flush_dispatch_batch(app):
         prev = json.loads(sp.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         prev = {}
-    if isinstance(prev, dict) and str(prev.get("sig")) == sig:
-        return None                    # same open set, same newest ts: no requeue
+    now_ts = int(time.time())
+    dup, dup_why = _dispatch_is_dup(prev, sig, now_ts)
+    if dup:
+        return None                    # same open set, same newest ts, under the age floor
+    if "age floor" in dup_why:
+        _audit_line("handoff-requeue", "%s: %s" % (sig, dup_why))
+        marker_age = marker + " requeue"
+    else:
+        marker_age = ""
     locus = _station_locus()
     if not locus or app is None:
         return None
@@ -9919,8 +12585,8 @@ async def _flush_dispatch_batch(app):
             if not isinstance(d, dict):
                 continue
             t = str(d.get("text") or "")
-            if marker in t:
-                return None
+            if marker in t and not marker_age:
+                return None            # a still-pending copy is queued, not lost
             if "[station-reminder-batch " in t and d.get("id"):
                 stale.append(str(d["id"]))
     except Exception:
@@ -9929,6 +12595,8 @@ async def _flush_dispatch_batch(app):
              % len(batch),
              "(These are NOT typed into your terminal. Pull each prompt file you "
              "act on, then update the board item.)", ""]
+    if marker_age:
+        lines.insert(1, "(re-queued — %s; the previous batch for this set was not acted on)" % dup_why)
     for e in batch:
         lines.append("- %s: %s" % (e["id"], e["title"] or "(no title)"))
         if e.get("why"):
@@ -9954,7 +12622,7 @@ async def _flush_dispatch_batch(app):
     try:
         sp.parent.mkdir(parents=True, exist_ok=True)
         sp.write_text(json.dumps({"sig": sig, "ids": ids, "max_ts": max_ts,
-                                  "ts": int(time.time()),
+                                  "ts": now_ts, "requeues": int((prev or {}).get("requeues") or 0) + (1 if marker_age else 0),
                                   "prompt_id": (doc or {}).get("id")}, indent=2) + "\n",
                       encoding="utf-8")
     except OSError:
@@ -10029,9 +12697,54 @@ async def _todo_triage(item, trigger, comment_text=None):
 # Cadence = the canonical reserved `cfg-relay` item (note {"board_quiet_secs":N},
 # 0 = no quiet gate) — the board drawer's \u23f1 push knob edits it; B mints it.
 FV_TODO_REMIND = os.environ.get("FLEETVIEW_TODO_REMIND", "1") not in ("0", "off", "no")
+# 1.0.144 (operator 2026-10-01: "take B out of it for now"): the per-item B
+# verdict cycle below (_todo_keeper_chat verdicts, B comments, B-driven and
+# attempt-cap withholding) is the reminder MITIGATOR, OFF by default. The keeper
+# is reminded by the deterministic open-todos digest instead (_digest_loop,
+# todo_digest.py). A redesigned mitigator slots in here — board item
+# "[F2.5] Redesign a reminder mitigator"; it may annotate, never suppress.
+REMIND_MITIGATOR = os.environ.get("STATION_REMIND_MITIGATOR", "0").strip().lower() in ("1", "on", "true", "yes")
 _REMIND_TICK = int(os.environ.get("FLEETVIEW_TODO_REMIND_TICK", "60"))
-_REMIND_CAP = 3
+# 1.0.146 (t4260): _REMIND_CAP (3 attempts, then withhold) is GONE — operator
+# ruling d4254: no attempt caps; only the min-gap coalesce below remains.
 _REMIND_MIN_GAP = int(os.environ.get("FLEETVIEW_TODO_REMIND_GAP", "600"))
+
+
+def _station_switches():
+    """1.0.146: every code default that can inert a loop, with its LIVE value —
+    in the settings payload (/api/about, /api/loops config) and, when one is
+    off, on the ⚠ strip. Never hidden in an env var nobody reads."""
+    return {
+        "remind_mitigator": {"on": bool(REMIND_MITIGATOR), "env": "STATION_REMIND_MITIGATOR", "default": "0",
+                             "effect": "B reminder-verdict cycle (the digest reminds regardless)"},
+        "todo_remind": {"on": bool(FV_TODO_REMIND), "env": "FLEETVIEW_TODO_REMIND", "default": "1",
+                        "effect": "reminder cycle tick (the ⚠ loop detector rides it either way)"},
+        "todo_digest": {"on": bool(DIGEST_ON), "env": "STATION_TODO_DIGEST", "default": "1",
+                        "effect": "open-todos digest into every keeper session"},
+        "nudge_tmux": {"on": bool(_knudge.tmux_enabled()) if _knudge else False, "env": "STATION_NUDGE_TMUX",
+                       "default": "0", "effect": "tmux keeper pane as the nudge fallback"},
+        "dev_quiet": {"on": os.environ.get("STATION_DEV_QUIET") == "1", "env": "STATION_DEV_QUIET", "default": "0",
+                      "effect": "dev copy: no reminders, no host delivery target"},
+        "handoff_requeue_s": _HANDOFF_REQUEUE_S, "remind_min_gap_s": _REMIND_MIN_GAP,
+        "nudge_wait_max_s": _knudge.WAIT_MAX_S if _knudge else 900,
+        "bugreport_inflight_max_s": int(os.environ.get("STATION_BUGREPORT_INFLIGHT_MAX") or 900),
+        "prompt_pending_tick_s": PROMPT_PENDING_TICK,
+    }
+
+
+def _switch_strip_rows():
+    """Strip rows for the inert-by-default switches (visible, settable)."""
+    sw = _station_switches()
+    for key, label in (("remind_mitigator", "reminder mitigator (B verdict cycle) OFF"),
+                       ("todo_digest", "open-todos digest OFF"),
+                       ("todo_remind", "reminder cycle OFF")):
+        if not sw[key]["on"]:
+            _hold_note("switch:" + key, _sh.SOURCE_SWITCH if _sh else "station:switch", label,
+                       "%s=%s (default %s): %s" % (sw[key]["env"], "1" if sw[key]["on"] else "0",
+                                                  sw[key]["default"], sw[key]["effect"]),
+                       "set %s=1 in env/station.env and restart the station to turn it on" % sw[key]["env"])
+        else:
+            _hold_clear("switch:" + key)
 _RELAY_ID = "cfg-relay"
 _RELAY_DEFAULT_SECS = 1800
 
@@ -10296,17 +13009,8 @@ async def _todo_reminder_cycle(app=None):
                 continue
         n = int(w.get("dispatches") or 0)
         nv = int(w.get("verdicts") or 0)
-        if n >= _REMIND_CAP or nv >= _REMIND_CAP:   # hard fence: EVERY verdict counts
-            _watch_update(it["id"], {"withheld": f"attempt cap ({_REMIND_CAP})",
-                                     "withheld_ts": now})
-            _todo_b_comment(it["id"],
-                            f"\u23f1 withholding reminders: {max(n, nv)} pushes/verdicts "
-                            "without completion — operator review needed "
-                            "(new activity re-arms)")
-            _todo_hist({"event": "reminder", "id": it["id"], "type": it.get("type"),
-                        "detail": {"action": "withhold", "reason": "attempt cap",
-                                   "attempt": n}})
-            continue
+        # 1.0.146 (t4260 / d4254): NO attempt cap — only the _REMIND_MIN_GAP
+        # coalesce above spaces reminders; the delivery count rides the comment
         payload = {"item": {k: it.get(k) for k in
                             ("id", "type", "text", "note", "priority",
                              "status", "by")},
@@ -10346,7 +13050,8 @@ async def _todo_reminder_cycle(app=None):
                 continue
             _watch_update(it["id"], {"dispatches": n + 1, "last_dispatch": now})
             _todo_b_comment(it["id"],
-                            f"\u23f1 reminder \u2192 frontier (attempt {n + 1}): "
+                            f"\u23f1 reminder \u2192 frontier (delivery #{n + 1}, no cap; "
+                            f"next after {_REMIND_MIN_GAP // 60} min): "
                             + (reason or "still open past the push cadence")
                             + _dispatch_note(sent))
             _todo_hist({"event": "reminder", "id": it["id"], "type": it.get("type"),
@@ -10383,8 +13088,8 @@ async def _todo_reminder_loop(app):
             raise
         except Exception:
             pass
-        if not FV_TODO_REMIND:
-            continue
+        if not FV_TODO_REMIND or not REMIND_MITIGATOR:
+            continue                     # 1.0.144: the digest (_digest_loop) reminds; B is out
         try:
             _mint_cfg_relay()
             await _todo_reminder_cycle(app)
@@ -10394,11 +13099,171 @@ async def _todo_reminder_loop(app):
             continue
 
 
+# ── 1.0.144 [F3.8]: the open-todos digest, delivered INTO each keeper session ──
+# One deterministic DELTA digest per delivery target (_delivery_targets: the host
+# + every managed locus) per cadence (STATION_TODO_DIGEST_SECS, default 1800, floor
+# 300), for as long as anything is open — no B, no attempt cap. An unchanged board
+# is skipped (recorded) only while the last delivery is under 2 h old. Never while the
+# keeper session is mid-turn (deferred, retried every tick), never to a tmux seat,
+# and every outcome (delivered / queued / NOT delivered + why) is recorded on the
+# locus's board in ONE "[digest]" bookmark row (state changes only, no row spam).
+DIGEST_ON = os.environ.get("STATION_TODO_DIGEST", "1").strip().lower() not in ("0", "off", "no", "false")
+DIGEST_CADENCE = TD.cadence(os.environ.get("STATION_TODO_DIGEST_SECS") or TD.DEFAULT_CADENCE_S)
+DIGEST_TICK = max(10, int(os.environ.get("STATION_TODO_DIGEST_TICK") or "60"))
+DIGEST_TOP_N = max(1, int(os.environ.get("STATION_TODO_DIGEST_TOP") or TD.DEFAULT_TOP_N))
+DIGEST_MAX_CHARS = max(400, int(os.environ.get("STATION_TODO_DIGEST_MAX_CHARS") or TD.DEFAULT_MAX_CHARS))
+
+
+def _digest_state_path(locus):
+    d = _locus_state_dir(locus)
+    d.mkdir(parents=True, exist_ok=True)       # the state MUST persist: it is the flood guard
+    return d / "todo-digest.json"
+
+
+async def _digest_rows(app, locus):
+    rows = []
+    for st in TD.OPEN_STATUSES:
+        got = await _ts_call(app, "todo/list", {"locus": locus, "status": st, "limit": 500}, timeout=15)
+        rows.extend(r for r in (got or []) if isinstance(r, dict))
+    return rows
+
+
+async def _keeper_busy(app, base):
+    """(sid, busy|None, why) of a serve's keeper session. busy None = unknown."""
+    try:
+        sid, why = await _keeper_console_head(app, base)
+    except Exception as e:                               # noqa: BLE001 — serve down
+        return "", None, "serve unreachable: %s" % str(e)[:120]
+    if not sid:
+        return "", None, why
+    route = "/api/console/queue?id=" if sid.startswith("cs-") else "/api/session/queue?id="
+    try:
+        st, q = await _serve_get(app, route + sid, base=base)
+    except Exception as e:                               # noqa: BLE001
+        return sid, None, "queue unreadable: %s" % str(e)[:120]
+    if st != 200 or not isinstance(q, dict):
+        return sid, None, "queue HTTP %s" % st
+    return sid, bool(q.get("busy")), why
+
+
+async def _digest_board_record(app, locus, state, text_line, note):
+    """Keep ONE '[digest]' bookmark row on the locus's board current."""
+    rid = state.get("board_id") or ""
+    try:
+        if not rid:
+            got = await _ts_call(app, "todo/list", {"locus": locus, "type": "bookmark", "limit": 200}, timeout=15)
+            rid = next((str(r.get("id")) for r in (got or []) if isinstance(r, dict)
+                        and str(r.get("text") or "").startswith("[digest]")
+                        and str(r.get("status")) != "done"), "")
+        if not rid:
+            res = await _ts_call(app, "todo/add", {"text": text_line[:500], "type": "bookmark", "priority": "low",
+                                                    "note": note[:2000], "by": "station", "source": "station.digest",
+                                                    "locus": locus}, timeout=15)
+            rid = str((res or {}).get("id") or "") if isinstance(res, dict) else ""
+        else:
+            await _ts_call(app, "todo/update", {"id": rid, "text": text_line[:500], "note": note[:2000]}, timeout=15)
+        state["board_id"] = rid
+    except Exception as e:                               # noqa: BLE001 — board down: the file keeps it
+        _rlog.warning("digest board record %s: %s", locus, e)
+
+
+async def _digest_once(app, target, now=None, send=None):
+    """One digest decision + (maybe) delivery for one target. -> the state.
+    send(text, base) -> (ok, detail) is injectable (tests). The digest is a
+    DELTA against the snapshot the last DELIVERED digest carried."""
+    now = time.time() if now is None else now
+    locus = target["locus"]
+    path = _digest_state_path(locus)
+    state = _read_json(path, {}) or {}
+    rows = await _digest_rows(app, locus)
+    sig = TD.signature(rows)
+    n = len(TD.digest_rows(rows))
+    prev = state.get("last_state") or ""
+
+    async def record(st, detail):
+        changed = (st, detail) != (prev, state.get("last_detail_rec"))
+        state.update(last_state=st, last_attempt=now, open=n, last_detail=detail)
+        if st in ("delivered", "queued") or changed:
+            state["last_detail_rec"] = detail
+            nxt = time.strftime("%H:%M", time.localtime((state.get("last_delivered") or now) + DIGEST_CADENCE))
+            line = ("[digest] open-todos → keeper session @%s: %s %s (%d open; next ≈%s)"
+                    % (locus, st, time.strftime("%Y-%m-%d %H:%M", time.localtime(now)), n, nxt))
+            await _digest_board_record(app, locus, state, line,
+                                       "station %s · %s · %s" % (_station_id(), st, detail))
+            _audit_line("todo-digest", "%s: %s (%d open) %s" % (locus, st, n, str(detail)[:160]))
+        _write_json_atomic(path, state)
+        return state
+
+    if n == 0:
+        return (await record("idle", "nothing open — no digest")) if prev != "idle" else state
+    last = float(state.get("last_delivered") or 0)
+    if last and now - last < DIGEST_CADENCE:
+        return state                                     # "wait": no network at all
+    if TD.decide(state, n, now, DIGEST_CADENCE, False, sig) == "skip":
+        return await record("skipped", "unchanged since the digest delivered %s (re-sent after %d h)"
+                            % (time.strftime("%H:%M", time.localtime(last)), TD.UNCHANGED_FLOOR_S // 3600))
+    base = AC_UPSTREAM if target.get("host") else (await _ac_resolve(target["vm"]))[0]
+    sid, busy, why = ("", None, "no reachable serve") if not base else await _keeper_busy(app, base)
+    if TD.decide(state, n, now, DIGEST_CADENCE, busy, sig) == "unreachable":
+        return await record("NOT delivered", why)
+    # 1.0.146 (t4260 / d4254): a BUSY keeper no longer "defers" the digest for an
+    # unbounded number of ticks — it is submitted through the same path the comms
+    # nudge uses (_nudge_serve → POST /api/console/chat), which QUEUES it behind
+    # the running turn; serve sends it at the turn boundary. State "queued" with
+    # the queue message id; the old deferred state is gone.
+    text, _n = TD.build(rows, locus, now, DIGEST_CADENCE, prev_snap=state.get("snapshot"),
+                        top_n=DIGEST_TOP_N, max_chars=DIGEST_MAX_CHARS)
+    try:
+        ok, detail = await (send or (lambda t, b: _nudge_serve(app, t, b)))(text, base)
+    except Exception as e:                               # noqa: BLE001
+        ok, detail = False, "serve error: %s" % str(e)[:160]
+    if not ok:
+        return await record("NOT delivered", detail)
+    sub = (app.get("_rt") or {}).get("nudge_last_submit") or {}
+    mids = [str(m) for m in (sub.get("message_ids") or [])] if str(sub.get("sid") or "") in (sid, "") or not sid else []
+    queued = bool(sub.get("queued")) or "queued" in str(detail)
+    state.update(last_delivered=now, last_sig=sig, snapshot=TD.snapshot(rows),
+                 deliveries=int(state.get("deliveries") or 0) + 1, last_chars=len(text),
+                 queue_message_ids=mids if queued else [], queued_behind=(sid if (queued and busy) else ""))
+    if queued:
+        detail = "%s%s" % (detail, (" — message %s queued behind the running turn of %s" % (",".join(mids), sid))
+                           if mids else " — queued behind the running turn")
+    return await record("queued" if queued else "delivered", detail)
+
+
+async def _digest_loop(app):
+    await asyncio.sleep(min(30, DIGEST_TICK))
+    while True:
+        for tgt in _delivery_targets("digest"):
+            try:
+                await _digest_once(app, tgt)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:                       # noqa: BLE001
+                _rlog.warning("todo digest %s: %s", tgt.get("locus"), e)
+        await asyncio.sleep(DIGEST_TICK)
+
+
+async def _start_digest(app):
+    if DIGEST_ON:
+        app["todo_digest"] = asyncio.create_task(_digest_loop(app))
+
+
+async def _stop_digest(app):
+    t = app.get("todo_digest")
+    if t:
+        t.cancel()
+
+
 async def _start_reminders(app):
     if os.environ.get("STATION_DEV_QUIET") == "1":   # dev copy: never act on live seats
         return
     if FV_TODO_REMIND:
         _mint_cfg_relay()
+    try:
+        _switch_strip_rows()                 # 1.0.146: an inert code default is visible on the strip
+    except Exception:                        # noqa: BLE001
+        pass
     # the loop starts even with reminders off: the ⚠ loop detector needs the tick
     app["_todo_reminder"] = asyncio.create_task(_todo_reminder_loop(app))
 
@@ -10608,16 +13473,30 @@ async def _loops_cycle(app):
 
 
 async def _loops_act(app, det, ev, now):
-    """Loops go through the SAME notifier as findings (keeper_notify.fanout):
-    one ✉ per loop (cooldown), one keeper-board todo, resolved when the loop
-    stops — delivered to the KEEPER from any station. Never raises: rows are
-    only marked when delivery succeeds, so the next cycle retries."""
+    """Loops are bug reports: they go to the WORKER serve session of this
+    station's locus (bug_route, operator 2026-10-01) — never the keeper. One
+    report per loop sighting due (the detector's 30 min cadence coalesces the
+    rest, ×N), the board item resolved when the loop stops. Never raises: the
+    outbox retries an undelivered report on every cycle."""
     for state in ("mail", "new", "cleared"):
         for row in ev.get(state) or []:
             _todo_hist({"event": "loop", "key": row["key"], "source": row["source"],
                         "identity": row["identity"], "count": row.get("count"), "state": state})
     if _kn is None:
         return
+    book = _notify_book()
+    if book is not None:
+        await _loops_read_dispositions(book, det, _BugBoard(app), _issue_gate(app))
+        # drops a decided loop ONLY under STATION_NOTIFY_INERT_SILENCES=1 (t4178)
+        ev, quiet = _kn.gate_loops(book, ev, now)
+        for row in quiet:
+            det.mark_mailed(row, now)                    # keeps the 30 min cadence of the log line
+            _todo_hist({"event": "loop-decided", "key": row["key"], "identity": row["identity"],
+                        "count": row.get("count"),
+                        "disposition": book.sig(_kn.loop_sigkey(row)).get("disposition")})
+        if quiet:
+            book.save()
+            det.save()
 
     def resolve_note(row):
         return ("loop stopped %s — auto-resolved by the station loop detector (it saw no "
@@ -10625,12 +13504,102 @@ async def _loops_act(app, det, ev, now):
                 % (time.strftime("%Y-%m-%d %H:%M", time.localtime(now)), row.get("detail") or ""))[:2000]
 
     try:
-        await _kn.fanout(ev, _notify_sink(app), fmt_mail=_loopdet.fmt_mail, fmt_board=_loopdet.fmt_board,
-                         fmt_resolve=resolve_note, now=now, by="station-loops")
-    except Exception:                                    # noqa: BLE001
-        pass
+        await _report_loops(app, det, book, ev, now, resolve_note)
+        await _bug_pump(app)
+        box = _bug_outbox()
+        for row in det.loops.values():                   # board ids back onto the loop rows
+            e = (box.items.get("loop:" + str(row.get("key"))) if box else None) or {}
+            if e.get("board_id"):
+                row["board_id"] = e["board_id"]
+    except Exception as e:                               # noqa: BLE001
+        _rlog.warning("loop reports: %s", e)
     if ev.get("new") or ev.get("cleared") or ev.get("mail") or ev.get("updated"):
         det.save()
+
+
+def _loop_gate_spec(row, origin=""):
+    """issue_observe kwargs for one loop sighting (1.0.140): the loop's identity
+    is the subject (the gate strips job ids / prompt hashes), its caller /
+    session the self-origin inputs."""
+    meta = {"key": row.get("key"), "origin": origin, "action": str(row.get("action") or "")[:200]}
+    if row.get("ids"):
+        meta["ids"] = list(row["ids"])[:10]
+    if row.get("session_id"):
+        meta["session_id"] = row["session_id"]
+    if row.get("unit"):
+        meta["unit"] = row["unit"]
+    return {"source": "station-loops", "kind": "loop:%s" % (row.get("source") or "other"),
+            "subject": str(row.get("identity") or ""), "text": str(row.get("detail") or "")[:600],
+            "severity": row.get("severity") or "warn", "caller": row.get("caller") or "",
+            "meta": meta, "n": 1}
+
+
+async def _report_loops(app, det, book, ev, now, resolve_note):
+    """New / due loop rows -> bug reports (the outbox coalesces + retries); the
+    issue registry annotates (fail open); cleared loops resolve their item."""
+    box = _bug_outbox()
+    if box is None:
+        return 0
+    gate, origin, seen, n = _issue_gate(app), _notify_origin(), set(), 0
+    for row in list(ev.get("new") or []) + list(ev.get("mail") or []):
+        if id(row) in seen:
+            continue
+        seen.add(id(row))
+        res = await _bug_observe(gate, _loop_gate_spec(row, origin))
+        if res:
+            row["issue_fp"] = res.get("fp")
+        sig = book.sig(_kn.loop_sigkey(row)) if book is not None else {}
+        disp = sig.get("disposition") or "open"
+        ann = " · ".join(x for x in (("%s%s" % (disp, (": " + sig["reason"]) if sig.get("reason") else ""))
+                                     if disp != "open" else "", (res or {}).get("annotation") or "",
+                                     ("issue_fp=" + row["issue_fp"]) if row.get("issue_fp") else "") if x)
+        text, note = _loopdet.fmt_board(row)
+        box.offer("loop:" + str(row["key"]), vm="", locus=_bug_locus(""), kind="loop:%s" % row.get("source"),
+                  title=text, body=_loopdet.fmt_mail(row), severity="high" if row.get("severity") == "crit"
+                  else "medium", count=row.get("count"), source=str(row.get("unit") or row.get("source") or ""),
+                  caller=str(row.get("caller") or row.get("session_id") or ""), annotation=ann,
+                  priority="low" if disp in ("inert", "accepted") else None)
+        det.mark_mailed(row, now)
+        n += 1
+    for row in ev.get("cleared") or []:
+        box.clear("loop:" + str(row["key"]), resolve_note(row))
+    box.save()
+    return n
+
+
+async def _loops_read_dispositions(book, det, sink, gate=None):
+    """A loop's board item closed with a disposition line (`inert: <reason>`,
+    `accept`, `reject: <reason>`) records the decision on the loop's signature,
+    once per board item. Never raises: toolserver down = next cycle. 1.0.140:
+    every close (a plain close = processed) is forwarded to the issue registry."""
+    ids = {str(r["board_id"]): r for r in det.loops.values()
+           if r.get("board_id") and r.get("disp_read") != r["board_id"]}
+    if not ids:
+        return
+    try:
+        closed = await sink.closed(list(ids))
+    except Exception:                                    # noqa: BLE001
+        return
+    for bid, note in (closed or {}).items():
+        row = ids.get(str(bid))
+        if row is None:
+            continue
+        row["disp_read"] = row["board_id"]
+        disp, reason = _kn.parse_disposition(note)
+        if disp:
+            skey = _kn.loop_sigkey(row)
+            book.sig(skey)
+            book.set_disposition(skey, disp, reason, by="keeper")
+            _todo_hist({"event": "loop-disposition", "board": bid, "key": row["key"],
+                        "disposition": disp, "reason": reason})
+        if gate is not None and row.get("issue_fp") and not (disp is None and _ig.is_auto_resolve(note)):
+            final = disp or "closed"
+            if final == "accepted":
+                await gate.record_action(row["issue_fp"], "keeper accepted loop fix (board %s)" % bid,
+                                         note=reason, fix=True, board_id=bid)
+            await gate.disposition(row["issue_fp"], final, reason or final, by="keeper", board_id=bid)
+    book.save()
+    det.save()
 
 
 async def api_loops(request):
@@ -10651,6 +13620,21 @@ async def api_loops(request):
         snap["findings"] = _notify_book().strip_rows() if _notify_book() is not None else []
     except Exception:                                    # noqa: BLE001
         snap["findings"] = []
+    # 1.0.146 (t4260): every station hold / skip / coalesce / inert switch, visible
+    snap["holds"] = _hold_rows()
+    try:
+        snap["config"]["switches"] = _station_switches()
+    except Exception:                                    # noqa: BLE001
+        pass
+    vm, key = _locus_scope(request)          # 1.0.141: never this host's loops under another locus
+    snap["scope"] = "this station"
+    if vm:
+        for k in ("active", "recent", "findings"):
+            if isinstance(snap.get(k), list):
+                snap[k] = _rows_for_locus(snap[k], key)
+        snap["locus"] = key
+        snap["scope"] = "this station's detector, filtered to " + key
+        return web.json_response(snap)
     try:
         snap["config"]["units"] = {"user": _LOOP_UNITS_USER, "system": _LOOP_UNITS_SYSTEM}
         snap["config"]["central_watcher"] = _loops_central_watcher()
@@ -10673,8 +13657,11 @@ async def vm_keeper_alias(request):
     keeper-only tabs 404'd for any VM because only the literal "keeper" name
     had them. The literal keeper routes are registered first and still win."""
     vm = request.match_info["vm"]
-    if vm in ("keeper", "@keeper", "host"):
+    if vm in _HOST_VMS:
         raise web.HTTPNotFound()          # never recurse into ourselves ("host" = explicit alias, 2026-08-27)
+    resp = await _central_vm_reroute(request)   # 1.0.138: todo/assist on the locus's central rows
+    if resp is not None:
+        return resp
     tail = request.path.split(f"/api/vm/{vm}/", 1)[1]
     return _retired(tail, vm)
 
@@ -10684,7 +13671,7 @@ async def vm_host_alias(request):
     (docs/NOMENCLATURE.md, 2026-08-27 consolidation: keeper names agents,
     never machines; the machine is "host"). 308 preserves the method and
     body; the literal "keeper" routes stay the canonical wire form."""
-    raise web.HTTPPermanentRedirect("/api/vm/keeper/" + request.match_info["tail"])
+    raise web.HTTPPermanentRedirect("/api/vm/@self/" + request.match_info["tail"])
 
 
 async def keeper_todo_history(request):
@@ -10742,16 +13729,23 @@ _TODO_FORMAT_PROMPTS = {
 
 
 async def keeper_todo_assist(request):
-    """POST /api/vm/keeper/todo/assist - the canonical console-api keeper modes:
+    """POST /api/vm/keeper/todo/assist - the host board's ✨ assist."""
+    return await _todo_assist(request)
+
+
+async def _todo_assist(request, locus=None):
+    """The canonical console-api keeper modes:
     mode=add (parse a free-text ask into items, append under the lock),
     mode=tidy (PROPOSE a revised list; applied only via op=replace),
-    mode=format (text transform for the compose box / an item's text)."""
+    mode=format (text transform for the compose box / an item's text).
+    locus=None is the host file board; a central locus key (1.0.138) reads and
+    adds on THAT locus's central `todos` rows instead (the LLM runs here)."""
     try:
         body = await request.json()
     except Exception:
         return web.json_response({"error": "body must be JSON"}, status=400)
     mode = body.get("mode", "add")
-    name = _active_session()
+    name = locus or _active_session()
     loop = asyncio.get_event_loop()
 
     if mode == "add":
@@ -10776,6 +13770,23 @@ async def keeper_todo_assist(request):
         if not new:
             return web.json_response({"ok": False,
                                       "error": "model returned no usable items"}, status=502)
+        if locus:                         # central board: one todo/add per parsed item
+            added = 0
+            try:
+                for raw in new[:6]:
+                    it = todo_norm(raw, "hugpy", 1)
+                    if not it:
+                        continue
+                    await _ts_call(request.app, "todo/add", {
+                        "text": it["text"], "type": it.get("type") or "todo",
+                        "note": it.get("note") or "", "by": "hugpy",
+                        "source": "station:" + _station_id(), "locus": locus}, timeout=15)
+                    added += 1
+                state = await _central_todo_state(request.app, locus)
+            except Exception as e:
+                return web.json_response({"ok": False, "error": f"{locus}: central board — {e}"}, status=502)
+            return web.json_response({"ok": True, "vm": name, "added": added, "state": state,
+                                      "central": True})
         try:
             with _todo_locked():          # o10 v4: never append onto a pre-LLM snapshot
                 state, err = _mct_todo_read()
@@ -10799,7 +13810,13 @@ async def keeper_todo_assist(request):
 
     if mode == "tidy":
         instruction = str(body.get("instruction") or "").strip()[:4000]
-        state, err = _mct_todo_read()
+        if locus:
+            try:
+                state, err = await _central_todo_state(request.app, locus), ""
+            except Exception as e:
+                state, err = None, f"{locus}: central board unreachable — {e}"
+        else:
+            state, err = _mct_todo_read()
         if state is None:
             return web.json_response({"ok": False, "error": err}, status=502)
         prompt = (
@@ -10930,11 +13947,18 @@ async def keeper_todo_discord(request):
 #     grantable and revocable from the same button, with the exact sudoers rule
 #     shown. A and B share the seat's unix user, so a grant is per LOCUS, never
 #     per model — the UI says so.
-#   * The directive is one file. Its verbatim text is what A receives: as
-#     --append-system-prompt for the claude-code seat, and as the operator
-#     guidance B injects as a governing_instruction for the mct seat.
+#   * 1.0.143 (operator 2026-10-01): directives are DISTINCT per (locus x
+#     session kind) — the standing serve sessions keeper / chat / worker /
+#     local and the tmux seats — generated by directives.py from the shipped
+#     templates (resources/backend/directive-templates/) + the locus's live
+#     facts + the operator layers. The tmux seats (claude-code: as
+#     --append-system-prompt; mct: as the operator guidance B injects as a
+#     governing_instruction; codex: as its launch guidance) get the `tmux`
+#     kind; the serve sessions read <state>/directives/rendered/<kind>.md.
 # =========================================================================== #
-FRONTIER_DIRECTIVE_SHIPPED = ROOT / "frontier-directive.md"
+FRONTIER_DIRECTIVE_SHIPPED = DV.TEMPLATE_DIR          # 1.0.143: the templates are the shipped source
+# The tmux seats' operator overlay (pre-1.0.143: THE directive file). A legacy
+# FULL copy is preserved and reported, never composed (directives.is_legacy_full).
 FRONTIER_DIRECTIVE_PATH = FV_STATE_HOME / "frontier-directive.md"
 # The seat handoff: the letter a retiring/wiped A seat leaves for its reborn
 # successor. Fixed path, never injected into any prompt — the shipped
@@ -11002,55 +14026,149 @@ FRONTIER_MODEL_DEFAULTS = {"mct": "claude-fable-5",
 FS_DENY_TOOLS = ["Read", "Edit", "Write", "MultiEdit", "NotebookEdit", "Grep", "Glob", "LS"]
 
 
-def _frontier_directive_text():
-    """(text, source, path): the operator's directive file, else the shipped
-    default, else a one-line fallback so A is never launched blind."""
-    for p, src in ((FRONTIER_DIRECTIVE_PATH, "user"), (FRONTIER_DIRECTIVE_SHIPPED, "shipped")):
+def _frontier_directive_text(cfg=None):
+    """(text, source, path) of the tmux seats' OPERATOR OVERLAY — the steward's
+    frontier-directive.md (1.0.143: the generated templates are the base; this
+    file only adds to them). cfg (1.0.141) = the TARGET locus's snapshot.
+    source: "user" (composed), "legacy" (a pre-1.0.143 full copy: preserved,
+    not composed) or "none"."""
+    if cfg is not None:
+        t = _cfg_text(cfg, "directive") or ""
+        path = Path(str(cfg.get("state") or "")) / "frontier-directive.md"
+    else:
+        path = FRONTIER_DIRECTIVE_PATH
         try:
-            t = p.read_text(encoding="utf-8")
-            if t.strip():
-                return t, src, p
+            t = path.read_text(encoding="utf-8")
         except OSError:
-            continue
-    return ("Use the local agent (B) for search, grep, and file reads; act "
-            "directly only when delegating is plainly worse.", "builtin",
-            FRONTIER_DIRECTIVE_PATH)
+            t = ""
+    if not t.strip():
+        return "", "none", path
+    return t, ("legacy" if DV.is_legacy_full(t) else "user"), path
+
+
+def _dirv_snapshot(cfg=None):
+    """The directive layers in locus_exec.read_cfg shape: the target's own
+    snapshot (cfg) or this host's files read now (active guidance ws).
+    1.0.146: the `handoff` layer is NEVER a file — it is the toolserver's
+    launch pointer fetched by _handoff_layer_refresh() before the launch."""
+    if cfg is not None:
+        snap = {**cfg, "files": dict(cfg.get("files") or {})}
+    else:
+        snap = DV.read_state(FV_STATE_HOME, overrides={"guidance": str(_bg_user_path())})
+    snap["files"]["handoff"] = _frontier_handoff_pending(cfg)
+    return snap
+
+
+def _dirv_facts(cfg=None):
+    """Live facts of the locus a directive is for: a remote snapshot's own
+    (user/host/home/state read ON the target), else this machine's now."""
+    if cfg is not None and cfg.get("remote"):
+        return DV.facts(cfg, locus=str(cfg.get("locus") or ""))
+    loc = str((cfg or {}).get("locus") or "") or _station_locus()
+    return DV.facts(_dirv_snapshot(cfg), locus=loc, station_port=str(PORT))
+
+
+def _session_directive(kind, cfg=None, backend="", with_handoff=False):
+    """The full directive for one session kind (keeper/chat/worker/local/tmux)."""
+    return DV.compose(kind, _dirv_snapshot(cfg), fx=_dirv_facts(cfg), backend=backend,
+                      with_handoff=with_handoff)
+
+
+def _push_directive(vm):
+    """The tmux directive a MANAGED guest (lxd / an ssh host without its own
+    station) composes its mct guidance from: the generated tmux text with the
+    guest's identity + the host's tmux overlay. Its own guidance stays its own."""
+    h = _ssh_host(vm) or {}
+    snap = {"files": {"directive": (_dirv_snapshot().get("files") or {}).get("directive")}}
+    fx = DV.facts(snap, locus=_central_locus(vm) or vm, kind="ssh" if h else "lxd",
+                  station_port=str(PORT))
+    home = "/home/ubuntu" if not h else "~"
+    fx.update(user=h.get("user") or "ubuntu", hostname=h.get("host") or vm,
+              facts_source="by the managing station", home=home,
+              state=home + "/.config/hugpy-station", ws=home + "/.config/hugpy-station/mct2/repl",
+              local_ws=home + "/.config/hugpy-station/local-keeper",
+              board_file=home + "/.hugpy/state/todo.json", ac_root=home + "/.config/hugpy-station/abstract-claude",
+              app="(no station app on this locus)", docs="the managing station's docs (📖 docs tab)")
+    return DV.compose("tmux", snap, fx=fx).rstrip("\n")
+
+
+def _render_session_directives():
+    """Re-derive <state>/directives/rendered/<kind>.md for THIS locus — what
+    the serve sessions read every turn ($AC_SESSION_DIRECTIVES_DIR). Called at
+    startup and on every directive / guidance / switch save; the serve runner
+    re-renders at every serve start too. Best effort, never raises."""
+    try:
+        d = FV_STATE_HOME / "directives"
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / "station.json"
+        cur = _read_json(p, None)
+        st = dict(cur if isinstance(cur, dict) else {}, port=PORT, locus=_station_locus())   # keeps `nuances` (1.0.146)
+        if cur != st:
+            p.write_text(json.dumps(st) + "\n", encoding="utf-8")
+        snap = _dirv_snapshot()
+        fx = DV.facts(snap, locus=st["locus"], station_port=str(PORT))
+        return DV.write_rendered(FV_STATE_HOME / DV.RENDERED_DIR, DV.render_all(snap, fx), fx)
+    except Exception as e:                                # noqa: BLE001
+        logging.getLogger("station.directives").warning("render failed: %s", e)
+        return []
 
 
 async def api_frontier_handoff(request):
-    """GET/POST the frontier seat handoff at FRONTIER_HANDOFF_PATH. POST
-    {"text"} replaces the file (empty text deletes it, meaning: no handoff
-    on file)."""
-    if request.method == "POST":
-        try:
-            body = await request.json()
-            text = body.get("text", "")
-            if not isinstance(text, str):
-                raise ValueError
-        except Exception:
-            return web.json_response({"error": 'body must be {"text": string}'}, status=400)
-        FRONTIER_HANDOFF_PATH.parent.mkdir(parents=True, exist_ok=True)
-        if text.strip():
-            FRONTIER_HANDOFF_PATH.write_text(text, encoding="utf-8")
-            did = f"handoff saved ({len(text)} chars)"
-        else:
-            if FRONTIER_HANDOFF_PATH.exists():
-                FRONTIER_HANDOFF_PATH.unlink()
-            did = "handoff deleted"
-        audit(request, "frontier-handoff", did, ok=True)
-    text, exists, mtime = "", False, None
+    """GET/POST the seat handoff for the selected locus — the TOOLSERVER row
+    (1.0.146; no file). GET → {text: the init prompt the next seat receives
+    (exactly what handoff_pull / the SessionStart hook injects), exists, id,
+    state, mtime (requested), layer, path: "toolserver handoff <id>"}.
+    POST {"text"} → handoff_request on the locus (by operator-steward, no seat
+    spawn); empty text → the open handoff is marked abandoned."""
+    vm, bad = await _cfg_vm(request)          # 1.0.141: the SELECTED locus
+    if bad is not None:
+        return bad
+    locus = (_central_locus(vm) or vm) if vm else _station_locus()
+    if not locus:
+        return _unconfigured_response("handoff")
+    app = request.app
     try:
-        text = FRONTIER_HANDOFF_PATH.read_text(encoding="utf-8")
-        exists = True
-        mtime = int(FRONTIER_HANDOFF_PATH.stat().st_mtime)
-    except OSError:
-        pass
-    return web.json_response({"text": text, "path": str(FRONTIER_HANDOFF_PATH),
-                              "exists": exists, "mtime": mtime})
+        if request.method == "POST":
+            try:
+                body = await request.json()
+                text = body.get("text", "")
+                if not isinstance(text, str):
+                    raise ValueError
+            except Exception:
+                return web.json_response({"error": 'body must be {"text": string}'}, status=400)
+            if text.strip():
+                row = await _ts_call(app, "handoff/request",
+                                     {"locus": locus, "text": text, "by": "operator-steward", "spawn": False},
+                                     timeout=20)
+                did = f"handoff {row.get('id')} filed on {locus} ({len(text)} chars)"
+            else:
+                st = await _ts_call(app, "handoff/station", {"locus": locus}, timeout=10)
+                row = (st or {}).get("handoff")
+                if row:
+                    await _ts_call(app, "handoff/claim", {"id": row["id"], "status": "abandoned", "by": "operator-steward"},
+                                   timeout=10)
+                    did = f"handoff {row['id']} on {locus} abandoned"
+                else:
+                    did = f"no open handoff on {locus} to discard"
+            audit(request, "frontier-handoff", did, ok=True)
+        st = await _ts_call(app, "handoff/station", {"locus": locus}, timeout=10)
+    except Exception as e:                                   # noqa: BLE001
+        return web.json_response({"ok": False, "locus": locus, "error": f"toolserver: {str(e)[:200]}",
+                                  "text": "", "exists": False, "mtime": None, "path": ""}, status=502)
+    row = (st or {}).get("handoff") or None
+    return web.json_response({"ok": True, "locus": locus, "remote": bool(vm),
+                              "text": (st or {}).get("init_prompt") or "", "exists": row is not None,
+                              "id": (row or {}).get("id", ""), "state": (row or {}).get("status", ""),
+                              "by": (row or {}).get("by", ""), "source_session": (row or {}).get("source_session", ""),
+                              "mtime": (row or {}).get("created"), "layer": (st or {}).get("layer") or "",
+                              "path": (f"toolserver handoff {row['id']} (handoff_pull locus={locus} id={row['id']})"
+                                       if row else f"toolserver (no open handoff on {locus})")})
 
 
-def _frontier_models():
-    doc = _read_json(FRONTIER_MODELS_PATH, {}) or {}
+def _frontier_models(cfg=None):
+    doc = (_cfg_json(cfg, "models") if cfg is not None else _read_json(FRONTIER_MODELS_PATH, {})) or {}
+    if not isinstance(doc, dict):
+        doc = {}
     out = dict(FRONTIER_MODEL_DEFAULTS)
     for k in out:
         v = doc.get(k)
@@ -11064,10 +14182,10 @@ def _gpt_config():
     return read_config(GPT_CONFIG_PATH)
 
 
-def _gpt_launch_cmd(guidance="", remote=False):
+def _gpt_launch_cmd(guidance="", remote=False, cfg=None):
     from gpt_station import launch_command
     config = _gpt_config()
-    config["default_model"] = _frontier_models().get("codex", "") or config.get("default_model", "")
+    config["default_model"] = _frontier_models(cfg).get("codex", "") or config.get("default_model", "")
     return launch_command(config, GPT_CONFIG_PATH, guidance, remote=remote)
 
 
@@ -11107,12 +14225,12 @@ async def api_gpt(request):
         return web.json_response({"error": "GPT settings unavailable: " + str(exc)}, status=503)
 
 
-def _frontier_fs_mediated():
+def _frontier_fs_mediated(cfg=None):
     """Host-level mirror of the frontier fs switch: True = A's direct filesystem
     access is DENIED (mediated via B). Written by /api/frontier/fs/toggle
     alongside hugpy-agent's own per-workspace policy so BOTH frontier seats
     (mct and claude-code) obey one switch."""
-    doc = _read_json(FRONTIER_FS_FLAG, None)
+    doc = _cfg_json(cfg, "fs") if cfg is not None else _read_json(FRONTIER_FS_FLAG, None)
     if isinstance(doc, dict) and "mediated" in doc:
         return bool(doc["mediated"])
     return False
@@ -11126,52 +14244,68 @@ def _frontier_fs_mediated():
 # in the directive (claude-code: next launch; mct: next guidance render) and,
 # when that seat is live, as a typed notice right away.
 FRONTIER_DELEGATE_FLAG = FV_STATE_HOME / "frontier-delegate.json"
-_DELEGATE_ONLY_TEXT = (
-    "# Delegation switch: DELEGATE-ONLY (operator)\n"
-    "You are the ROUTER for this seat, not the worker. Do not execute tasks yourself: "
-    "for every task that needs more than a sentence of judgement, launch a subagent "
-    "(the Agent tool) with a complete brief and let IT do the reading, editing, "
-    "running and testing; keep your own turns to routing, brief-writing, and a short "
-    "summary of what came back. Several independent tasks → several subagents in one "
-    "message, in parallel. Direct questions that need no tool use you answer yourself. "
-    "This keeps your context (the operator's spend) small and leaves you free to take "
-    "new queries while work is in flight.")
-_DELEGATE_OFF_TEXT = ("# Delegation switch: OFF\nHandle tasks yourself; delegate when the "
-                      "token economy above says so.")
+# 1.0.143: the section texts live with the generator (directives.py) — one source.
+_DELEGATE_ONLY_TEXT = DV.DELEGATE_ONLY_TEXT
+_DELEGATE_OFF_TEXT = DV.DELEGATE_OFF_TEXT
+# 1.0.143: "serve" = the frontier serve sessions (keeper, chat): ON adds the
+# DELEGATE-ONLY section to their rendered directives (OFF adds nothing).
+DELEGATE_BACKENDS = ("mct", "claude-code", "serve")
 
 
-def _frontier_delegate_doc():
-    doc = _read_json(FRONTIER_DELEGATE_FLAG, None)
-    out = {"mct": False, "claude-code": False}
+def _frontier_delegate_doc(cfg=None, now=None):
+    """{mct, claude-code, serve}: bool. 1.0.146: a switch ON past its `meta[be].expires`
+    reads OFF (the toggle is owned, visible and expiring — d4254)."""
+    doc = _cfg_json(cfg, "delegate") if cfg is not None else _read_json(FRONTIER_DELEGATE_FLAG, None)
+    out = {k: False for k in DELEGATE_BACKENDS}
     if isinstance(doc, dict):
+        meta = doc.get("meta") if isinstance(doc.get("meta"), dict) else {}
         for k in out:
-            out[k] = bool(doc.get(k))
+            out[k] = bool(doc.get(k)) and not _toggle_expired(meta.get(k) or {}, now)
     return out
 
 
-def _delegate_section(backend):
-    return _DELEGATE_ONLY_TEXT if _frontier_delegate_doc().get(backend) else _DELEGATE_OFF_TEXT
+def _frontier_delegate_meta(cfg=None):
+    """{backend: {by, at, expires}} of the delegate switches (empty for a legacy file)."""
+    doc = _cfg_json(cfg, "delegate") if cfg is not None else _read_json(FRONTIER_DELEGATE_FLAG, None)
+    meta = doc.get("meta") if isinstance(doc, dict) and isinstance(doc.get("meta"), dict) else {}
+    return {k: {"by": str((meta.get(k) or {}).get("by") or ""), "at": int((meta.get(k) or {}).get("at") or 0),
+                "expires": int((meta.get(k) or {}).get("expires") or 0)} for k in DELEGATE_BACKENDS}
+
+
+def _delegate_write_doc(doc, be, on, by, expires):
+    """The file content for one flip: bools + meta {be: {by, at, expires}}."""
+    out = {k: bool(doc.get(k)) for k in DELEGATE_BACKENDS}
+    out[be] = bool(on)
+    meta = dict(doc.get("meta") or {}) if isinstance(doc.get("meta"), dict) else {}
+    meta[be] = {"by": by, "at": int(time.time()), "expires": int(expires or 0) if on else 0}
+    out["meta"] = meta
+    return out
+
+
+def _delegate_section(backend, cfg=None):
+    return _DELEGATE_ONLY_TEXT if _frontier_delegate_doc(cfg).get(backend) else _DELEGATE_OFF_TEXT
 
 
 async def api_frontier_delegate(request):
     """GET/POST /api/frontier/delegate — the per-backend delegate-only switch.
     POST {"backend": "mct"|"claude-code", "on": bool}. Returns {delegate:{mct,
     claude-code}, notified: <tmux session typed into or "">}."""
-    resp = await _sidecar_proxy(request)
-    if resp is not None:
-        return resp
+    vm = await _sidecar_vm(request)
+    if vm:
+        return await _remote_delegate(request, vm)        # 1.0.144: the locus's OWN switch
     notified = ""
     if request.method == "POST":
         try:
             body = await request.json()
             be = body.get("backend")
             on = bool(body.get("on"))
-            if be not in ("mct", "claude-code"):
+            if be not in DELEGATE_BACKENDS:
                 raise ValueError
         except Exception:
-            return web.json_response({"error": 'body must be {"backend": "mct"|"claude-code", "on": bool}'}, status=400)
-        doc = _frontier_delegate_doc()
-        doc[be] = on
+            return web.json_response({"error": 'body must be {"backend": "mct"|"claude-code"|"serve", "on": bool}'}, status=400)
+        raw = _read_json(FRONTIER_DELEGATE_FLAG, None)
+        doc = _delegate_write_doc(raw if isinstance(raw, dict) else {}, be, on, _toggle_owner(request),
+                                  _toggle_expires(body))
         FRONTIER_DELEGATE_FLAG.parent.mkdir(parents=True, exist_ok=True)
         FRONTIER_DELEGATE_FLAG.write_text(json.dumps(doc), encoding="utf-8")
         # re-render the mct seat's composed guidance where the pointer-exchange
@@ -11185,8 +14319,9 @@ async def api_frontier_delegate(request):
                     _render_guidance(ws)
                 except Exception:
                     pass
-        sess = _tmux_session_for("frontier", be) or ("keeper-mct" if be == "mct" else "keeper-claude")
-        if await _tmux_has(sess):
+        _render_session_directives()          # the serve sessions read it on their next turn
+        sess = "" if be == "serve" else (_tmux_session_for("frontier", be) or ("keeper-mct" if be == "mct" else "keeper-claude"))
+        if sess and await _tmux_has(sess):
             line = ("📨 operator switch: DELEGATE-ONLY mode is now ON for this seat — from here on do not execute "
                     "tasks yourself: brief a subagent (Agent tool) for every task and keep your own turns to "
                     "routing and short summaries; several independent tasks → parallel subagents."
@@ -11195,44 +14330,112 @@ async def api_frontier_delegate(request):
                     "(delegate per the directive's token economy).")
             notified = sess if await _tmux_type_line(sess, line) else ""
         audit(request, "frontier-delegate", f"{be}={'on' if on else 'off'}" + (f" → {notified}" if notified else ""), ok=True)
-    return web.json_response({"ok": True, "delegate": _frontier_delegate_doc(), "notified": notified,
+    return web.json_response({"ok": True, "delegate": _frontier_delegate_doc(), "meta": _frontier_delegate_meta(),
+                              "notified": notified,
                               "applies": "directive section at the next launch (claude-code) / next turn (mct); a live seat is also told right away"})
 
 
-def _claude_seat_system_prompt():
-    """The exact text the claude-code seat receives via --append-system-prompt:
-    the frontier directive, then the operator's standing B-guidance (if any),
-    then a one-line statement of the current fs switch — so A knows which of
-    its tools are closed and why, instead of discovering it by denial."""
-    parts = [_frontier_directive_text()[0].rstrip()]
+# ── 1.0.144: the delegate / fs switches of ANOTHER locus — its own files, set
+# through the locus transport (locus_exec.read_cfg/write_cfg), then that locus's
+# directives are re-rendered ON it (its serve reads them on the next turn).
+_REMOTE_RENDER_SH = (LX.STATE_SH
+    + 'A=""; for a in "$S/app/current" /opt/hugpy-station; do '
+      '[ -f "$a/resources/backend/directives.py" ] && { A="$a"; break; }; done\n'
+    + '[ -n "$A" ] || { echo "no station resources on this locus" >&2; exit 3; }\n'
+    + 'L="${1:-}"; exec python3 "$A/resources/backend/directives.py" render --state "$S" '
+      '--out "$S/directives/rendered" ${L:+--locus "$L"}\n')
+
+
+async def _remote_render(t):
+    rc, out, err = await LX.run(t, "set -- " + shlex.quote(t.locus or "") + "\n" + _REMOTE_RENDER_SH, timeout=60)
+    return rc == 0, (err or out or "").strip()[-200:]
+
+
+async def _remote_delegate(request, vm):
+    t = _locus_target(vm)
     try:
-        up = _bg_user_path()
-        # user text only, with any stray directive copy removed: the directive
-        # enters the system prompt exactly once (parts[0])
-        g = _strip_directive(up.read_text(encoding="utf-8")).strip() if up.exists() else ""
-    except OSError:
-        g = ""
-    if g:
-        parts.append("# Operator guidance\n" + g)
-    h = _frontier_handoff_pending()
-    if h:
-        parts.append("# Session init prompt (handoff — this launch only)\n" + h)
-    if _frontier_fs_mediated():
-        parts.append("# Filesystem switch: MEDIATED\nYour direct file tools ("
-                     + ", ".join(FS_DENY_TOOLS) + ") are denied by the operator for "
-                     "this seat. Route every file read/search/edit through the local "
-                     "agent (B) or a local shell; do not retry the denied tools.")
-    else:
-        parts.append("# Filesystem switch: DIRECT\nYour file tools are open. Prefer "
-                     "delegating search and bulk reads to B anyway (token economy).")
-    parts.append(_delegate_section("claude-code"))
-    return "\n\n".join(parts) + "\n"
+        cfg = await _seat_cfg(t)
+    except LX.LocusError as e:
+        return web.json_response({"ok": False, "locus": vm, "error": str(e)}, status=502)
+    if request.method == "POST":
+        try:
+            body = await request.json()
+            be, on = body.get("backend"), bool(body.get("on"))
+            if be not in DELEGATE_BACKENDS:
+                raise ValueError
+        except Exception:
+            return web.json_response({"error": 'body must be {"backend": "mct"|"claude-code"|"serve", "on": bool}'}, status=400)
+        raw = _cfg_json(cfg, "delegate")
+        doc = _delegate_write_doc(raw if isinstance(raw, dict) else {}, be, on, _toggle_owner(request),
+                                  _toggle_expires(body))
+        try:
+            path = await LX.write_cfg(t, "delegate", json.dumps(doc))
+        except LX.LocusError as e:
+            return web.json_response({"ok": False, "locus": vm, "error": str(e)}, status=502)
+        ok, why = await _remote_render(t)
+        audit(request, "frontier-delegate", "%s %s=%s (%s; render %s)" % (vm, be, "on" if on else "off", path,
+                                                                        "ok" if ok else why), ok=True)
+        return web.json_response({"ok": True, "locus": vm, "remote": True, "delegate": doc, "notified": "",
+                                  "path": path, "rendered": ok, "render_error": "" if ok else why,
+                                  "applies": "the locus's serve sessions read it on their next turn; its tmux seats at the next launch"})
+    return web.json_response({"ok": True, "locus": vm, "remote": True, "delegate": _frontier_delegate_doc(cfg),
+                              "notified": ""})
 
 
-def _claude_seat_settings_json():
+_REMOTE_FS_SH = (LX.STATE_SH
+    + 'export PATH="$HOME/.local/bin:$S/serve-venv/bin:$PATH"\n'
+    + 'command -v hugpy-agent >/dev/null 2>&1 || { echo "hugpy-agent not installed for $(id -un)@$(hostname)" >&2; exit 3; }\n'
+    + 'W="$S/mct/repl"; mkdir -p "$W"\n'
+    + 'if [ -n "${1:-}" ]; then exec hugpy-agent mct-fs "$W" --allow "$1"; else exec hugpy-agent mct-fs "$W"; fi\n')
+
+
+async def _remote_fs(request, vm, desired=None):
+    """GET/POST the fs switch of another locus: hugpy-agent mct-fs in ITS
+    workspace, plus the frontier-fs.json mirror its tmux seat reads."""
+    t = _locus_target(vm)
+    rc, out, err = await LX.run(t, "set -- " + (shlex.quote(desired) if desired else "") + "\n" + _REMOTE_FS_SH,
+                                timeout=60)
+    try:
+        txt = (out or "").strip()
+        doc = json.loads(txt[txt.index("{"):]) if rc == 0 else None     # mct-fs prints indented JSON
+        assert isinstance(doc, dict)
+    except Exception:
+        return web.json_response({"ok": False, "locus": vm, "error": (err or out or "rc=%s" % rc).strip()[-300:]},
+                                 status=502)
+    allowed = bool(doc.get("allow_frontier_fs_requests"))
+    rendered = None
+    if desired:
+        try:
+            await LX.write_cfg(t, "fs", json.dumps({"mediated": not allowed, "ts": int(time.time())}))
+            rendered, _why = await _remote_render(t)
+        except LX.LocusError as e:
+            return web.json_response({"ok": False, "locus": vm, "error": str(e)}, status=502)
+        audit(request, "frontier-fs-" + desired, "%s (remote)" % vm, ok=True)
+    try:
+        mediated = _frontier_fs_mediated(await _seat_cfg(t))
+    except LX.LocusError:
+        mediated = not allowed
+    return web.json_response({"ok": True, "locus": vm, "remote": True, "allowed": allowed, "mediated": mediated,
+                              "on": allowed, "desired": desired or "", "rendered": rendered,
+                              "roots": doc.get("granted_roots", []), "policy": doc})
+
+
+def _claude_seat_system_prompt(cfg=None):
+    """The exact text the claude-code seat receives via --append-system-prompt.
+    1.0.143: the claude-code seat is a TMUX seat (fallback / inference arm):
+    the generated tmux directive for this locus, then the operator guidance,
+    the tmux overlay, the fs switch (so A knows which of its tools are closed
+    and why, instead of discovering it by denial), the delegation switch and
+    the one-shot session init prompt.
+    cfg (1.0.141) = compose from the TARGET locus's own files (seat launch on
+    any locus, host included, passes the snapshot read on the target)."""
+    return _session_directive("tmux", cfg, backend="claude-code", with_handoff=True)
+
+
+def _claude_seat_settings_json(cfg=None):
     """The A settings template, plus the fs deny-list when mediated."""
-    doc = dict(_a_template_doc()[0])
-    if _frontier_fs_mediated():
+    doc = dict(_a_template_doc(cfg)[0])
+    if _frontier_fs_mediated(cfg):
         perms = dict(doc.get("permissions") or {})
         deny = list(perms.get("deny") or [])
         for t in FS_DENY_TOOLS:
@@ -11243,11 +14446,187 @@ def _claude_seat_settings_json():
     return json.dumps(doc, separators=(",", ":"))
 
 
+# ── 1.0.141: per-locus seat config ─────────────────────────────────────────────
+# Every seat-config call from the UI carries ?vm=<selected locus>. The host
+# (no vm / @keeper / this station's own name) keeps the handlers below as they
+# always were; ANY other locus reads and writes ITS OWN files in ITS OWN station
+# state dir, on the target, through locus_exec — exactly the files that locus's
+# own station (and its seat launch) read. Never this host's files.
+async def _cfg_vm(request):
+    """'' = host; else the remote locus name (404 json for an unknown one)."""
+    vm = (request.query.get("vm") or "").strip()
+    if not vm or _is_host_vm(vm):
+        return "", None
+    await _loci_ready()
+    if not (_ssh_host(vm) or vm in await _known_names_safe()):
+        return vm, web.json_response({"ok": False, "error": f"unknown locus {vm}"}, status=404)
+    return vm, None
+
+
+def _cfg_err(vm, e, status=502):
+    return web.json_response({"ok": False, "locus": vm, "remote": True,
+                              "error": f"seat config of {vm} unavailable: {str(e)[:300]}"}, status=status)
+
+
+def _dirv_session(request):
+    """?session= — which session kind's operator overlay the steward edits.
+    Default `tmux`: the pre-1.0.143 editor's target (frontier-directive.md)."""
+    k = (request.query.get("session") or "tmux").strip().lower()
+    return k if k in DV.KINDS else None
+
+
+def _dirv_overlay_key(kind):
+    return "directive" if kind == "tmux" else "dir_" + kind
+
+
+def _dirv_doc(kind, cfg=None, locus_label=""):
+    """The steward's view for one session kind: the operator overlay
+    (verbatim), every kind's rendered directive length, the selected kind's
+    full rendered text, and the legacy-file report."""
+    snap = _dirv_snapshot(cfg)
+    fx = _dirv_facts(cfg)
+    key = _dirv_overlay_key(kind)
+    text = (snap.get("files") or {}).get(key) or ""
+    state = Path(str(snap.get("state") or FV_STATE_HOME))
+    rendered = {k: DV.compose(k, snap, fx=fx, backend="claude-code" if k == "tmux" else "") for k in DV.KINDS}
+    src = ("none" if not text.strip() else "legacy (not composed)" if kind == "tmux" and DV.is_legacy_full(text)
+           else "operator overlay")
+    return {
+        "session": kind, "sessions": list(DV.KINDS), "titles": DV.TITLES,
+        "text": text, "source": src, "path": str(state / DV.LAYER_FILES[key]),
+        "shipped_path": str(FRONTIER_DIRECTIVE_SHIPPED), "templates": DV.templates_digest(),
+        "rendered": rendered[kind], "rendered_chars": {k: len(v) for k, v in rendered.items()},
+        "rendered_dir": str(state / DV.RENDERED_DIR),
+        "legacy": DV.legacy_report(snap),
+        "facts": {k: fx[k] for k in ("locus", "kind", "user", "hostname", "home", "state")},
+        "how": ("serve session: $AC_SESSION_DIRECTIVES_DIR/" + kind + ".md, appended to the system prompt "
+                "of every turn of the standing " + kind + " session" + (" on " + locus_label if locus_label else "")
+                if kind != "tmux" else
+                "tmux seats: --append-system-prompt (claude-code) / operator-guidance.md (mct) / launch "
+                "guidance (codex), at every seat launch"),
+    }
+
+
+async def _remote_directive(request, vm):
+    t = _locus_target(vm)
+    kind = _dirv_session(request)
+    if kind is None:
+        return web.json_response({"error": "session must be one of " + ", ".join(DV.KINDS)}, status=400)
+    try:
+        if request.method == "POST":
+            body = await request.json()
+            text = body.get("text", "")
+            if not isinstance(text, str):
+                return web.json_response({"error": 'body must be {"text": string}'}, status=400)
+            await LX.write_cfg(t, _dirv_overlay_key(kind), text if text.strip() else None)
+            audit(request, "frontier-directive", f"{vm} {kind}: " + (f"overlay saved ({len(text)} chars)" if text.strip() else "overlay cleared"), ok=True)
+        cfg = await _seat_cfg(t)
+    except LX.LocusError as e:
+        return _cfg_err(vm, e)
+    doc = _dirv_doc(kind, cfg, vm)
+    doc.update({
+        "locus": vm, "remote": True, "state": cfg.get("state"),
+        "composed": {
+            "claude-code": {"how": "--append-system-prompt (verbatim, at every seat launch on " + vm + ")",
+                            "text": _claude_seat_system_prompt(cfg),
+                            "settings": json.loads(_claude_seat_settings_json(cfg))},
+            "mct": {"how": "composed by " + vm + "'s own station into <ws>/operator-guidance.md",
+                    "directive": doc["text"], "guidance": _cfg_text(cfg, "guidance") or "",
+                    "guidance_path": str(Path(str(cfg.get("state") or "")) / LX.CFG_FILES["guidance"]),
+                    "mct_system_prompt": ""},
+        },
+        "fs_mediated": _frontier_fs_mediated(cfg),
+        "models": _frontier_models(cfg),
+    })
+    return web.json_response(doc)
+
+
+async def _remote_models(request, vm):
+    t = _locus_target(vm)
+    applied_live = {}
+    try:
+        cfg = await LX.read_cfg(t, keys=["models"])
+        cur = _frontier_models(cfg)
+        if request.method == "POST":
+            body = await request.json()
+            if not isinstance(body, dict):
+                return web.json_response({"error": "body must be a JSON object"}, status=400)
+            for k in FRONTIER_MODEL_DEFAULTS:
+                if k in body:
+                    v = body[k]
+                    if not isinstance(v, str) or (v and not _MODEL_RE.match(v)):
+                        return web.json_response({"error": f"bad model for {k}"}, status=400)
+                    cur[k] = v.strip()
+            await LX.write_cfg(t, "models", json.dumps(cur, indent=2) + "\n")
+            audit(request, "frontier-models", f"{vm}: " + json.dumps(cur), ok=True)
+            # the live seat ON THAT LOCUS takes /model now (same keys as the host path)
+            for k in body:
+                sess = (BACKEND_TMUX_SESSION.get("frontier") or {}).get(k, "")
+                if not sess or k not in cur or k == "hugpy":
+                    continue
+                rc, _o, _e = await _tmux_on(vm, "has-session", "-t", "=" + sess)
+                if rc != 0:
+                    applied_live[k] = "next launch (no live seat)"
+                    continue
+                rc2, _o2, err2 = await _tmux_on(vm, "send-keys", "-t", sess, "-l", "/model " + (cur[k] or "default"))
+                if rc2 == 0:
+                    await asyncio.sleep(1.2)
+                    await _tmux_on(vm, "send-keys", "-t", sess, "Enter")
+                applied_live[k] = "sent to live seat on " + vm if rc2 == 0 else f"failed: {(err2 or '').strip()[:80]}"
+            cfg = await LX.read_cfg(t, keys=["models"])
+    except LX.LocusError as e:
+        return _cfg_err(vm, e)
+    m = _frontier_models(cfg)
+    return web.json_response({
+        "applied_live": applied_live, "models": m, "locus": vm, "remote": True,
+        "path": str(Path(str(cfg.get("state") or "")) / LX.CFG_FILES["models"]),
+        "effective": {k: {"model": m.get(k, "") or "(default)", "launch": "next launch on " + vm}
+                      for k in FRONTIER_MODEL_DEFAULTS},
+        "choices": await _frontier_model_choices(request.app),
+        "choices_source": _MODEL_CHOICES["source"], "custom_ok": True})
+
+
+async def _remote_b_model(request, vm):
+    t = _locus_target(vm)
+    try:
+        if request.method == "POST":
+            body = await request.json()
+            v = (body or {}).get("model", "")
+            if not isinstance(v, str) or (v and not _MODEL_RE.match(v)):
+                return web.json_response({"error": "bad model id"}, status=400)
+            await LX.write_cfg(t, "b_model", json.dumps({"model": v.strip()}, indent=2) + "\n")
+            audit(request, "b-model", f"{vm}: " + (v.strip() or "(package default)"), ok=True)
+        cfg = await LX.read_cfg(t, keys=["b_model"])
+    except LX.LocusError as e:
+        return _cfg_err(vm, e)
+    doc = _cfg_json(cfg, "b_model") or {}
+    cur = doc.get("model") if isinstance(doc, dict) and isinstance(doc.get("model"), str) else ""
+    return web.json_response({
+        "model": cur, "effective": cur or "(" + vm + "'s package default)",
+        "default": "", "locus": vm, "remote": True,
+        "path": str(Path(str(cfg.get("state") or "")) / LX.CFG_FILES["b_model"]),
+        "note": "written to " + vm + "'s own b-model.json; its station and seats pick it up at their next B call / launch",
+        "candidates": await _b_model_candidates()})
+
+
 async def api_frontier_directive(request):
-    """GET/POST /api/frontier/directive — the directive file (verbatim) and the
-    COMPOSED text each frontier seat actually receives. POST {"text"} replaces
-    it (empty restores the shipped default). Takes effect at the next A launch
-    (claude-code) and the next A turn (mct, via guidance composition)."""
+    """GET/POST /api/frontier/directive?session=<kind> — 1.0.143: the
+    directives are GENERATED per (locus x session kind) from the shipped
+    templates; what the steward edits is the OPERATOR OVERLAY of one kind
+    (keeper | chat | worker | local | tmux; default tmux = the pre-1.0.143
+    frontier-directive.md). POST {"text"} replaces that overlay verbatim (empty
+    deletes it). The response carries the kind's full rendered directive, the
+    length of every kind's, and the COMPOSED tmux-seat texts as before. The
+    serve sessions pick a change up on their next turn; the tmux seats at
+    their next launch (claude-code) / next turn (mct)."""
+    vm, bad = await _cfg_vm(request)          # 1.0.141: the SELECTED locus's own file
+    if bad is not None:
+        return bad
+    if vm:
+        return await _remote_directive(request, vm)
+    kind = _dirv_session(request)
+    if kind is None:
+        return web.json_response({"error": "session must be one of " + ", ".join(DV.KINDS)}, status=400)
     if request.method == "POST":
         try:
             body = await request.json()
@@ -11256,17 +14635,18 @@ async def api_frontier_directive(request):
                 raise ValueError
         except Exception:
             return web.json_response({"error": 'body must be {"text": string}'}, status=400)
-        FRONTIER_DIRECTIVE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        path = FV_STATE_HOME / DV.LAYER_FILES[_dirv_overlay_key(kind)]
+        path.parent.mkdir(parents=True, exist_ok=True)
         if text.strip():
-            FRONTIER_DIRECTIVE_PATH.write_text(text, encoding="utf-8")
-            did = f"directive saved ({len(text)} chars)"
+            path.write_text(text, encoding="utf-8")       # operator text, verbatim — never rewritten
+            did = f"{kind} overlay saved ({len(text)} chars)"
         else:
-            if FRONTIER_DIRECTIVE_PATH.exists():
-                FRONTIER_DIRECTIVE_PATH.unlink()
-            did = "directive reset to the shipped default"
+            if path.exists():
+                path.unlink()
+            did = f"{kind} overlay cleared — the generated directive alone"
         _render_guidance()
+        _render_session_directives()
         audit(request, "frontier-directive", did, ok=True)
-    text, src, path = _frontier_directive_text()
     try:
         _render_guidance()
         guidance = _bg_path().read_text(encoding="utf-8") if _bg_path().exists() else ""
@@ -11279,29 +14659,34 @@ async def api_frontier_directive(request):
         mct_sys = getattr(mod, "_SYSTEM", "") or ""
     except Exception:
         mct_sys = ""
-    return web.json_response({
-        "text": text, "source": src, "path": str(path),
-        "shipped_path": str(FRONTIER_DIRECTIVE_SHIPPED),
+    doc = _dirv_doc(kind)
+    doc.update({
         "composed": {
             "claude-code": {"how": "--append-system-prompt (verbatim, at every seat launch)",
                             "text": _claude_seat_system_prompt(),
                             "settings": json.loads(_claude_seat_settings_json())},
-            "mct": {"how": "composed into <ws>/operator-guidance.md (directive + 🧭 operator guidance) "
+            "mct": {"how": "composed into <ws>/operator-guidance.md (tmux directive + 🧭 operator guidance) "
                            "-> B injects it as a governing_instruction (priority 100) into EVERY A turn, "
                            "after A's fixed MCT system prompt; re-rendered at every save and mct launch",
-                    "directive": text, "guidance": guidance,
+                    "directive": doc["text"], "guidance": guidance,
                     "guidance_path": str(_bg_path()),
                     "mct_system_prompt": mct_sys},
         },
         "fs_mediated": _frontier_fs_mediated(),
         "models": _frontier_models(),
     })
+    return web.json_response(doc)
 
 
 async def api_frontier_models(request):
     """GET/POST /api/frontier/models — the model each frontier seat launches
     with. POST {"mct": "sonnet", "claude-code": "opus"|""} ("" = Claude Code's
     own default). Applies at the next launch of that seat."""
+    vm, bad = await _cfg_vm(request)          # 1.0.141: the SELECTED locus's own file
+    if bad is not None:
+        return bad
+    if vm:
+        return await _remote_models(request, vm)
     if request.method == "POST":
         try:
             body = await request.json()
@@ -11766,9 +15151,12 @@ async def api_frontier_cache(request):
     # meter keeps working now that serve is the keeper surface. On the host seat
     # in serve mode it is also the DEFAULT, and the tmux transcript probe is the
     # fallback (so the meter still reports while keeper-claude is the one live).
-    if backend == "serve" or (not vm and backend == "claude-code"
-                              and (await _keeper_surface_now())[0] == "serve"):
-        sdoc = await _ac_serve_cache_doc()
+    # 1.0.141: the SELECTED locus's serve (its ssh forward) — never the host's
+    # serve answering for another locus.
+    if backend == "serve" or (backend == "claude-code"
+                              and (await _keeper_surface_now(vm))[0] == "serve"):
+        _sbase = (await _ac_resolve(vm))[0] if vm else None
+        sdoc = await _ac_serve_cache_doc(base=_sbase) if (_sbase or not vm) else None
         if sdoc:
             sdoc["locus"] = vm or "host"
             sdoc["state"] = "warm" if sdoc.get("remaining_s", 0) > 0 else "lapsed"
@@ -11782,7 +15170,8 @@ async def api_frontier_cache(request):
             return web.json_response(sdoc)
         if backend == "serve":
             return web.json_response({"ok": False, "backend": "serve", "surface": "serve",
-                                      "error": "keeper serve unreachable at " + AC_UPSTREAM},
+                                      "locus": vm or "host",
+                                      "error": "serve unreachable at " + ((_sbase if vm else None) or AC_UPSTREAM)},
                                      status=502)
         backend = "claude-code"      # serve had nothing: fall through to the tmux probe
     if backend not in ("claude-code", "codex"):
@@ -11824,7 +15213,9 @@ async def api_frontier_limits(request):
     fallback_active, last_hit_ts, current_model}. "near" and a precise last_hit_ts
     need the serve-side quota event (not yet emitted), so state is ok|hit only and
     last_hit_ts stays null until that lands."""
-    st = await _ac_serve_state()
+    vm = (request.query.get("vm") or "").strip()     # 1.0.141: the SELECTED locus's serve
+    vm = "" if _is_host_vm(vm) else vm
+    st = await _ac_serve_state(vm)
     if not st.get("ok"):
         # Serve is the surface this signal is derived from. When it is not
         # answering (down, or a tmux-keeper host with no serve) return non-2xx
@@ -11835,7 +15226,7 @@ async def api_frontier_limits(request):
     default_model = st.get("model") or ""
     fallback_model = st.get("fallback_model") or ""
     current_model = ""
-    rep = await _ac_get("/api/usage/report?last=1")
+    rep = await _ac_get("/api/usage/report?last=1", base=st.get("url") or None)
     if isinstance(rep, dict):
         recent = rep.get("recent") or []
         if recent:
@@ -11847,7 +15238,7 @@ async def api_frontier_limits(request):
     return web.json_response({"ok": True, "default_model": default_model,
                               "fallback_model": fallback_model, "current_model": current_model,
                               "state": state, "fallback_active": fallback_active,
-                              "last_hit_ts": None})
+                              "last_hit_ts": None, "locus": vm or "@keeper"})
 
 
 async def api_frontier_agents(request):
@@ -11902,29 +15293,40 @@ _rlog = logging.getLogger("station.idle-relaunch")
 def _station_locus():
     """This station's own locus name in the toolserver: STATION_LOCUS, else the
     distributed locus whose endpoint is <this user>@<one of this host's ips>."""
-    env = (os.environ.get("STATION_LOCUS") or "").strip().lower()
+    env = _canon_locus(os.environ.get("STATION_LOCUS") or "")
     if env:
         return env
     if _TS_LOCI.get("self"):   # 1.0.85: loci-sync hides the self host from the dropdown, keeps its name
-        return _TS_LOCI["self"]
+        return _canon_locus(_TS_LOCI["self"])
     me, ips = getpass.getuser(), _local_ips()
-    for name, h in (_TS_LOCI.get("hosts") or {}).items():
-        if h.get("user") == me and h.get("host") in ips:
-            return name
-    return ""
+    hits = [name for name, h in (_TS_LOCI.get("hosts") or {}).items()
+            if h.get("user") == me and h.get("host") in ips]
+    return _canon_locus(_pick_endpoint_locus(hits))
 
 
 def _locus_name_for(vm):
-    return _station_locus() if not vm or vm in ("@keeper", "keeper") else vm
+    """assess/state key: the host's own locus, else the dropdown locus's
+    central key (1.0.138 — aliases/endpoint matches included)."""
+    return _station_locus() if _is_host_vm(vm) else _central_locus(vm)
 
 def _keeper_locus():
-    """The host keeper's ONE canonical toolserver locus for its central `todos`
-    board: STATION_LOCUS when set, else 'keeper' — the exact value every host
-    writer already falls back to (the comms sender and MCT_LOCUS lines both use
-    `_station_locus() or 'keeper'`) and where this host's board actually lives in
-    the DB (the `keeper` slice). Read, write AND the file<->DB sync all use this,
-    so they can never disagree on whose board it is (board-sot 2026-09-18)."""
-    return _station_locus() or "keeper"
+    """This station's OWN locus key for its central rows (board, comms identity,
+    file<->DB sync). 1.0.141: it is exactly _station_locus() — there is NO
+    fallback to the `keeper` slice any more (that silently pointed every
+    unconfigured station at vm_mgr's board and its sync wrote into it). ''
+    means "locus not configured": callers show that state instead."""
+    return _station_locus()
+
+
+LOCUS_UNCONFIGURED = ("this station's locus is not configured — set STATION_LOCUS in "
+                      "<state>/env/station.env (or register this user@host with "
+                      "loci_register) and restart the station")
+
+
+def _unconfigured_response(what=""):
+    return web.json_response({"ok": False, "unconfigured": True, "locus": "",
+                              "error": (what + ": " if what else "") + LOCUS_UNCONFIGURED},
+                             status=409)
 
 
 async def _seat_session_created(sess):
@@ -11957,6 +15359,8 @@ async def _seat_pass_dialogs(sess, tries=6):
 
 
 async def _rolling_state(app, vm):
+    if not _is_host_vm(vm):
+        await _loci_ready()
     locus = _locus_name_for(vm)
     if not locus:
         return {"ok": False, "error": "this station has no locus in the toolserver yet (set STATION_LOCUS or register it)"}
@@ -11965,7 +15369,7 @@ async def _rolling_state(app, vm):
     except Exception as e:
         return {"ok": False, "error": str(e)[:200], "locus": locus}
     out = dict(doc, ok=True, locus=locus)
-    if not vm or vm in ("@keeper", "keeper"):
+    if _is_host_vm(vm):
         sess = _tmux_session_for("frontier", "claude-code") or "keeper-claude"
         created = await _seat_session_created(sess)
         out["seat_session"] = sess
@@ -11996,6 +15400,8 @@ async def api_frontier_state(request):
 
 async def _relaunch_host_seat(app, reason):
     """Hand the rolling init prompt to a FRESH host frontier claude-code seat."""
+    if not _tmux_available():
+        return {"ok": False, "error": TMUX_MISSING_MSG}
     st = await _rolling_state(app, "")
     if not st.get("ok"):
         return {"ok": False, "error": st.get("error", "no state")}
@@ -12004,25 +15410,35 @@ async def _relaunch_host_seat(app, reason):
     ip = (st.get("init_prompt") or "").strip()
     if not ip:
         return {"ok": False, "error": "no init prompt in the rolling state"}
-    FRONTIER_HANDOFF_PATH.parent.mkdir(parents=True, exist_ok=True)
-    FRONTIER_HANDOFF_PATH.write_text(ip + "\n", encoding="utf-8")
+    # 1.0.146: the init prompt is filed as a toolserver handoff row (the seat's
+    # SessionStart hook pulls it) unless one is already open for the locus.
+    locus = _station_locus()
+    try:
+        open_now = await _ts_call(app, "handoff/station", {"locus": locus}, timeout=10)
+        if not (open_now or {}).get("handoff"):
+            await _ts_call(app, "handoff/request", {"locus": locus, "text": ip, "by": "rolling-state", "spawn": False},
+                           timeout=20)
+    except Exception as e:                                   # noqa: BLE001
+        return {"ok": False, "error": f"could not file the init prompt as a toolserver handoff: {str(e)[:200]}"}
     sess = st.get("seat_session") or "keeper-claude"
     await _run("tmux", "-L", KEEPER_TMUX_SOCK, "kill-session", "-t", "=" + sess)
-    # mct v2: same file-based launch as _tmux_persist — the seat command is
-    # far past tmux's 16 KB argv limit when passed inline.
+    # 1.0.141: the SAME unified launcher the terminal uses (script on the
+    # target, short tmux line), started detached.
     key = "mct" if TERM_SURFACES["frontier"].get("default") == "mct" else "claude-code"
-    body = _claude_seat_cmd("frontier", key)
-    if sess == "keeper-claude":
-        body = ("(command -v abstract-claude >/dev/null 2>&1 && abstract-claude seat-report "
-                "--seat claude-code --watch-pid $$ >/dev/null 2>&1 &); " + body)
-    script = _seat_launch_script(sess, body, "frontier")
-    cmd = ("bash " + shlex.quote(str(script))) if script is not None else ("bash -lc " + shlex.quote(body))
-    argv = _scope_prefix() + ["tmux", "-L", KEEPER_TMUX_SOCK, "new-session", "-d", "-s", sess, "bash", "-lc", cmd]
-    proc = await asyncio.create_subprocess_exec(*argv, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
-                                                cwd=str(FV_STATE_HOME))
-    out, _ = await proc.communicate()
-    if proc.returncode != 0:
-        return {"ok": False, "error": "tmux new-session failed: " + (out or b"").decode()[:200]}
+    target = _locus_target("")
+    try:
+        cfg = await _seat_cfg(target)
+    except LX.LocusError:
+        cfg = None
+    body = _seat_launch_body(sess, _claude_seat_cmd("frontier", key, cfg), target, cfg, "frontier")
+    try:
+        rc, out, err, _p = await LX.seat_start_detached(
+            target, sess, body, pre=" ".join(_scope_prefix()), opts=_TMUX_OPTS,
+            cwd=str(FV_STATE_HOME))
+    except LX.LocusError as e:
+        return {"ok": False, "error": str(e)[:200]}
+    if rc != 0:
+        return {"ok": False, "error": "tmux new-session failed: " + ((err or out) or "")[:200]}
     ready = await _seat_pass_dialogs(sess)
     _audit_line("frontier-relaunch", f"{reason} · init_prompt {len(ip)} chars · session {sess} · prompt_up={ready}")
     return {"ok": True, "session": sess, "init_prompt_chars": len(ip), "reason": reason, "prompt_up": ready}
@@ -12037,6 +15453,16 @@ async def api_ac_rollover(request):
              current:<current context tokens>, rolling:<threshold tokens>, due:bool}.
     POST -> forwards {action:"roll"|"cancel", session_id} to serve
             POST /api/session/rollover (reply passed through verbatim)."""
+    # 1.0.141: ?vm= = the SELECTED locus's serve (its forward), not the host's.
+    vm = (request.query.get("vm") or "").strip()
+    vm = "" if _is_host_vm(vm) else vm
+    base = None
+    if vm:
+        base, _u, _p, _k = await _ac_resolve(vm)
+        if not base:
+            return web.json_response(
+                {"ok": False, "locus": vm, "error": "no reachable serve on " + vm + ": "
+                 + ((_AC_DISCOVERED.get(vm) or {}).get("error") or "not discovered")}, status=502)
     if request.method == "POST":
         try:
             body = await request.json()
@@ -12044,14 +15470,14 @@ async def api_ac_rollover(request):
             body = {}
         payload = {"action": (body.get("action") or "").strip(),
                    "session_id": (body.get("session_id") or "").strip()}
-        doc = await _ac_post("/api/session/rollover", payload)
+        doc = await _ac_post("/api/session/rollover", payload, base=base)
         if not isinstance(doc, dict):
             return web.json_response(
-                {"ok": False, "error": "keeper serve unreachable at " + AC_UPSTREAM},
+                {"ok": False, "error": "serve unreachable at " + (base or AC_UPSTREAM)},
                 status=502)
         return web.json_response(doc)
     # GET: map serve's rollover status onto the console's rollover-chip shape.
-    doc = await _ac_get("/api/session/rollover", timeout=4)
+    doc = await _ac_get("/api/session/rollover", timeout=4, base=base)
     policy = (doc or {}).get("policy") or {}
     # newest per-session eval carries the live context size + due flag
     newest = None
@@ -12085,9 +15511,9 @@ def _audit_line(action, detail):
 async def api_frontier_relaunch(request):
     """POST /api/frontier/relaunch?vm=@keeper — operator-triggered relaunch on the init prompt."""
     vm = (request.query.get("vm") or "").strip()
-    if vm and vm not in ("@keeper", "keeper"):
+    if vm and not _is_host_vm(vm):
         # 1.0.101: a locus with its own serve (ac-loci.json) relaunches THAT unit
-        if _ac_target(vm)[0]:
+        if (await _ac_resolve(vm))[0]:
             res = await _ac_serve_restart("operator", vm)
             audit(request, "frontier-relaunch", json.dumps(res)[:200], ok=bool(res.get("ok")))
             return web.json_response(res, status=200 if res.get("ok") else 409)
@@ -12192,6 +15618,11 @@ async def _b_model_candidates():
 async def api_b_model(request):
     """GET/POST /api/b/model — the local keeper's model.
     POST {"model": "<key>"|""} ("" = the hugpy package default)."""
+    vm, bad = await _cfg_vm(request)          # 1.0.141: the SELECTED locus's own file
+    if bad is not None:
+        return bad
+    if vm:
+        return await _remote_b_model(request, vm)
     if request.method == "POST":
         try:
             body = await request.json(); assert isinstance(body, dict)
@@ -12406,7 +15837,7 @@ async def _host_sudo_state():
 def _sudo_scope(request):
     """'' = host; else a VM name. ?vm=@keeper and ?scope=host both mean host."""
     vm = (request.query.get("vm") or request.query.get("scope") or "").strip()
-    return "" if vm in ("", "@keeper", "host") else vm
+    return "" if _is_host_vm(vm) else vm
 
 
 async def _ssh_sudo_state(name):
@@ -12662,8 +16093,8 @@ _HOST_CANVAS = {"design": (Path(_hugpy_path("state", "wireframe.json", "wirefram
                 "flow": (Path(_hugpy_path("state", "flow.json", "flow.json")), "nodes", 600)}
 
 
-async def api_host_canvas(request):
-    kind = request.match_info["kind"]
+async def api_host_canvas(request, kind=None):
+    kind = kind or request.match_info["kind"]
     own = _station_locus()
     if own:                       # the host seat IS a locus → one central copy
         return await _central_canvas_route(request, own, kind)
@@ -12708,7 +16139,7 @@ async def api_term_show(request):
     surface = (body.get("surface") or "frontier").strip()
     backend = (body.get("backend") or "").strip().lower()
     vm = (body.get("vm") or "").strip()
-    ground_vm = "" if vm == "@keeper" else (vm or MODEL_VM)
+    ground_vm = "" if _is_host_vm(vm) and vm else (vm or MODEL_VM)
     tsess = _tmux_session_for(surface, backend)
     if not tsess:
         return web.json_response({"error": "surface/backend has no persistent tmux session"}, status=400)
@@ -12717,7 +16148,7 @@ async def api_term_show(request):
     if body.get("close"):
         script = (base + f"list-panes -t {tgt} -F '#{{pane_id}} #{{@{_SHOW_PANE_MARK}}}' | "
                   "awk '$2==\"1\"{print $1}' | xargs -r -n1 " + base + "kill-pane -t")
-        rc, out, err = await _locus_run(ground_vm, script, timeout=15)
+        rc, out, err = await LX.run(_locus_target(ground_vm), script, timeout=15)
         return web.json_response({"ok": rc == 0, "closed": True, "err": err[-300:]})
     path = (body.get("path") or "").strip()
     if not path or "\n" in path:
@@ -12730,7 +16161,7 @@ async def api_term_show(request):
               "awk '$2==\"1\"{print $1}' | xargs -r -n1 " + base + "kill-pane -t; "
               + base + f"split-window -v -l 45% -t {tgt} -P -F '#{{pane_id}}' " + shlex.quote(pane_cmd)
               + " | xargs -r -I{} " + base + f"set-option -p -t {{}} @{_SHOW_PANE_MARK} 1")
-    rc, out, err = await _locus_run(ground_vm, script, timeout=15)
+    rc, out, err = await LX.run(_locus_target(ground_vm), script, timeout=15)
     if rc != 0:
         return web.json_response({"ok": False, "error": (err or out)[-300:]}, status=502)
     audit(request, "term_show", f"{surface}/{backend or 'default'}: {path}", ok=True)
@@ -12799,37 +16230,24 @@ async def api_mct2_status(request):
     ground = "" if req_vm in ("", "@keeper") else req_vm
     if ground and ground not in await all_locus_names():
         ground = ""
-    if ground and _ssh_host(ground):
-        rows = await _seat_rows(request.app, ground, "mct")
+    if ground:
+        await _loci_ready()
+    central = _central_locus(ground) if ground else ""
+    if central and central != _keeper_locus():
+        # 1.0.138: every non-host locus kind reads the mct seat's REPORTED state
+        # (central seat_state) — no python probe of a station file on the locus
+        rows = await _seat_rows(request.app, central, "mct")
         if not rows:
-            return web.json_response({"present": False, "locus": ground,
+            return web.json_response({"present": False, "locus": central,
                                       "source": "toolserver seat/state"})
         r = rows[0]
         doc = dict(r.get("status") or {})
         doc["alive"] = bool(r.get("alive"))
         if not doc["alive"] and doc.get("state") != "offline":
             doc["state"] = "offline"
-        doc.update({"present": True, "locus": ground, "source": "toolserver seat/state",
+        doc.update({"present": True, "locus": central, "source": "toolserver seat/state",
                     "age_s": r.get("reported_ago_s"), "model": doc.get("model") or r.get("model"),
                     "reporter_pid": r.get("pid")})
-        return web.json_response(doc)
-    if ground:
-        py = ("import json,os; "
-              "p=os.path.expanduser('~/.config/hugpy-station/mct2/repl/status.json'); "
-              "d=json.load(open(p)); "
-              "d['alive']=os.path.exists('/proc/%s'%d.get('pid')); "
-              "print(json.dumps(d))")
-        rc, out, err = await _locus_run(ground, "python3 -c " + shlex.quote(py), 10)
-        try:
-            assert rc == 0
-            doc = json.loads(out.strip().splitlines()[-1])
-            assert isinstance(doc, dict)
-        except (AssertionError, ValueError, IndexError):
-            return web.json_response({"present": False, "locus": ground})
-        if not doc.get("alive") and doc.get("state") != "offline":
-            doc["state"] = "offline"
-        doc.update({"present": True, "locus": ground,
-                    "age_s": round(time.time() - (doc.get("updated") or 0), 1)})
         return web.json_response(doc)
     p = FV_STATE_HOME / "mct2" / "repl" / "status.json"
     try:
@@ -12915,14 +16333,20 @@ async def api_seat_status(request):
         ground = req_vm
     else:
         ground = MODEL_VM
-    if ground and _ssh_host(ground):
-        auth = await _seat_auth_from_toolserver(request.app, ground)
+    if ground:
+        await _loci_ready()
+    central = _central_locus(ground) if ground else ""
+    if central and central != _keeper_locus():
+        # 1.0.138: what the locus's seats REPORTED (central seat_state) for every
+        # kind — no ssh/lxc probe of ~/.claude on the locus
+        auth = await _seat_auth_from_toolserver(request.app, central)
     else:
-        auth = await _probe_claude_auth(ground)
+        auth = await _probe_claude_auth(ground if not central else "")
     models = _frontier_models()
     dtext, dsrc, dpath = _frontier_directive_text()
     return web.json_response({
         "requested": req_vm or "@keeper", "grounded_in": ground or "host",
+        "locus": central or _keeper_locus(),
         "seat_user": ((_ssh_host(ground) or {}).get("user", "root") if _ssh_host(ground)
                       else "ubuntu" if ground else getpass.getuser()),
         "kind": ("ssh" if _ssh_host(ground) else "lxd" if ground else "host"),
@@ -13073,11 +16497,17 @@ async def api_about(request):
         version = (ROOT.parent / "VERSION").read_text(encoding="utf-8").strip()
     except OSError:
         version = "unknown"
+    try:
+        switches = _station_switches()
+    except Exception:                                    # noqa: BLE001
+        switches = {}
     return web.json_response({
         "name": "hugpy Station",
         "version": version,
         "backend_dir": str(ROOT),
         "python": sys.version.split()[0],
+        "switches": switches,            # 1.0.146: live values of every inert-able default
+        "toggles": {"frontier_keeper": _frontier_doc(), "delegate": _frontier_delegate_meta()},
         "author": "putkoff (hugpy.ai)",
         "homepage": "https://hugpy.ai",
         "source": "station-app monorepo (hugpy project) — ships as the "
@@ -13135,7 +16565,7 @@ async def _mct_static_fallback(request):
 
 
 def make_app():
-    app = web.Application(middlewares=[auth_mw], client_max_size=MAX_UPLOAD_SIZE)
+    app = web.Application(middlewares=[auth_mw, locus_vm_mw], client_max_size=MAX_UPLOAD_SIZE)
     # 2026-09-18: runtime-mutable state holder set BEFORE startup (pre-freeze)
     # so the hot-loop writes below do not trip aiohttp's "Changing state of
     # started application is deprecated" (spammed once per SSE event).
@@ -13158,6 +16588,8 @@ def make_app():
                     collate=_mct_b_collate, capture=_mct_b_capture)
     _ensure_mct_cli_links()
     app.on_startup.append(_start_log_ring)
+    app.on_startup.append(_start_directives)    # 1.0.143: re-derive the per-session directives
+    app.on_startup.append(_start_handoff_retire) # 1.0.146: a leftover frontier-handoff.md is never delivered — say so
     app.on_startup.append(_start_reaper)
     app.on_cleanup.append(_stop_reaper)
     # console-api sidecar: the full fleet management API, same as the web console
@@ -13165,6 +16597,8 @@ def make_app():
     app.on_cleanup.append(_stop_console_api)
     app.on_startup.append(_start_bugreport_api)
     app.on_startup.append(_start_reminders)     # ⏱ board reminder cycle
+    app.on_startup.append(_start_digest)        # 1.0.144 ⏱ open-todos digest -> every keeper session
+    app.on_cleanup.append(_stop_digest)
     app.on_cleanup.append(_stop_reminders)
     app.on_startup.append(_start_bugscan)       # 🐞 intermittent local-agent log review
     app.on_cleanup.append(_stop_bugscan)
@@ -13178,15 +16612,20 @@ def make_app():
     # same file + same flock as the agent's MCP todo tool — never a VM path.
     # messages stays unrouted (honest "route not yet enabled" degrade);
     # bugreport falls through to the sidecar.
-    app.router.add_get("/api/vm/keeper/todo", mct_todo_get)
-    app.router.add_post("/api/vm/keeper/todo", mct_todo_post)
-    app.router.add_get("/api/vm/keeper/todo-history", keeper_todo_history)
-    app.router.add_post("/api/vm/keeper/todo/assist", keeper_todo_assist)
-    app.router.add_post("/api/vm/keeper/todo-revision", keeper_todo_revision)
-    app.router.add_route("*", "/api/vm/keeper/todo/discord", keeper_todo_discord)
+    # 1.0.141: the host board lives at the RESERVED tokens (@self, and the
+    # historic @keeper seat sentinel) — never at the literal `keeper`, which is
+    # vm_mgr's registered locus key. /api/vm/<own locus name>/... is answered by
+    # the same handlers in-process (_central_vm_reroute -> _host_vm_dispatch).
+    for _ht in ("@self", "@keeper"):
+        app.router.add_get(f"/api/vm/{_ht}/todo", mct_todo_get)
+        app.router.add_post(f"/api/vm/{_ht}/todo", mct_todo_post)
+        app.router.add_get(f"/api/vm/{_ht}/todo-history", keeper_todo_history)
+        app.router.add_post(f"/api/vm/{_ht}/todo/assist", keeper_todo_assist)
+        app.router.add_post(f"/api/vm/{_ht}/todo-revision", keeper_todo_revision)
+        app.router.add_route("*", f"/api/vm/{_ht}/todo/discord", keeper_todo_discord)
+        app.router.add_get(f"/api/vm/{_ht}/messages", keeper_messages_get)
     # ✉ fleet mail: the keeper console's inbox (before the {vm} proxy, so the
     # keeper drawer's messages tab lights up) + the one send endpoint.
-    app.router.add_get("/api/vm/keeper/messages", keeper_messages_get)
     # explicit host-locus address (nomenclature 2026-08-27): /api/vm/host/* is
     # /api/vm/keeper/* — registered before every {vm} wildcard so it wins.
     app.router.add_route("*", "/api/vm/host/{tail:.*}", vm_host_alias)
@@ -13200,14 +16639,16 @@ def make_app():
     app.on_startup.append(_start_events_relay)  # 1.0.77: toolserver change bus → /api/events
     app.on_cleanup.append(_stop_events_relay)
     app.router.add_get("/api/events", api_events)
+    app.router.add_get("/api/station/identity", api_station_identity)   # 1.0.141
     app.on_cleanup.append(_stop_loci_sync)
     app.on_startup.append(_start_idle_relaunch)  # 1.0.68: relaunch the idle host seat on a newer init prompt
     app.on_cleanup.append(_stop_idle_relaunch)
     app.on_cleanup.append(_stop_fleet_mail)
     # ◳ host-seat canvas BEFORE the bugreport suffix loop: "flow" is one of its
     # suffixes and used to swallow /api/vm/@keeper/flow ("unknown route").
-    app.router.add_get("/api/vm/@keeper/{kind:design|flow}", api_host_canvas)
-    app.router.add_post("/api/vm/@keeper/{kind:design|flow}", api_host_canvas)
+    for _ht in ("@self", "@keeper"):
+        app.router.add_get(f"/api/vm/{_ht}/{{kind:design|flow}}", api_host_canvas)
+        app.router.add_post(f"/api/vm/{_ht}/{{kind:design|flow}}", api_host_canvas)
     for _suf in BUGREPORT_SUFFIXES:   # bugreport-api owns these per-VM
         app.router.add_route("*", "/api/vm/{vm}/" + _suf, bugreport_proxy)
     for _suf in ("todo-history", "todo/assist", "todo-revision", "messages"):
@@ -13233,6 +16674,7 @@ def make_app():
     app.router.add_post("/api/stations/{name}/action/{action}", api_action)
     app.router.add_post("/api/stations/{name}/bridge", api_bridge)
     app.router.add_get("/api/llm/models", api_llm_models)
+    app.router.add_post("/api/voice/transcribe", api_voice_transcribe)
     app.router.add_post("/api/llm/chat", api_llm_chat)
     app.router.add_post("/api/llm/agent", api_llm_agent)
     app.router.add_get("/api/wf/fetch", api_wf_fetch)         # Design drawer URL import
@@ -13285,9 +16727,18 @@ def make_app():
     app.router.add_get("/api/b/guidance", b_guidance_get)
     app.router.add_post("/api/b/guidance", b_guidance_post)
     app.router.add_post("/api/b/chat", b_chat)
+    app.router.add_post("/api/board/operator/{id}/draft-run", api_board_operator_draft_run)   # 1.0.144, unused by the UI
     app.router.add_get("/api/b/findings", api_b_findings)                # B's findings set (1.0.124)
     app.router.add_get("/api/mct/todo", mct_todo_get)
     app.router.add_post("/api/mct/prompt", mct_prompt)
+    app.router.add_post("/api/prompt/send", api_prompt_send)          # 1.0.143 ✍ direct delivery
+    app.router.add_get("/api/prompt/status", api_prompt_status)
+    app.router.add_post("/api/prompt/status", api_prompt_status)      # {session_id, action:"release"} (1.0.146; "retry" accepted)
+    app.router.add_get("/api/prompt/pending", api_prompt_pending)     # 1.0.146: re-pended ✍ prompts of a locus
+    app.router.add_post("/api/prompt/pending", api_prompt_pending)    # {action:"retry"} = one delivery pass now
+    app.on_startup.append(_start_prompt_pending)
+    app.on_cleanup.append(_stop_prompt_pending)
+    app.router.add_post("/api/locus/serve/standing", api_locus_serve_standing)  # 1.0.146 (t4250): standing roles + LOCUS NUANCES
     app.router.add_post("/api/mct/prompt/revise", mct_prompt_revise)
     app.router.add_get("/api/mct/live", mct_live)
     app.router.add_get("/api/mct/live/object", mct_live_object)   # mct v2: render a ledger object by pointer
@@ -13302,6 +16753,11 @@ def make_app():
     app.router.add_get("/api/loops", api_loops)                        # ⚠ crash/retry loop set (1.0.118)
     app.router.add_get("/api/steward/log", api_steward_log)            # board t1: console log backlog
     app.router.add_get("/api/steward/log/stream", api_steward_log_stream)  # board t1: live SSE log
+    app.router.add_get("/api/provenance", api_provenance)
+    app.router.add_get("/api/provenance/stream", api_provenance_stream)
+    app.router.add_post("/api/provenance/query", api_provenance_query)
+    app.router.add_post("/api/provenance/ingest", api_provenance_ingest)
+    app.router.add_post("/api/provenance/investigate", api_provenance_investigate)
     app.router.add_get("/api/locus/journal", api_locus_journal)             # 📜 resolved journal source
     app.router.add_get("/api/locus/journal/stream", api_locus_journal_stream)  # 📜 journalctl -f (SSE)
     app.router.add_get("/api/bugscan", api_bugscan)                  # 🐞 local-agent log review
@@ -13335,6 +16791,10 @@ def make_app():
     app.router.add_get("/api/frontier/state", api_frontier_state)       # 1.0.68 rolling state (toolserver assess/state)
     app.router.add_post("/api/frontier/relaunch", api_frontier_relaunch)  # 1.0.68 fresh seat on the init prompt
     app.router.add_get("/api/ac/rollover", api_ac_rollover)            # p509 serve session-rollover status
+    app.router.add_get("/api/locus/serve", api_locus_serve)             # 1.0.144 a locus's serve + its tmux seats
+    app.router.add_get("/api/locus/keeper", api_locus_keeper)           # t4262 the locus's serve Keeper role + catalog
+    app.router.add_post("/api/locus/keeper", api_locus_keeper)          # t4262 set_model (+ set_provider) on that serve
+    app.router.add_post("/api/locus/serve/provision", api_locus_serve_provision)  # 1.0.144 provision serve ON the locus
     app.router.add_post("/api/ac/rollover", api_ac_rollover)           # p509 roll/cancel forwarding
     app.router.add_get("/api/b/model", api_b_model)
     app.router.add_post("/api/b/model", api_b_model)
@@ -13429,6 +16889,7 @@ if __name__ == "__main__":
               "  (or bind HOST=127.0.0.1 for local-only use).", file=sys.stderr)
         sys.exit(1)
 
+    _write_state_pointer()      # 1.0.141: peers' ssh scripts find this state dir
     scheme = "https" if USE_TLS else "http"
     mode = "session+token" if (AUTH_REQUIRED and TOKEN) else \
            "session" if AUTH_REQUIRED else "OPEN (loopback only — no auth)"

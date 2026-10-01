@@ -1160,6 +1160,8 @@
 <script src="vendor/htm.js"></script>
 <script src="wireframe.js?v=20260716"></script>
 <script src="flow.js?v=20260723"></script>
+<script src="/static/prompt-tools.js?v=20261001-143"></script>
+<script src="/static/board-md.js?v=20261001-optab"></script>
 </head>
 <body>
 <div id="root"></div>
@@ -1252,7 +1254,43 @@ try {
   tick();
   setInterval(tick, 30000);
 })();
-const isHostSeat = (vm) => !vm || vm === "@keeper" || vm === "keeper";
+/* 1.0.141: "keeper" is vm_mgr's REGISTERED locus key, not "this station". The
+   host is the reserved tokens ("" / @self / @keeper / host) or this station's
+   OWN locus name(s) from /api/station/identity (window.__fvSelf). On any other
+   station a dropdown entry named `keeper` is vm_mgr's locus. */
+window.__fvSelf = window.__fvSelf || { locus: "", names: [], configured: true, loaded: false };
+const isHostVm = (vm) => !vm || vm === "@keeper" || vm === "@self" || vm === "host"
+  || ((window.__fvSelf.names || []).indexOf(vm) !== -1);
+const HOST_BOARD = "@self";      // the host board's wire token (/api/vm/@self/todo)
+try {
+  fetch("/api/station/identity", { credentials: "same-origin", headers: { "X-Console": "1" } })
+    .then(r => r.ok ? r.json() : null)
+    .then(d => { if (d) { window.__fvSelf = { locus: d.locus || "", names: d.self_names || [],
+                                             configured: !!d.configured, error: d.error || "", loaded: true };
+                          window.dispatchEvent(new CustomEvent("fv-self", { detail: window.__fvSelf })); } })
+    .catch(() => {});
+} catch (_) {}
+const isHostSeat = (vm) => isHostVm(vm);
+/* 1.0.141: an unconfigured station says so — it never borrows another locus's
+   board (the old silent fallback to vm_mgr's `keeper` slice). */
+window.addEventListener("fv-self", (e) => {
+  try {
+    const d = e.detail || {};
+    let el = document.getElementById("fv-locus-unconfigured");
+    if (d.configured) { if (el) el.remove(); return; }
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "fv-locus-unconfigured";
+      el.setAttribute("role", "alert");
+      el.style.cssText = "position:fixed;top:0;left:50%;transform:translateX(-50%);z-index:9999;"
+        + "background:#5a1d1d;color:#ffd7d7;border:1px solid #a33;border-top:0;border-radius:0 0 6px 6px;"
+        + "padding:4px 12px;font:12px system-ui;max-width:80vw";
+      document.body.appendChild(el);
+    }
+    el.textContent = "⚠ locus not configured — " + (d.error || "set STATION_LOCUS for this station")
+      + " (the host board and its central sync are off until then)";
+  } catch (_) {}
+});
 const keeperSurface = () => {
   const k = window.__keeperSurface || {};
   /* t320 (2026-09-16): a serve blip (wipe/restart) no longer flips the pane to
@@ -1286,7 +1324,7 @@ const API_TIMEOUT_MS = 30000;
    as a window "db-change" event {table, op, locus, id, ts}. Drawers reload on a
    matching event instead of polling (their timers become a slow fallback).
    EventSource reconnects on its own. */
-const fvLocusOf = (vm) => (!vm || vm === "keeper" || vm === "@keeper" || vm === "host") ? "" : vm;
+const fvLocusOf = (vm) => isHostVm(vm) ? "" : vm;
 const onDbChange = (fn) => { window.addEventListener("db-change", fn); return () => window.removeEventListener("db-change", fn); };
 try {
   const es = new EventSource("/api/events");
@@ -1308,12 +1346,19 @@ const csrfToken = () =>
    prompt/fs always describe the SAME locus the terminal is seated in. The
    vm param is appended here, centrally, so every call site follows. */
 const VM_SCOPED_API = ["/api/a/usage", "/api/b/guidance", "/api/mct/todo",
-  "/api/mct/live", "/api/mct/prompt", "/api/frontier/fs"];
+  "/api/mct/live", "/api/mct/prompt", "/api/prompt", "/api/frontier/fs",
+  /* 1.0.141: every seat-config + telemetry call follows the selected locus;
+     the backend resolves each per locus (or says "unavailable" honestly). */
+  "/api/frontier/directive", "/api/frontier/handoff", "/api/frontier/models",
+  "/api/frontier/limits", "/api/b/model", "/api/b/findings", "/api/ac/rollover", "/api/loops",
+  /* 1.0.144: the delegate switch is the locus's own file too (set through its transport) */
+  "/api/frontier/delegate"];
 const vmScope = (path) => {
   try {
     const vm = window.__fvVm && window.__fvVm.get();
     if (!vm) return path;
-    if (!VM_SCOPED_API.some(p => path === p || path.startsWith(p + "/"))) return path;
+    if (/[?&]vm=/.test(path)) return path;      // the caller already named the locus
+    if (!VM_SCOPED_API.some(p => path === p || path.startsWith(p + "/") || path.startsWith(p + "?"))) return path;
     return path + (path.indexOf("?") === -1 ? "?" : "&") + "vm=" + encodeURIComponent(vm);
   } catch (_) { return path; }
 };
@@ -1356,6 +1401,13 @@ const copyText = (t) => {                       // gesture-synchronous clipboard
   let ok = false; try { ok = document.execCommand("copy"); } catch (_) {}
   ta.remove(); return ok || api;
 };
+/* board-md.js (operator 2026-10-01): ⚑ operator / ⚖ proposal / 🔖 bookmark / 🧭 direction
+   items are STATIC REFERENCES — text, note and comments render through that module
+   in full (fences → labelled code blocks with ⧉ copy, "copy all commands", an
+   "unformatted command" badge, nothing truncated). No module → the t99 path below. */
+const BMD = window.BoardMd ? window.BoardMd.makeRenderer({ html, useState, useEffect, copyText }) : null;
+const BMD_TYPES = { operator: true, proposal: true, bookmark: true, direction: true };
+const isRefItem = (it) => !!(BMD && it && BMD_TYPES[it.type]);
 
 /* Design drawer — the wireframe editor (shared wireframe.js module) beside the
    terminals, so UI construction flows both ways with the VM's keeper (Claude):
@@ -1661,10 +1713,10 @@ function FlowDrawer({ vm }) {
    hyphen after its prefix letter, so it never becomes a candidate in the first
    place — the board-membership check is defense in depth, not the only gate. */
 /* Board ids carry the type's first letter since 2026-09-16 (t todo, r request, b bookmark,
-   o operator, p proposal, d direction, m message) — the alternation lists every letter,
+   o operator, p proposal, d direction, m message, f finding) — the alternation lists every letter,
    with the two-letter bm ahead of b so it wins. An old-style token (t372 written before
    the item became proposal p372) still resolves: extractRefs falls back to the digits. */
-const REF_ID_TOKEN_RE = /\b(?:bm|t|r|b|o|p|d|m|k|q)(?:[a-z0-9]*\d[a-z0-9]*|-[a-z0-9]+(?:-[a-z0-9]+)*)\b/g;
+const REF_ID_TOKEN_RE = /\b(?:bm|t|r|b|o|p|d|m|f|k|q)(?:[a-z0-9]*\d[a-z0-9]*|-[a-z0-9]+(?:-[a-z0-9]+)*)\b/g;
 const BOARD_ID_NUM_RE = /^[a-z]+(\d+)$/;
 /* number → id index over the loaded board (cached per allIds Set) so "t372" in a note
    finds "p372" on the board. */
@@ -1743,7 +1795,7 @@ const refsChips = (it, allIds, open, onJump, onCopySha, onToggleOpen) => {
       title=${"show " + hidden + " more"} onClick=${e => { e.stopPropagation(); onToggleOpen(it.id); }}>+${hidden}</button>`);
   return chips;
 };
-const TODO_ICON = { todo: "☑", request: "✋", bookmark: "🔖", operator: "⚑", proposal: "⚖", message: "✉", direction: "🧭" };
+const TODO_ICON = { todo: "☑", request: "✋", bookmark: "🔖", operator: "⚑", proposal: "⚖", message: "✉", direction: "🧭", finding: "🐞" };
 const TODO_NEXT = { open: "doing", doing: "done", done: "open" };
 /* ⚑ operator (only the operator can action it — a host-side root step the keeper
    cannot do) and ⚖ proposal (a decision request, with pros/cons/rec) are
@@ -2109,7 +2161,7 @@ function isPeerFeed(it) { return !!(it && it.id === "peer-inbox" && it.by === "p
    own. vm is the board's locus as the wire knows it ("keeper"/"@keeper"/
    ""/"host" = the host board). */
 function boardOwnSigs(vm) {
-  const self = (!vm || vm === "keeper" || vm === "@keeper" || vm === "host") ? "host" : vm;
+  const self = isHostVm(vm) ? "host" : vm;
   return ["keeper", self + "-keeper"];
 }
 function isMsgItem(it, vm) {
@@ -2192,6 +2244,9 @@ const DEPLOY_HELP = "a standing instruction for HOW the keeper deploys agents (e
 const CFG_IDS = new Set([RELAY_ID, DEPLOY_ID]);
 
 function TodoDrawer({ vm, onCount }) {
+  /* 1.0.141: the host board is the reserved @self token (or this station's own
+     locus name); a dropdown entry literally named "keeper" is vm_mgr's locus. */
+  const hostBoard = isHostVm(vm);
   const [state, setState] = useState(null);       // {items:[...]} | null while loading
   const [note, setNote] = useState("");           // status line
   const [noteErr, setNoteErr] = useState(false);
@@ -2247,9 +2302,16 @@ function TodoDrawer({ vm, onCount }) {
      reproducible right now on any STOPPED VM: 409 "<vm> is not running").
      Failures are now terminal-and-visible: a 4xx is a settled answer, so show it
      and STOP re-polling; a 5xx/network error may pass, so keep the poll. */
+  /* 1.0.138: the CENTRAL locus key behind this drawer's board (the backend maps a
+     dropdown pick onto its toolserver rows — e.g. an LXD guest onto the locus
+     registered at its address), so the live DB-change match follows the rows
+     actually shown, not just the dropdown name. */
+  const locusRef = React.useRef(fvLocusOf(vm));
   const load = useCallback(() => {
     api("/api/vm/" + vm + "/todo")
-      .then(d => { if (d.ok) { setState(d.state); setErr(null); }
+      .then(d => { if (d.ok) { setState(d.state);
+                               if (d.state && d.state.locus && d.state.central) locusRef.current = d.state.locus;
+                               setErr(null); }
                    else setErr({ msg: d.error || "load failed" }); })
       .catch(e => {
         if (e.status >= 400 && e.status < 500) stopped.current = true;
@@ -2298,17 +2360,17 @@ function TodoDrawer({ vm, onCount }) {
   const [msgBusy, setMsgBusy] = useState(false);
   const [stations, setStations] = useState(null);   // keeper drawer: to-picker
   useEffect(() => {
-    if (vm !== "keeper" || tab !== "messages" || stations !== null) return;
+    if (!hostBoard || tab !== "messages" || stations !== null) return;
     api("/api/vms")
       .then(d => {
-        const names = ((d && d.vms) || []).map(v => v.name).filter(n => n && n !== "keeper");
+        const names = ((d && d.vms) || []).map(v => v.name).filter(n => n && !isHostVm(n));
         setStations(names); setMsgTo(t => t || names[0] || "");
       })
       .catch(() => setStations([]));
   }, [vm, tab, stations]);
   const sendMsg = () => {
     const text = msgDraft.trim();
-    const to = vm === "keeper" ? msgTo : vm;
+    const to = hostBoard ? msgTo : vm;
     if (!text || !to || msgBusy) return;
     setMsgBusy(true);
     api("/api/fleet/message", { method: "POST", body: JSON.stringify({ to, text }) })
@@ -2316,7 +2378,7 @@ function TodoDrawer({ vm, onCount }) {
                    say("✉ sent to " + to + (d && d.pinged
                        ? " — its keeper (A) was pinged"
                        : " — no live keeper; it lands in the inbox (fleet-msg --inbox)"));
-                   if (vm !== "keeper") loadMessages(); })
+                   if (!hostBoard) loadMessages(); })
       .catch(e => say(e.message || "send failed", true))
       .finally(() => setMsgBusy(false));
   };
@@ -2357,7 +2419,8 @@ function TodoDrawer({ vm, onCount }) {
     const offDb = onDbChange((e) => {
       const d = e.detail || {};
       if (stopped.current || !central) return;
-      if (["todos", "board", "prompts"].includes(d.table) && d.locus === fvLocusOf(vm)) load();
+      if (["todos", "board", "prompts"].includes(d.table)
+          && (d.locus === fvLocusOf(vm) || d.locus === locusRef.current)) load();
     });
     return () => { clearInterval(id); document.removeEventListener("visibilitychange", onVis); offDb(); };
   }, [load]);
@@ -2461,7 +2524,7 @@ function TodoDrawer({ vm, onCount }) {
      /api/vm/<vm>/todo/brief types KEEPER_BRIEF + an open-items snapshot into
      the live keeper pane). Copying is only the degrade when no keeper is up. */
   const briefKeeper = () => {
-    if (vm === "keeper") return;
+    if (hostBoard) return;
     guard(signal => api("/api/vm/" + vm + "/todo/brief", { method: "POST", signal,
         body: JSON.stringify({ text: KEEPER_BRIEF }) })
       .then(() => say("keeper prompted about the board"))
@@ -3045,7 +3108,8 @@ function TodoDrawer({ vm, onCount }) {
               const rv = parseRev(c.text);
               return rv ? revLine(c, i, rv)
                         : html`<div key=${i} className="todo-comment">
-                            <span className="todo-comment-meta">${c.by} · ${rel(c.ts)}</span> — ${richSpans(c.text)}</div>`;
+                            <span className="todo-comment-meta">${c.by} · ${rel(c.ts)}</span> — ${isRefItem(it)
+                              ? html`<${BMD.Body} cls="bmd-inl" src=${c.text} onCopy=${m => say(m)} />` : richSpans(c.text)}</div>`;
             })
           : html`<div className="todo-thread-empty">no comments yet</div>`}
         <div className="todo-comment-add">
@@ -3172,7 +3236,11 @@ function TodoDrawer({ vm, onCount }) {
            never shares a line with the identifier chips above — status/icon/id/prio/
            task/@worker/refs/by·timestamp meta/✕/💬 all sit on the row ABOVE it,
            regardless of how much width the line has to spare. -->
-      ${xp
+      ${isRefItem(it)
+        ? html`<${BMD.Item} text=${it.text} note=${it.note} done=${it.status === "done"} onCopy=${m => say(m)} operator=${it.type === "operator"}
+                 oneLiner=${it.one_liner} rollbackOneLiner=${it.rollback_one_liner} result=${it.result}
+                 extraCmd=${cmds.filter(l => !isCmt(l)).join("\n")} onDblClick=${() => { if (!dup) edit(it); }} />`
+        : xp
         ? html`<div className="todo-text todo-rich" title=${dup ? dupTitle(it) : undefined} onDblClick=${() => { if (!dup) edit(it); }}>
             ${richNodes(it.text)}${it.note && html`<div className="todo-note">${noteView(it.id, it.note, true)}</div>`}</div>`
         : html`<span className="todo-text" title=${dup ? dupTitle(it) : (it.note || "")} onDblClick=${() => { if (!dup) edit(it); }}>
@@ -3209,7 +3277,9 @@ function TodoDrawer({ vm, onCount }) {
   const propCard = (it, idx) => {
     const pros = propList(it.pros), cons = propList(it.cons), rec = propRec(it.rec);
     const verdict = propVerdict(it.note), body = propNote(it.note);
-    const expanded = !!propOpen[it.id];
+    // board-md: a PENDING proposal opens by default (static reference, nothing
+    // hidden); decided cards stay folded until clicked. An explicit click wins.
+    const expanded = propOpen[it.id] !== undefined ? !!propOpen[it.id] : (isRefItem(it) && it.status !== "done");
     const dup = isDup(it);
     /* board t99: the card HEAD stays one line (first non-blank line + "…" when
        multi-line — the head itself is already the expand affordance); the OPEN
@@ -3221,7 +3291,7 @@ function TodoDrawer({ vm, onCount }) {
     return html`
       <div key=${it.id + ":" + idx} ref=${rowRef(it.id)} className=${"todo-prop" + refFlashCls(it.id)}>
         <div className="todo-prop-head" title=${expanded ? "collapse" : "expand"}
-             onClick=${() => setPropOpen(m => ({ ...m, [it.id]: !m[it.id] }))}>
+             onClick=${() => setPropOpen(m => ({ ...m, [it.id]: !expanded }))}>
           ${selBox(it, true)}
           <span className="todo-ic">${expanded ? "▾" : "▸"}</span>
           <span className="todo-ic" title="proposal">${TODO_ICON.proposal}</span>
@@ -3238,19 +3308,21 @@ function TodoDrawer({ vm, onCount }) {
         </div>
         ${expanded && html`
           <div className="todo-prop-body">
-            ${fl.more && html`<div className="todo-prop-text todo-rich">${richNodes(it.text)}</div>`}
-            ${body && html`<div className="todo-prop-note">${noteView(it.id, body, true)}</div>`}
+            ${isRefItem(it)
+              ? html`<${BMD.Item} text=${fl.more ? it.text : ""} note=${body} onCopy=${m => say(m)} />`
+              : html`${fl.more && html`<div className="todo-prop-text todo-rich">${richNodes(it.text)}</div>`}
+                ${body && html`<div className="todo-prop-note">${noteView(it.id, body, true)}</div>`}`}
             ${(pros.length || cons.length)
               ? html`<div className="todo-prop-cols">
                   <div className="todo-prop-col pro"><h4>pros</h4>
-                    ${pros.length ? html`<ul>${pros.map((p, i) => html`<li key=${i}>${richSpans(p)}</li>`)}</ul>`
+                    ${pros.length ? html`<ul>${pros.map((p, i) => html`<li key=${i}>${isRefItem(it) ? html`<${BMD.Body} cls="bmd-inl" src=${p} onCopy=${m => say(m)} />` : richSpans(p)}</li>`)}</ul>`
                                   : html`<div className="todo-prop-none">—</div>`}</div>
                   <div className="todo-prop-col con"><h4>cons</h4>
-                    ${cons.length ? html`<ul>${cons.map((c, i) => html`<li key=${i}>${richSpans(c)}</li>`)}</ul>`
+                    ${cons.length ? html`<ul>${cons.map((c, i) => html`<li key=${i}>${isRefItem(it) ? html`<${BMD.Body} cls="bmd-inl" src=${c} onCopy=${m => say(m)} />` : richSpans(c)}</li>`)}</ul>`
                                   : html`<div className="todo-prop-none">—</div>`}</div>
                 </div>`
-              : html`<div className="todo-prop-none">no pros or cons listed</div>`}
-            ${rec && html`<div className="todo-prop-rec"><b>keeper recommends</b> — ${richSpans(rec)}</div>`}
+              : !isRefItem(it) && html`<div className="todo-prop-none">no pros or cons listed</div>`}
+            ${rec && html`<div className="todo-prop-rec"><b>keeper recommends</b> — ${isRefItem(it) ? html`<${BMD.Body} cls="bmd-inl" src=${rec} onCopy=${m => say(m)} />` : richSpans(rec)}</div>`}
             <div className="todo-prop-acts">
               ${it.status !== "done" && html`<button className="btn" disabled=${busy || dup}
                   title=${dup ? dupTitle(it) : "accept — marks the proposal done and records [accepted] on its note"}
@@ -3447,21 +3519,21 @@ function TodoDrawer({ vm, onCount }) {
      to one station at a time; stations write back with `fleet-msg`. */
   const msgCompose = () => html`
     <div className="todo-msgsend">
-      ${vm === "keeper" && html`
+      ${hostBoard && html`
         <select value=${msgTo} onChange=${e => setMsgTo(e.target.value)}
                 title="which station receives this — the keeper console messages stations individually">
           ${(stations || []).map(n => html`<option key=${n} value=${n}>${n}</option>`)}
         </select>`}
       <textarea rows="2" value=${msgDraft}
-        placeholder=${vm === "keeper"
+        placeholder=${hostBoard
           ? (stations !== null && !stations.length
              ? "no stations to message — build one with +VM"
              : "message a station… (⌘/ctrl-Enter sends)")
           : "message " + vm + " — lands in its ✉ inbox; its keeper reads it with fleet-msg --inbox"}
         onInput=${e => setMsgDraft(e.target.value)}
         onKeyDown=${e => { if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) sendMsg(); }} />
-      <button className="btn" disabled=${msgBusy || !msgDraft.trim() || (vm === "keeper" && !msgTo)}
-        title=${vm === "keeper" ? "send to the selected station's ✉ inbox" : "send to " + vm + "'s ✉ inbox"}
+      <button className="btn" disabled=${msgBusy || !msgDraft.trim() || (hostBoard && !msgTo)}
+        title=${hostBoard ? "send to the selected station's ✉ inbox" : "send to " + vm + "'s ✉ inbox"}
         onClick=${sendMsg}>✉ send</button>
     </div>`;
   const historyView = () => {
@@ -3490,6 +3562,11 @@ function TodoDrawer({ vm, onCount }) {
     <div className="design-panel todo-panel">
       <div className="todo-bar">
         <b>☑ to-do — ${vm}</b>
+        ${/* 1.0.138: name the central rows when the dropdown pick maps onto another
+              locus key (an LXD guest / local ssh pointer at a registered locus) */""}
+        ${state && state.central && state.locus && state.locus !== vm && html`<span
+              style=${{ fontSize: 11, opacity: .7, marginLeft: 6 }}
+              title=${"central rows: locus " + state.locus + " (toolserver todos) — the dropdown pick " + vm + " resolves to this locus key"}>→ ${state.locus}</span>`}
         <span className="todo-spacer"></span>
         ${relayKnob()}
         ${activityKnob()}
@@ -3507,8 +3584,8 @@ function TodoDrawer({ vm, onCount }) {
             </div>`}
         </div>
         <button className="btn" disabled=${busy} title="Discord bridge — attach a hugpy comms-session endpoint so messages in that channel queue items here without interrupting anyone" onClick=${discord}>🔗</button>
-        <button className="btn" disabled=${busy || vm === "keeper"}
-          title=${vm === "keeper" ? "the host keeper is briefed by its charge" : "prompt " + vm + "'s live keeper about the board: types the brief + the open items into its terminal (falls back to copying the brief if no keeper is running)"}
+        <button className="btn" disabled=${busy || hostBoard}
+          title=${hostBoard ? "the host keeper is briefed by its charge" : "prompt " + vm + "'s live keeper about the board: types the brief + the open items into its terminal (falls back to copying the brief if no keeper is running)"}
           onClick=${briefKeeper}>⧉ brief keeper</button>
         <button className="btn" title="refresh now (board auto-refreshes every 10s; ⏱ history is pull-on-demand — ↻ re-pulls it)" onClick=${refresh}>↻</button>
       </div>
@@ -5049,6 +5126,7 @@ fetch("/api/about").then(r => r.ok ? r.json() : null).then(a => {
 const MD_DOCS = { using: "UI-GUIDE.md", tools: "STATION-TOOLS.md",  // 1.0.85: toolserver tools guide
                   terms: "NOMENCLATURE.md", fleet: "FLEET-OPS-GUIDE.md",
                   keeper: "KEEPER-DEV-GUIDE.md", sop: "TODO-BOARD-SOP.md",
+                  format: "BOARD-ITEM-FORMAT.md",   // 1.0.144: operator items + proposals shape
                   arb: "QUERY-ARBITRATION-SOP.md",
                   seat: "SEAT-CONTROL.md",
                   cinema: "CINEMA-INFERENCE-FLOW.md", method: "VIGILANT-INFERENCE-METHOD.md",
@@ -5231,6 +5309,8 @@ function DocsDrawer() {
                 onClick=${() => setTab("keeper")}>keeper dev</button>
         <button className=${"docs-tab" + (tab === "sop" ? " active" : "")}
                 onClick=${() => setTab("sop")}>board SOP</button>
+        <button className=${"docs-tab" + (tab === "format" ? " active" : "")}
+                onClick=${() => setTab("format")}>item format</button>
         <button className=${"docs-tab" + (tab === "arb" ? " active" : "")}
                 onClick=${() => setTab("arb")}>arbitration SOP</button>
         <button className=${"docs-tab" + (tab === "seat" ? " active" : "")}
@@ -6121,7 +6201,7 @@ function StewardDrawer({ vm, hugpyKeys }) {
       <div className="steward-body">
         <div style=${{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 6 }}>
           ${[["session", "🛡 session"], ["access", "🔓 access"], ["directive", "📜 directive"],
-             ["settings", "⚙ settings"], ["feed", "📡 feed"]].map(([t, lbl]) =>
+             ["settings", "⚙ settings"], ["feed", "📡 feed"], ["provenance", "🧭 provenance"]].map(([t, lbl]) =>
             html`<button key=${t} className=${"btn" + (tab === t ? " on" : "")} style=${{ fontSize: 11 }}
                          onClick=${() => pickTab(t)}>${lbl}</button>`)}
         </div>
@@ -6311,6 +6391,7 @@ function StewardDrawer({ vm, hugpyKeys }) {
         ${tab === "feed" && html`
           <${FeedGroupDrawer} vm=${vm === "@keeper" ? null : vm} embed=${true} />
         `}
+        ${tab === "provenance" && html`<${ProvenancePanel} />`}
         ${/* 🔓 access — everything about what may touch this locus: sudo grant/
               revoke, the frontier fs switch, LAN browser access, and the Claude
               login (OAuth) + 🧹 seat wipe. */""}
@@ -7060,7 +7141,7 @@ const seatQ = (vm) => "?vm=" + encodeURIComponent(vm || "@keeper");
 /* display name for a locus: the host is "⌂ host" everywhere the operator can
    see; "@keeper" (seat sentinel) and "keeper" (board alias) are WIRE values
    only (docs/NOMENCLATURE.md — keeper names agents, never machines). */
-const locusLabel = (vm) => (!vm || vm === "@keeper" || vm === "keeper") ? "⌂ host" : vm;
+const locusLabel = (vm) => isHostVm(vm) ? "⌂ host" : vm;
 const fmtTs = (t) => { try { return t ? new Date(t * 1000).toLocaleString() : ""; } catch (_) { return String(t); } };
 const seatBox = { borderTop: "1px solid var(--edge)", marginTop: 10, paddingTop: 10 };
 const seatCode = { fontFamily: "ui-monospace, monospace", fontSize: 11, whiteSpace: "pre-wrap", overflowWrap: "anywhere",
@@ -7214,7 +7295,95 @@ function AgentsBox({ vm, backend, nowS }) {
    context-vs-threshold meter (steward-stat/steward-meter), a pending chip with a
    grace countdown, and ↻ roll now / ✕ cancel roll (POST {action, session_id}).
    A 404 or an empty answer degrades to nothing (kept compact for the tight card). */
-function RolloverMeter({ vm, nowS }) {
+/* t4262 (operator 2026-10-01): the KEEPER card = the locus's serve roster
+   Keeper role (GET /api/locus/keeper?vm=): one session, its backend, the ACTIVE
+   model (+ "→ <pending> from next turn" when a pick is staged), ONE context
+   gauge = that session's own rollover gauge (tokens / window), and a separate
+   "relayed" line for the cumulative total the old card mislabelled as context.
+   The picker lists EVERY catalog entry (label + id, grouped by backend — no
+   default-only filter) plus a free-text id tagged "unverified"; a pick POSTs
+   {action:"set_model"} to /api/locus/keeper (staged → next turn). Re-fetches
+   when the locus dropdown changes (vm) and every 10 s. */
+function KeeperCard({ vm, nowS }) {
+  const [d, setD] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState(null);
+  const [custom, setCustom] = useState(null);     // free-text model id editor (no window.prompt in Electron)
+  const load = useCallback(() => api("/api/locus/keeper" + seatQ(vm), { timeout: 25000 })
+    .then(j => setD(j))
+    .catch(e => setD({ ok: false, error: (e.body && e.body.error) || e.message || String(e) })), [vm]);
+  useEffect(() => { setD(null); setNote(null); setCustom(null); load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
+  const k = (n) => Number(n || 0).toLocaleString();
+  const kp = d && d.keeper;
+  const pick = (model, backend) => {
+    if (busy) return;
+    setBusy(true); setNote(null);
+    const body = { vm: vm || "@keeper", action: "set_model", model, by: "station-ui" };
+    if (backend && kp && backend !== kp.backend) body.backend = backend;
+    api("/api/locus/keeper", { method: "POST", timeout: 30000, body: JSON.stringify(body) })
+      .then(r => { setNote((r.staged ? "staged → " : "model → ") + (r.pending_model || r.model || "(serve default)") + (r.staged ? " from the next turn" : " (applied)")); load(); })
+      .catch(e => setNote("error: " + ((e.body && e.body.error) || e.message || String(e))))
+      .finally(() => setBusy(false));
+  };
+  const MODEL_ID_RE = /^[a-z0-9][a-z0-9._:\/-]{2,255}$/i;
+  const title = html`<span style=${{ fontWeight: 600 }}>🛡 Keeper — ${locusLabel(vm)} (serve)</span>`;
+  if (!d) return html`<div className="steward-readout ds-card" style=${{ border: "1px solid var(--edge)", borderRadius: 6, padding: 8 }}>${title}<div style=${{ color: "var(--dim)", fontSize: 11 }}>⏳ reading the serve roster…</div></div>`;
+  if (!d.ok || !kp) return html`<div className="steward-readout ds-card" style=${{ border: "1px solid var(--edge)", borderRadius: 6, padding: 8 }}>${title}
+      <div style=${{ color: "var(--bad)", fontSize: 11, marginTop: 4 }}>${d.error || "keeper unavailable"}</div>
+      ${d.serve && d.serve.url && html`<div style=${{ color: "var(--dim)", fontSize: 11 }}>serve: <code>${d.serve.url}</code></div>`}</div>`;
+  const g = kp.gauge;
+  const pct = g && g.window ? Math.min(100, Math.round(10 * (g.pct || 100 * g.tokens / g.window)) / 10) : null;
+  const models = d.models || [];
+  const groups = [];
+  models.forEach(m => { let grp = groups.find(x => x.backend === m.backend); if (!grp) { grp = { backend: m.backend, items: [] }; groups.push(grp); } grp.items.push(m); });
+  const cur = kp.model || "";
+  const curKey = (kp.backend || "") + "|" + cur;
+  const listed = models.some(m => (m.backend || "") + "|" + (m.model || "") === curKey);
+  const picker = custom !== null
+    ? html`<span style=${{ display: "inline-flex", gap: 4, alignItems: "center" }}>
+        <input type="text" autoFocus value=${custom} disabled=${busy} placeholder="model id (unverified)"
+               style=${{ background: "var(--bg)", color: "var(--fg)", border: "1px solid var(--edge)", borderRadius: 4, padding: "2px 6px", fontSize: 12, minWidth: 240 }}
+               onInput=${e => setCustom(e.target.value)}
+               onKeyDown=${e => { if (e.key === "Enter") { e.preventDefault(); const v = custom.trim(); if (v && !MODEL_ID_RE.test(v)) { setNote("not a model id"); return; } setCustom(null); pick(v, kp.backend); } if (e.key === "Escape") setCustom(null); }} />
+        <span style=${{ fontSize: 10, color: "var(--warn)", border: "1px solid var(--warn)", borderRadius: 10, padding: "0 5px" }} title="typed id — not checked against the catalog; the serve validates the format only">unverified</span>
+        <button className="btn on" disabled=${busy} onClick=${() => { const v = custom.trim(); if (v && !MODEL_ID_RE.test(v)) { setNote("not a model id"); return; } setCustom(null); pick(v, kp.backend); }}>apply</button>
+        <button className="btn" disabled=${busy} onClick=${() => setCustom(null)}>cancel</button>
+      </span>`
+    : html`<select value=${listed ? curKey : (cur ? "__cur__" : curKey)} disabled=${busy} title="every catalog entry the serve knows (baked + Models API), grouped by backend"
+        style=${{ background: "var(--bg)", color: "var(--fg)", border: "1px solid var(--edge)", borderRadius: 4, padding: "2px 6px", fontSize: 12, maxWidth: 360 }}
+        onChange=${e => { const v = e.target.value; if (v === "__custom__") { setCustom(cur); return; } if (v === "__cur__") return; const i = v.indexOf("|"); pick(v.slice(i + 1), v.slice(0, i)); }}>
+        ${groups.map(grp => html`<optgroup key=${grp.backend} label=${grp.backend || "?"}>
+          ${grp.items.map(m => html`<option key=${grp.backend + "|" + m.model} value=${grp.backend + "|" + m.model}>${m.label || m.model}${m.model ? " · " + m.model : ""}</option>`)}
+        </optgroup>`)}
+        ${!listed && cur && html`<option value="__cur__">${cur} (current, off-catalog)</option>`}
+        <option value="__custom__">✎ custom id… (unverified)</option>
+      </select>`;
+  const last = kp.last_turn_ts ? (() => { const a = Math.max(0, nowS - Math.floor(kp.last_turn_ts)); return fmtTs(kp.last_turn_ts) + " (" + (a < 60 ? a + " s" : a < 3600 ? Math.floor(a / 60) + " min" : Math.floor(a / 3600) + " h") + " ago)"; })() : "—";
+  return html`<div className="steward-readout ds-card" style=${{ border: "1px solid var(--edge)", borderRadius: 6, padding: 8, minWidth: 0 }}>
+    <div style=${{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 4 }}>
+      ${title}
+      ${picker}
+      <span style=${{ fontSize: 11, color: kp.busy ? "var(--warn)" : "var(--dim)", fontWeight: 600 }}>${kp.busy ? "● busy" : "○ idle"}</span>
+    </div>
+    <div style=${{ display: "grid", gridTemplateColumns: "max-content 1fr", gap: "2px 10px", fontSize: 11 }}>
+      ${seatKV("session", html`<code title=${kp.native_id ? "native " + kp.native_id : ""}>${kp.session_id || "—"}</code>${kp.label ? " · " + kp.label : ""}`)}
+      ${seatKV("backend", kp.backend || "—")}
+      ${seatKV("model", html`<code>${cur || "(serve default" + (kp.default_model ? ": " + kp.default_model : "") + ")"}</code>${kp.pending_model ? html` <span style=${{ color: "var(--warn)" }} title="staged on the roster; the serve applies it when the next turn launches">→ ${kp.pending_model} from next turn</span>` : ""}`)}
+      ${seatKV("last turn", last)}
+    </div>
+    ${g ? html`<div className="steward-stat" style=${{ marginTop: 4 }}><span className="steward-k">context</span>
+        <span className="steward-v" title=${"the serve's own gauge: " + (g.source || "") + (g.model ? " · " + g.model : "")}>${k(g.tokens)} / ${k(g.window)} (${pct}%)</span></div>
+      <div className="steward-meter"><span className=${"steward-meter-fill" + (pct >= 80 ? " full" : "")} style=${{ width: pct + "%" }}></span></div>`
+      : html`<div style=${{ color: "var(--dim)", fontSize: 11, marginTop: 4 }}>context — no gauge yet for this session</div>`}
+    ${d.relayed && html`<div style=${{ color: "var(--dim)", fontSize: 11, marginTop: 3 }} title=${"cumulative tokens relayed through this serve (" + (d.relayed.source || "") + ") — NOT the context window"}>relayed today: ${k(d.relayed.tokens)} tok · ${k(d.relayed.runs)} runs${d.relayed.cost_usd ? " · ≈ $" + Number(d.relayed.cost_usd).toFixed(2) : ""}</div>`}
+    <${RolloverMeter} vm=${vm} nowS=${nowS} gauge=${false} />
+    ${note && html`<div style=${{ fontSize: 11, marginTop: 4, color: note.startsWith("error") ? "var(--bad)" : "var(--dim)" }}>${note}</div>`}
+    ${(d.errors || []).length > 0 && html`<div style=${{ fontSize: 11, marginTop: 2, color: "var(--warn)" }}>${d.errors.join(" · ")}</div>`}
+    <div style=${{ color: "var(--dim)", fontSize: 10, marginTop: 4 }}>serve <code>${d.serve && d.serve.url}</code></div>
+  </div>`;
+}
+
+function RolloverMeter({ vm, nowS, gauge = true }) {
   const [d, setD] = useState(null);      // null = first load; false = absent/empty (render nothing); else the doc
   const [busy, setBusy] = useState(false);
   const load = useCallback(() => {
@@ -7243,9 +7412,10 @@ function RolloverMeter({ vm, nowS }) {
       <span className="steward-k"><b>rollover</b></span>
       <span className="steward-v" style=${{ fontSize: 11 }}><span style=${{ color: pcol, fontWeight: 600 }}>${policy}</span>${d.due ? " · due" : ""}</span>
     </div>
-    ${pct !== null && html`<div className="steward-stat" style=${{ marginTop: 4 }}><span className="steward-k">context</span>
+    ${gauge && pct !== null && html`<div className="steward-stat" style=${{ marginTop: 4 }}><span className="steward-k">context</span>
       <span className="steward-v">${k(used)} / ${k(cap)} tok (${pct}%)</span></div>`}
-    ${pct !== null && html`<div className="steward-meter"><span className=${"steward-meter-fill" + (pct >= 80 ? " full" : "")} style=${{ width: pct + "%" }}></span></div>`}
+    ${gauge && pct !== null && html`<div className="steward-meter"><span className=${"steward-meter-fill" + (pct >= 80 ? " full" : "")} style=${{ width: pct + "%" }}></span></div>`}
+    ${!gauge && pct !== null && html`<div style=${{ color: "var(--dim)", fontSize: 11, marginTop: 2 }}>rolls at ${k(cap)} tok</div>`}
     <div style=${{ display: "flex", alignItems: "center", gap: 8, marginTop: 4, flexWrap: "wrap" }}>
       ${pend && html`<span style=${{ fontSize: 11, color: "var(--warn)", border: "1px solid var(--warn)", borderRadius: 10, padding: "0 6px" }}>⏳ roll pending${grace != null ? " · " + Math.floor(grace / 60) + ":" + String(grace % 60).padStart(2, "0") : ""}</span>`}
       ${pend
@@ -7283,6 +7453,12 @@ function SeatPanel({ vm, section }) {
   const [note, setNote] = useState(null);
   const [showComposed, setShowComposed] = useState(false);
   const [showSteps, setShowSteps] = useState(false);
+  /* 1.0.143: directives are generated per (locus × session kind); the editor
+     edits ONE kind's operator overlay. keeper/chat/worker/local = the standing
+     serve sessions; tmux = the terminal seats (fallback / inference arm). */
+  const [dsess, setDsess] = useState(() => { try { return sessionStorage.getItem("steward_dir_session") || "keeper"; } catch (_) { return "keeper"; } });
+  const pickDsess = (k) => { setText(null); setSaved(""); setDsess(k); try { sessionStorage.setItem("steward_dir_session", k); } catch (_) {} };
+  const dirQ = (vm) => seatQ(vm) + "&session=" + encodeURIComponent(dsess);
   const [bm, setBm] = useState(null);          // /api/b/model doc
   const [hand, setHand] = useState(null);      // /api/frontier/handoff doc
   const [htext, setHtext] = useState(null);
@@ -7325,20 +7501,20 @@ function SeatPanel({ vm, section }) {
     { const be = frontierKeeperBackend(); if (be) setKeeperBe(be);
       else api("/api/term/backends?vm=@keeper", { timeout: 15000 }).then(d => { const lb = d && d.frontier && d.frontier.live_backend; if (lb === "codex" || lb === "claude-code") setKeeperBe(lb); }).catch(() => {}); }
     api("/api/frontier/state" + seatQ(vm), { timeout: 25000 }).then(setRstate).catch(() => {});
-    api("/api/frontier/directive").then(d => { setDirv(d); if (text === null) { setText(d.text || ""); setSaved(d.text || ""); } })
+    api("/api/frontier/directive" + dirQ(vm)).then(d => { setDirv(d); if (text === null) { setText(d.text || ""); setSaved(d.text || ""); } })
       .catch(e => setErr(e.message || "directive load failed"));
-    api("/api/frontier/handoff").then(d => { setHand(d);
+    api("/api/frontier/handoff" + seatQ(vm)).then(d => { setHand(d);
         // 1.0.65: the init prompt is CONSUMED at seat launch — when the file is
         // gone (handed off) the field empties too; never keep showing stale text.
         if (htext === null || (!d.exists && hsaved !== "")) { setHtext(d.text || ""); setHsaved(d.text || ""); } })
       .catch(() => {});
-    api("/api/frontier/models").then(setModels).catch(() => {});
-    api("/api/b/model").then(setBm).catch(() => {});
+    api("/api/frontier/models" + seatQ(vm)).then(setModels).catch(() => {});
+    api("/api/b/model" + seatQ(vm)).then(setBm).catch(() => {});
     api("/api/mct2/status" + seatQ(vm)).then(setM2s).catch(() => {});
     api("/api/frontier/delegate").then(setDeleg).catch(() => {});
-    api("/api/frontier/limits").then(setLim).catch(() => setLim(false));  // p515: 404 → false → badge renders nothing
+    api("/api/frontier/limits" + seatQ(vm)).then(setLim).catch(() => setLim(false));  // p515: 404 → false → badge renders nothing
     api("/api/gpt" + seatQ(vm)).then(setGpt).catch(e => setGpt({ error: e.message || "GPT settings unavailable" }));
-  }, [vm]);
+  }, [vm, dsess]);
   /* board t7 (operator 2026-09-10): delegate-only = the seat ROUTES, subagents
      work. Persisted server-side; lands in the directive (claude-code: next
      launch; mct: next turn) and a live seat is told right away. */
@@ -7355,7 +7531,7 @@ function SeatPanel({ vm, section }) {
     delegate-only (subagents do the work)</label>`;
   const setBModel = (value) => {
     setBusy(true); setErr(null); setNote(null);
-    api("/api/b/model", { method: "POST", body: JSON.stringify({ model: value }) })
+    api("/api/b/model" + seatQ(vm), { method: "POST", body: JSON.stringify({ model: value }) })
       .then(d => { setBm(d); setNote("B model → " + (value || "package default") + " · console B calls now; mct seat/daemon next launch"); })
       .catch(e => setErr(e.message || "B model save failed")).finally(() => setBusy(false));
   };
@@ -7394,35 +7570,35 @@ function SeatPanel({ vm, section }) {
   const saveDirective = () => {
     if (busy || text === null) return;
     setBusy(true); setErr(null); setNote(null);
-    api("/api/frontier/directive", { method: "POST", body: JSON.stringify({ text }), timeout: 30000 })
-      .then(d => { setSaved(text); setDirv(d); setNote("directive saved — next claude-code launch / next mct turn"); })
+    api("/api/frontier/directive" + dirQ(vm), { method: "POST", body: JSON.stringify({ text }), timeout: 30000 })
+      .then(d => { setSaved(text); setDirv(d); setNote(dsess + " overlay saved — " + (dsess === "tmux" ? "next claude-code launch / next mct turn" : "the " + dsess + " session's next turn")); })
       .catch(e => setErr(e.message || "save failed")).finally(() => setBusy(false));
   };
   const resetDirective = () => {
     if (busy) return;
     setBusy(true); setErr(null);
-    api("/api/frontier/directive", { method: "POST", body: JSON.stringify({ text: "" }), timeout: 30000 })
-      .then(d => { setText(d.text || ""); setSaved(d.text || ""); setDirv(d); setNote("directive reset to the shipped default"); })
+    api("/api/frontier/directive" + dirQ(vm), { method: "POST", body: JSON.stringify({ text: "" }), timeout: 30000 })
+      .then(d => { setText(d.text || ""); setSaved(d.text || ""); setDirv(d); setNote(dsess + " overlay cleared — the generated directive alone"); })
       .catch(e => setErr(e.message || "reset failed")).finally(() => setBusy(false));
   };
   const saveHandoff = () => {
     if (busy || htext === null) return;
     setBusy(true); setErr(null); setNote(null);
-    api("/api/frontier/handoff", { method: "POST", body: JSON.stringify({ text: htext }), timeout: 30000 })
+    api("/api/frontier/handoff" + seatQ(vm), { method: "POST", body: JSON.stringify({ text: htext }), timeout: 30000 })
       .then(d => { setHsaved(htext); setHand(d); setNote("handoff saved — " + d.path); })
       .catch(e => setErr(e.message || "handoff save failed")).finally(() => setBusy(false));
   };
   const deleteHandoff = () => {
     if (busy) return;
     setBusy(true); setErr(null); setNote(null);
-    api("/api/frontier/handoff", { method: "POST", body: JSON.stringify({ text: "" }), timeout: 30000 })
+    api("/api/frontier/handoff" + seatQ(vm), { method: "POST", body: JSON.stringify({ text: "" }), timeout: 30000 })
       .then(d => { setHtext(""); setHsaved(""); setHand(d); setNote("handoff deleted — none on file"); })
       .catch(e => setErr(e.message || "handoff delete failed")).finally(() => setBusy(false));
   };
   const setModel = (key, value) => {
     if (busy) return;
     setBusy(true); setErr(null);
-    api("/api/frontier/models", { method: "POST", body: JSON.stringify({ [key]: value }) })
+    api("/api/frontier/models" + seatQ(vm), { method: "POST", body: JSON.stringify({ [key]: value }) })
       .then(d => { setModels(d);
         const how = (d.applied_live && d.applied_live[key]) || "next launch of that seat";
         setNote(key + " model → " + (value || "Claude Code default") + " · " + how); load(); })
@@ -7541,9 +7717,15 @@ function SeatPanel({ vm, section }) {
         ${seatTab && keeperBe && seatTab !== keeperBe ? html`<button className="btn" style=${{ fontSize: 11, color: "var(--dim)" }} title="drop the manual pick — follow the keeper provider again" onClick=${() => pickSeatTab("")}>↩ follow keeper</button>` : null}
       </div>
       <div style=${{ display: "grid", gridTemplateColumns: "1fr", gap: 10, marginTop: 6, alignItems: "start" }}>
-        ${activeSeat === "claude-code" && html`<div className="steward-readout ds-card" style=${secBox}>
-          <div style=${{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 4 }}>
-            <span style=${{ fontWeight: 600 }}>🧠 claude-code — A, direct seat</span>
+        ${/* t4262 (operator 2026-10-01): the Keeper card is the locus's SERVE
+              roster Keeper role (one session, one model, the serve's own context
+              gauge); the tmux seat (keeper-claude) is demoted to the collapsed
+              EMERGENCY sub-card below with its existing controls intact. */""}
+        ${activeSeat === "claude-code" && html`<${KeeperCard} vm=${vm} nowS=${nowS} />`}
+        ${activeSeat === "claude-code" && html`<details className="steward-readout ds-card" style=${Object.assign({}, secBox, { borderStyle: "dashed" })}>
+          <summary style=${{ cursor: "pointer", fontSize: 12, color: "var(--dim)" }} title="the tmux keeper-claude seat — NOT the Keeper; the fallback surface when the serve is down">🧠 terminal seat (tmux) · emergency</summary>
+          <div style=${{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", marginBottom: 4, marginTop: 6 }}>
+            <span style=${{ fontWeight: 600 }}>claude-code — direct seat</span>
             ${modelSel("claude-code")}
             ${delegBox("claude-code")}
           </div>
@@ -7551,7 +7733,6 @@ function SeatPanel({ vm, section }) {
           <${LimitsBadge} lim=${lim} />
           <${UsageBlock} backend="claude-code" showCache=${false} />
           <${SeatMeter} vm=${vm} backend="claude-code" nowS=${nowS} />
-          <${RolloverMeter} vm=${vm} nowS=${nowS} />
           <${AgentsBox} vm=${vm} backend="claude-code" nowS=${nowS} />
           <div style=${{ marginTop: 6, display: "flex", gap: 6, flexWrap: "wrap" }}>
             ${wipeConfirm !== "claude-code" && html`<button className="btn" disabled=${busy}
@@ -7562,7 +7743,7 @@ function SeatPanel({ vm, section }) {
                 <button className="btn" onClick=${() => setWipeConfirm(false)}>cancel</button>`}
             </div>
             ${wipeConfirm === "claude-code" && html`<div className="steward-thr-est">Wipe <b>claude-code</b>'s Claude state on <b>${locusLabel(vm)}</b>? Only its per-launch session dirs (<code>~/.claude-sessions/*-frontier</code>) are DELETED. The shared OAuth login and the MCT conversation archive are preserved.</div>`}
-        </div>`}
+        </details>`}
         ${/* 2026-09-18 (operator): the "MCT conversation" explainer block was
              removed along with the mct picker option. */""}
         ${activeSeat === "codex" && html`<div className="steward-readout" style=${secBox}>
@@ -7663,16 +7844,23 @@ function SeatPanel({ vm, section }) {
       </div>`}
     ${section === "directive" && html`
     <div style=${{ display: "flex", alignItems: "center", gap: 8, marginTop: 10 }}>
-      <span style=${{ flex: 1, fontWeight: 600 }}>📜 frontier directive
-        <span style=${{ fontWeight: 400, color: "var(--dim)" }}> — the exact text A is handed each turn${dirv ? " · source: " + dirv.source : ""}${dirty ? " · unsaved" : ""}</span></span>
-      <button className="btn" disabled=${busy || !dirv} onClick=${resetDirective} title="restore the shipped default directive">default</button>
+      <span style=${{ flex: 1, fontWeight: 600 }}>📜 directive ·
+        <select value=${dsess} disabled=${busy || dirty} onChange=${e => pickDsess(e.target.value)}
+          title="directives are generated per session kind on this locus — pick whose operator overlay to edit"
+          style=${{ background: "var(--bg)", color: "var(--fg)", border: "1px solid var(--edge)", borderRadius: 4, padding: "1px 4px", fontSize: 12, marginLeft: 4 }}>
+          ${((dirv && dirv.sessions) || ["keeper", "chat", "worker", "local", "tmux"]).map(k => html`<option key=${k} value=${k}>${(dirv && dirv.titles && dirv.titles[k]) || k}</option>`)}
+        </select>
+        <span style=${{ fontWeight: 400, color: "var(--dim)" }}> — operator overlay, appended to the generated ${dsess} directive${dirv ? " · " + dirv.source + " · rendered " + ((dirv.rendered_chars || {})[dsess] || 0) + " chars" : ""}${dirty ? " · unsaved" : ""}</span></span>
+      <button className="btn" disabled=${busy || !dirv} onClick=${resetDirective} title="clear this overlay — the generated directive alone">default</button>
       <button className=${"btn" + (dirty ? " on" : "")} disabled=${busy || !dirty} onClick=${saveDirective}>${busy ? "…" : "save"}</button>
     </div>
     <textarea value=${text === null ? "" : text} disabled=${text === null || busy}
       onInput=${e => { setText(e.target.value); setNote(null); }} rows=${10}
       style=${{ width: "100%", marginTop: 6, boxSizing: "border-box", resize: "vertical", fontFamily: "ui-monospace, monospace", fontSize: 11,
                 background: "var(--panel, #0b1622)", color: "var(--fg, #cde)", border: "1px solid var(--edge)", borderRadius: 4, padding: 6 }} />
+    ${dirv && dirv.legacy && dirv.legacy.legacy_full && html`<div style=${{ color: "var(--warn)", fontSize: 11, marginTop: 4 }}>⚠ ${dirv.legacy.note}</div>`}
     <div className="steward-thr-est">
+      <b>${dsess}</b>: ${dirv ? dirv.how : ""} ·
       <b>claude-code</b>: ${dirv && dirv.composed ? dirv.composed["claude-code"].how : "--append-system-prompt at every seat launch"} ·
       <b>mct</b>: ${dirv && dirv.composed ? dirv.composed.mct.how : "governing_instruction via B every turn"}.
       Purpose: token economy — A is told to use the local agent (B) for grep / fs / search / bulk reads first, and to act directly when that is plainly better. Not a restriction.
@@ -7680,6 +7868,8 @@ function SeatPanel({ vm, section }) {
     </div>
     ${showComposed && dirv && dirv.composed && html`
       <div style=${{ marginTop: 6 }}>
+        <div className="steward-k">${dsess} receives (generated from the templates + this locus's facts + the operator layers):</div>
+        <div style=${seatCode}>${dirv.rendered || ""}</div>
         <div className="steward-k">claude-code seat receives (--append-system-prompt):</div>
         <div style=${seatCode}>${dirv.composed["claude-code"].text}</div>
         <div className="steward-k">claude-code seat settings.json (fs deny-list appears here when mediated):</div>
@@ -7693,7 +7883,7 @@ function SeatPanel({ vm, section }) {
       </div>`}
     <div style=${{ display: "flex", alignItems: "center", gap: 8, marginTop: 14 }}>
       <span style=${{ flex: 1, fontWeight: 600 }}>🚀 session init prompt (frontier handoff)
-        <span style=${{ fontWeight: 400, color: "var(--dim)" }}> — handed to the NEXT frontier seat at launch, with the directive; consumed once · ${hand && hand.exists ? "pending" : "none pending"}${hand && hand.exists && hand.mtime ? " · written " + new Date(hand.mtime * 1000).toLocaleString() : ""}${hdirty ? " · unsaved" : ""}</span></span>
+        <span style=${{ fontWeight: 400, color: "var(--dim)" }}> — a TOOLSERVER handoff row (handoff_pull): the next session on this locus receives it from its SessionStart hook; consumed once per session · ${hand && hand.exists ? "pending" : "none pending"}${hand && hand.exists && hand.mtime ? " · written " + new Date(hand.mtime * 1000).toLocaleString() : ""}${hdirty ? " · unsaved" : ""}</span></span>
       <button className="btn" disabled=${busy || !hand || !hand.exists} onClick=${deleteHandoff} title="discard the pending init prompt">discard</button>
       <button className=${"btn" + (hdirty ? " on" : "")} disabled=${busy || !hdirty} onClick=${saveHandoff}>${busy ? "…" : "save"}</button>
     </div>
@@ -7705,7 +7895,7 @@ function SeatPanel({ vm, section }) {
     <div className="steward-thr-est">
       Per-session start prompt (1.0.65): at the next launch of a frontier seat (claude-code: appended to
       the system prompt after the directive; mct: composed into operator-guidance.md) the text is handed
-      off and the file <b>${hand ? hand.path : "~/.config/hugpy-station/frontier-handoff.md"}</b> is removed — it never lingers into a later session.
+      off: <b>${hand ? hand.path : "toolserver handoff row"}</b> is marked consumed by the session that pulled it — it never lingers into a later session, and no file is involved.
     </div>
     `}
     ${note && html`<div style=${{ color: "var(--warn)", fontSize: 11, marginTop: 4 }}>✓ ${note}</div>`}
@@ -8614,6 +8804,62 @@ function LogFeed() {
   </div>`;
 }
 
+/* 🧭 provenance — durable agent/model/tool/edit records intersected with the
+   live log scanner.  The investigator request is explicit: expected output is
+   supplied by the operator, then the local keeper compares it to the observed
+   execution chain. */
+function ProvenancePanel() {
+  const [doc, setDoc] = useState({ events: [], findings: [] });
+  const [expected, setExpected] = useState("");
+  const [reply, setReply] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const load = React.useCallback(() => api("/api/provenance?limit=500")
+    .then(d => { setDoc(d || { events: [], findings: [] }); setErr(null); })
+    .catch(e => setErr(e.message || "provenance unavailable")), []);
+  useEffect(() => { load(); const id = setInterval(load, 1500); return () => clearInterval(id); }, [load]);
+  const investigate = () => {
+    if (!expected.trim() || busy) return;
+    setBusy(true); setReply("");
+    api("/api/provenance/investigate", { method: "POST", body: JSON.stringify({ expected }) })
+      .then(d => { if (!d.ok) throw new Error(d.error || "investigation failed"); setReply(d.reply || "(no reply)"); load(); })
+      .catch(e => setErr(e.message || String(e))).finally(() => setBusy(false));
+  };
+  const queryEditor = (f) => {
+    const message = "Finding " + f.id + " intersects an edited item. Review the observed log and execution chain for " +
+      (f.summary || f.signature || f.kind) + ". Identify the first divergent edit and report the smallest corrective test.";
+    api("/api/provenance/query", { method: "POST", body: JSON.stringify({ finding_id: f.id, message }) })
+      .then(() => load()).catch(e => setErr(e.message || "query failed"));
+  };
+  const when = (ts) => ts ? new Date(ts * 1000).toLocaleTimeString() : "—";
+  const kindColor = (k) => k === "log" ? "var(--warn)" : k === "tool_call" || k === "tool_result" ? "var(--accent)" : "var(--fg)";
+  const depthOf = (e, all, seen = new Set()) => {
+    if (!e.parent_id || seen.has(e.id)) return 0;
+    seen.add(e.id); const p = all.find(x => x.id === e.parent_id);
+    return p ? Math.min(8, 1 + depthOf(p, all, seen)) : 0;
+  };
+  return html`<div style=${{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+    <div style=${{ padding: "6px 8px", borderBottom: "1px solid var(--edge)", fontSize: 11 }}>
+      <b>durable provenance</b> · model output, tool calls, edits, and intersecting logs are retained in the Station ledger
+      <textarea value=${expected} onInput=${e => setExpected(e.target.value)} placeholder="Expected result / invariant for the local investigator…"
+        style=${{ display: "block", width: "100%", minHeight: 46, marginTop: 5, boxSizing: "border-box", background: "var(--bg)", color: "var(--fg)", border: "1px solid var(--edge)", font: "11px ui-monospace, monospace" }} />
+      <button className="btn" disabled=${busy || !expected.trim()} onClick=${investigate} style=${{ marginTop: 5, fontSize: 10 }}>${busy ? "investigating…" : "compare expected vs observed"}</button>
+      ${err && html`<span style=${{ color: "var(--bad)", marginLeft: 8 }}>${err}</span>`}
+      ${reply && html`<pre style=${{ maxHeight: 220, overflow: "auto", whiteSpace: "pre-wrap", margin: "6px 0 0", color: "var(--fg)" }}>${reply}</pre>`}
+    </div>
+    <div style=${{ padding: "4px 8px", color: "var(--warn)", fontSize: 11, borderBottom: "1px solid var(--edge)" }}>
+      ${((doc.findings || []).length)} open propagated finding(s)
+      ${(doc.findings || []).slice(0, 8).map(f => html`<div key=${f.id} style=${{ marginTop: 3, display: "flex", gap: 6, alignItems: "baseline" }}><span><b>${f.severity || "warning"}</b> ${f.kind}: ${f.summary || f.signature}</span><button className="btn" onClick=${() => queryEditor(f)} style=${{ fontSize: 10, padding: "0 4px" }}>query editor</button></div>`)}
+    </div>
+    <div style=${{ flex: 1, minHeight: 0, overflow: "auto", padding: "4px 8px", font: "11px ui-monospace, monospace" }}>
+      ${(doc.events || []).map(e => html`<div key=${e.id} style=${{ whiteSpace: "pre-wrap", overflowWrap: "anywhere", borderBottom: "1px solid rgba(128,128,128,.12)", padding: "3px 0", marginLeft: depthOf(e, doc.events || []) * 18 }}>
+        <span style=${{ color: "var(--dim)" }}>${when(e.ts)}</span> <span style=${{ color: "var(--dim)" }}>${e.parent_id ? "↳" : "•"}</span> <span style=${{ color: kindColor(e.kind) }}>${e.kind}</span> <span style=${{ color: "var(--accent)" }}>${e.actor || e.source}</span> ${JSON.stringify(e.body).slice(0, 1000)}
+        ${e.items && e.items.length ? html`<div style=${{ color: "var(--dim)" }}>↳ ${e.items.map(i => i.item + (i.line ? ":" + i.line : "")).join(", ")}</div>` : ""}
+      </div>`)}
+    </div>
+  </div>`;
+}
+
 /* 📜 journal — a live `journalctl -f` of the LOCUS's STATION KEEPER USER
    (operator 2026-09-15: "the log, it should be a journalctl -f of the station's
    keeper user"). What it used to show — this console backend's OWN python log
@@ -8804,6 +9050,8 @@ function FeedGroupDrawer({ vm, embed }) {
       <button className=${"btn" + (sub === "live" ? " on" : "")} onClick=${() => setSub("live")}>📡 live</button>
       <button className=${"btn" + (sub === "b" ? " on" : "")} onClick=${() => setSub("b")}>💬 B</button>
       <button className=${"btn" + (sub === "log" ? " on" : "")} title="journalctl -f of this locus's station keeper user (the console backend's own ring is a click inside)" onClick=${() => setSub("log")}>📜 log</button>
+      <button className=${"btn" + (sub === "provenance" ? " on" : "")} title="all retained model/tool/edit events intersected with the log feeds" onClick=${() => setSub("provenance")}>🧭 provenance</button>
+      <button className=${"btn" + (sub === "browser" ? " on" : "")} title="interactive webpage surface; use the full Observability app for network-level capture" onClick=${() => setSub("browser")}>🌐 browser</button>
     </div>
     <div style=${{ flex: 1, minHeight: 0, position: "relative", display: "flex", flexDirection: "column" }}>
       ${/* 2026-09-15: bugs is the local-agent REVIEW of the active locus (no VM
@@ -8813,6 +9061,54 @@ function FeedGroupDrawer({ vm, embed }) {
       ${sub === "live" && html`<${LiveView} />`}
       ${sub === "b" && html`<${BChatDrawer} />`}
       ${sub === "log" && html`<${JournalFeed} vm=${vm} />`}
+      ${sub === "provenance" && html`<${ProvenancePanel} />`}
+      ${sub === "browser" && html`<${StationBrowserPanel} />`}
+    </div>
+  </div>`;
+}
+
+/* 🌐 browser — the in-Station webpage surface.  This is intentionally a
+   normal iframe: the Station can display and navigate a page here, while the
+   Electron Observability app remains the privileged capture surface for
+   cross-origin console/network events. */
+function StationBrowserPanel() {
+  const [url, setUrl] = useState(() => { try { return localStorage.getItem("station_browser_url") || "https://example.com"; } catch (_) { return "https://example.com"; } });
+  const [active, setActive] = useState(url);
+  const [status, setStatus] = useState("ready");
+  const surfaceRef = React.useRef(null);
+  const native = false;
+  useEffect(() => {
+    if (!native || !surfaceRef.current) return undefined;
+    const place = () => { const r = surfaceRef.current.getBoundingClientRect(); window.stationBrowser.setBounds({ x: r.left, y: r.top, width: r.width, height: r.height }); };
+    window.stationBrowser.show({ x: 0, y: 0, width: 0, height: 0 }); place();
+    window.addEventListener("resize", place);
+    const ro = new ResizeObserver(place); ro.observe(surfaceRef.current);
+    return () => { ro.disconnect(); window.removeEventListener("resize", place); window.stationBrowser.hide(); };
+  }, [native]);
+  useEffect(() => {
+    if (!native) return undefined;
+    return window.stationBrowser.onEvent ? window.stationBrowser.onEvent(e => {
+      setStatus(e.kind === "browser_console" ? "console captured" : e.kind === "browser_error" ? "page error" : e.kind);
+      api("/api/provenance/ingest", { method: "POST", body: JSON.stringify({ kind: e.kind, body: e.body, source: "station-browser", actor: "browser", operation: "browser", trace_id: String((e.body || {}).requestId || "") }) }).catch(() => {});
+    }) : undefined;
+  }, [native]);
+  const open = () => {
+    const next = url.trim();
+    if (!/^https?:\/\//i.test(next)) { setStatus("enter an http(s) URL"); return; }
+    setActive(next); setStatus("loading…");
+    try { localStorage.setItem("station_browser_url", next); } catch (_) {}
+    api("/api/provenance/ingest", { method: "POST", body: JSON.stringify({ kind: "browser_navigation", body: { url: next, phase: "start" }, source: "station-browser", actor: "operator", operation: "navigate" }) }).catch(() => {});
+    if (native) window.stationBrowser.navigate(next);
+  };
+  return html`<div style=${{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+    <div style=${{ display: "flex", gap: 6, alignItems: "center", padding: "5px 8px", borderBottom: "1px solid var(--edge)", flex: "none" }}>
+      <input value=${url} onInput=${e => setUrl(e.target.value)} onKeyDown=${e => { if (e.key === "Enter") open(); }} style=${{ flex: 1, minWidth: 0, background: "var(--bg)", color: "var(--fg)", border: "1px solid var(--edge)", borderRadius: 4, padding: "4px 6px", fontSize: 11 }} placeholder="https://page-to-inspect" />
+      <button className="btn" onClick=${open}>open</button><span style=${{ color: "var(--dim)", fontSize: 10 }}>${status}</span>
+    </div>
+    <div style=${{ padding: "4px 8px", color: "var(--dim)", fontSize: 10, borderBottom: "1px solid var(--edge)", display: "flex", gap: 8, alignItems: "center" }}>Use this for the live page surface. <button className="btn" onClick=${() => window.stationBrowser && window.stationBrowser.openCapture ? window.stationBrowser.openCapture() : null} style=${{ fontSize: 10 }}>open live capture browser</button><span>Console and action events are retained in provenance.</span></div>
+    <div ref=${surfaceRef} style=${{ flex: 1, minHeight: 300, background: "white", position: "relative" }}>
+      ${!native && html`<iframe src=${active} title="Station browser" onLoad=${() => setStatus("loaded")} style=${{ width: "100%", height: "100%", minHeight: 300, border: 0 }} />`}
+      ${native && html`<div style=${{ padding: 12, color: "#333", fontSize: 12 }}>Native Station browser active — page output and console events are retained in 🧭 provenance.</div>`}
     </div>
   </div>`;
 }
@@ -8854,12 +9150,42 @@ function SurfaceTabs() {
    normal-flow composer would sit hidden behind it. Instead we append our own
    flex-none child at the bottom of that pane and PORTAL into it: the terminal
    host (flex:1) shrinks and the composer shows directly beneath it, full pane
-   width, no geometry math. Composes a prompt (+ attached media) and POSTs
-   /api/mct/prompt, which saves it to the active session's workspace prompt-inbox
-   AND auto-sends it to the live frontier seat: for a host locus the server types
-   a one-line pointer into the running MCT REPL and presses Enter (see mct_prompt
-   in server.py) — no manual send needed. */
+   width, no geometry math.
+   1.0.143 (operator 2026-10-01, "most of the time the prompt is never even
+   sent"): the composer DELIVERS the prompt itself — POST /api/prompt/send puts
+   the text (+ attachments) straight into the target session: the locus's serve
+   console session (selected one, or the keeper head) or its Terminal tmux seat.
+   Every send shows delivered / queued / NOT delivered + the reason, and a
+   serve send is followed until its turn is done. The old prompt-inbox
+   file-pointer (/api/mct/prompt + a typed "Handle the operator prompt at …"
+   pointer) is gone from the normal path; it survives only as the explicit,
+   labelled "save to inbox (file-pointer fallback)" button after a failed send.
+   Clipboard images attach (MIME image/*); copied paths stay text. Speech
+   (dictation + reply read-aloud) is opt-in, default OFF (prompt-tools.js). */
+const PROMPT_TARGETS = [
+  ["auto", "→ auto (locus keeper surface)", "serve when the locus's keeper surface is serve (the console's selected session, else the keeper head), else its terminal seat"],
+  ["serve", "→ serve · selected session", "the serve console session selected in the /ac console (ac_selected)"],
+  ["serve-head", "→ serve · keeper head", "the serve keeper session (roster → rollover head)"],
+  ["seat", "→ terminal seat (tmux)", "type into the locus's terminal seat for the chosen frontier backend (text, then a separate Enter)"]];
+const PROMPT_STATE_COLOR = { delivered: "var(--ok, #5fd08a)", done: "var(--ok, #5fd08a)", queued: "var(--warn, #e0b341)",
+  running: "var(--warn, #e0b341)", sent: "var(--warn, #e0b341)", unconfirmed: "var(--warn, #e0b341)",
+  stalled: "var(--warn, #e0b341)", held: "var(--bad, #e06c6c)", failed: "var(--bad, #e06c6c)", gone: "var(--bad, #e06c6c)" };
+const promptLS = (k, dflt) => { try { const v = localStorage.getItem(k); return v == null ? dflt : v; } catch (_) { return dflt; } };
+const promptLSset = (k, v) => { try { localStorage.setItem(k, v); } catch (_) {} };
+/* the locus a send went to, pinned for its follow-up calls (vmScope would
+   otherwise add whatever locus is selected NOW); "@keeper" = this host */
+const promptVm = (d) => (!d || !d.locus || d.locus === "host") ? "@keeper" : d.locus;
+function promptSendLabel(d) {
+  if (!d) return "";
+  const where = d.target === "serve" ? ("serve " + (d.session_id || "?")) : (d.target === "seat" ? ("seat " + (d.seat || "?")) : (d.target || "?"));
+  if (d.state === "delivered") return "✓ delivered → " + where + (d.detail ? " · " + d.detail : "");
+  if (d.state === "queued") return "⏳ queued → " + where + (d.detail ? " · " + d.detail : "");
+  if (d.state === "unconfirmed") return "? sent, not confirmed → " + where + " · " + (d.reason || "");
+  if (d.state === "saved") return "🗂 " + (d.note || "saved (file-pointer fallback) — NOT delivered");
+  return "✗ NOT delivered → " + where + " · " + (d.reason || "unknown error");
+}
 function PromptPanel() {
+  const PT = window.__fvPromptTools;
   const [open, setOpen] = useState(false);
   const [h, setH] = useState(() => { try { return parseInt(localStorage.getItem("prompt_h"), 10) || 50; } catch (_) { return 50; } });
   const [text, setText] = useState("");
@@ -8869,6 +9195,13 @@ function PromptPanel() {
   const [rev, setRev] = useState(null);          // ✎ B revision preview {revised, corrections, ambiguities}
   const [revBusy, setRevBusy] = useState(false);
   const [dock, setDock] = useState(null);        // #fv-prompt-dock inside #fv-term-pane (portal target)
+  const [target, setTarget] = useState(() => promptLS("fv-prompt-target", "auto"));
+  const [sent, setSent] = useState(null);       // last /api/prompt/send result (+ .track from /api/prompt/status)
+  const [stt, setStt] = useState(() => promptLS("fv-prompt-stt", "0") === "1");   // speech OFF by default
+  const [tts, setTts] = useState(() => promptLS("fv-prompt-tts", "0") === "1");
+  const [speech, setSpeech] = useState({ s: "idle", d: "" });
+  const dictRef = React.useRef(null);
+  const ttsRef = React.useRef(tts);
   /* todo mode (2026-09-18): a switch flips this composer between sending a prompt
      (OFF, default) and QUEUEING the text as a todo (ON). The type/priority picks
      ride the add; they're disabled while OFF. Reuses the host-native ☑ board's
@@ -8911,6 +9244,43 @@ function PromptPanel() {
     dock.style.minHeight = open ? "90px" : "";
     try { window.dispatchEvent(new Event("resize")); } catch (_) {}
   }, [dock, open, h]);
+  /* 🔊 read-aloud: Esc stops speaking; switching it off stops at once */
+  useEffect(() => {
+    ttsRef.current = tts;
+    if (!tts) { try { window.speechSynthesis && window.speechSynthesis.cancel(); } catch (_) {} return; }
+    const onEsc = (e) => { if (e.key === "Escape" && window.speechSynthesis && window.speechSynthesis.speaking) window.speechSynthesis.cancel(); };
+    window.addEventListener("keydown", onEsc);
+    return () => window.removeEventListener("keydown", onEsc);
+  }, [tts]);
+  useEffect(() => () => { if (dictRef.current) dictRef.current.stop(); }, []);
+  /* follow a serve-delivered prompt until its turn is done (GET /api/prompt/status
+     — the serve queue + events of THAT locus's serve). held/stalled offer retry. */
+  const trackKey = sent && sent.target === "serve" && sent.ok && sent.message_ids ? sent.session_id + "|" + sent.message_ids.join(",") + "|" + (sent.gen || 0) : "";
+  useEffect(() => {
+    if (!trackKey) return;
+    let stop = false, cursor = sent.cursor || 0, sawRun = false, n = 0;
+    const tick = () => {
+      if (stop) return;
+      n += 1;
+      const q = "/api/prompt/status?session_id=" + encodeURIComponent(sent.session_id) + "&ids=" +
+        encodeURIComponent(sent.message_ids.join(",")) + "&since=" + cursor + "&vm=" + encodeURIComponent(promptVm(sent));
+      api(q, { timeout: 20000 }).then(d => {
+        if (stop) return;
+        cursor = d.cursor || cursor;
+        if (d.state === "running") sawRun = true;
+        const st = (d.state === "sent" && sawRun) ? "running" : d.state;
+        setSent(x => (x && x.at === sent.at && (x.gen || 0) === (sent.gen || 0)) ? { ...x, track: { ...d, state: st } } : x);
+        if (d.state === "done") {
+          if (ttsRef.current && PT && d.reply) { const why = PT.speak(window, d.reply); if (why) setNote("🔊 " + why); }
+          stop = true; return;
+        }
+        if (d.state === "failed" || d.state === "gone") { stop = true; return; }
+        if (n < 600) setTimeout(tick, 3000);           // ≤30 min of following
+      }).catch(() => { if (!stop && n < 600) setTimeout(tick, 6000); });
+    };
+    const t0 = setTimeout(tick, 1500);
+    return () => { stop = true; clearTimeout(t0); };
+  }, [trackKey]);
   /* ✎ B readability revision (Ctrl+E): local, free. B checks the wording
      against docs/NOMENCLATURE.md — corrects unambiguous mislabels, asks where
      a term is ambiguous. Preview only; apply replaces the text. */
@@ -8936,44 +9306,108 @@ function PromptPanel() {
     rd.onload = () => setFiles(fs => [...fs, { name: f.name, type: f.type, dataUrl: rd.result }]);
     rd.readAsDataURL(f);
   });
-  /* Deliver the server's pointer line to the live seat OURSELVES, via the ⌨
-     terminal bridge. window.__fvSend(pointer, "frontier", {submit:true}) targets
-     the ACTIVE frontier backend (its ws carries &backend=<chosen>, so it reaches
-     whichever of mct / claude-code is displayed in the station) and submits with
-     a SEPARATE, delayed Enter (an Ink TUI like claude-code drops a combined
-     text+Enter as a paste and won't submit). If the frontier ws is not connected
-     yet (surface never shown), __fvSend connects it and returns false — retry a
-     few times while it opens. */
-  const injectPointer = (pointer, nf, tries) => {
-    const ok = !!(window.__fvSend && window.__fvSend(pointer, "frontier", { submit: true }));
-    if (ok) { setNote("sent → frontier (A)" + (nf ? " · " + nf + " file(s)" : "")); return; }
-    if ((tries || 0) < 8) { setTimeout(() => injectPointer(pointer, nf, (tries || 0) + 1), 300); return; }
-    setNote("saved to inbox — open the ⌨ frontier terminal to receive it");
+  const clipFile = (blob, type) => {
+    const ty = type || blob.type || "image/png";
+    const name = PT ? PT.clipName(ty) : "clipboard.png";
+    try { return new File([blob], name, { type: ty }); } catch (_) { blob.name = name; return blob; }
   };
-  const send = () => {
+  /* Ctrl+V: an IMAGE on the clipboard (MIME image/*, no path type alongside)
+     becomes an attachment; text, file paths and uri-lists paste as text. */
+  const onPaste = (e) => {
+    const cd = e.clipboardData; if (!cd || !PT) return;
+    const cls = PT.classifyClipboard(cd.types, cd.items);
+    if (cls.kind !== "image") return;
+    const fl = cls.index.map(i => cd.items[i] && cd.items[i].getAsFile()).filter(Boolean);
+    if (!fl.length) return;
+    e.preventDefault();
+    addFiles(fl.map(f => clipFile(f, f.type)));
+    setNote("📋 clipboard image attached");
+  };
+  /* 📋 image: read the clipboard on demand (Electron preload stationClipboard
+     when the shell exposes it, else the async Clipboard API). */
+  const pasteImage = async () => {
+    try {
+      const sc = window.stationClipboard;
+      if (sc && sc.readImage) {
+        const im = await sc.readImage();
+        if (im && !im.empty && im.png) {
+          setFiles(fs => [...fs, { name: PT ? PT.clipName("image/png") : "clipboard.png", type: "image/png", dataUrl: im.png }]);
+          setNote("📋 clipboard image attached"); return;
+        }
+      }
+      if (!navigator.clipboard || !navigator.clipboard.read) throw new Error("this browser cannot read clipboard images here — press Ctrl+V in the box");
+      const items = await navigator.clipboard.read();
+      for (const it of items) {
+        const ty = PT ? PT.pickImageType(it.types) : "";
+        if (ty) { addFiles([clipFile(await it.getType(ty), ty)]); setNote("📋 clipboard image attached"); return; }
+      }
+      setNote("📋 no image on the clipboard (text and file paths paste as text)");
+    } catch (e) { setNote("📋 " + (e.message || e)); }
+  };
+  /* 🎙 dictation — Web Speech where it works, the station's Whisper otherwise */
+  const dictation = () => {
+    if (!dictRef.current && PT) {
+      dictRef.current = PT.Dictation({
+        win: window, store: localStorage,
+        transcribe: (blob) => {
+          const fd = new FormData();
+          fd.append("file", blob, "station-voice." + (String(blob.type).indexOf("ogg") >= 0 ? "ogg" : "webm"));
+          const csrf = csrfToken();
+          return fetch("/api/voice/transcribe", { method: "POST", body: fd, credentials: "same-origin",
+              headers: { "X-Console": "1", ...(csrf ? { "X-Console-CSRF": csrf } : {}) } })
+            .then(r => r.json().catch(() => ({})).then(d => { if (!r.ok) throw new Error(d.error || ("HTTP " + r.status)); return d; }))
+            .then(d => d.text || d.transcription || (d.result && d.result.text) || "");
+        },
+        onText: (t) => { if (t) setText(x => (x.trim() ? x.replace(/\s+$/, "") + " " : "") + t); },
+        onState: (s, d) => setSpeech({ s, d }),
+      });
+    }
+    if (dictRef.current) dictRef.current.toggle();
+    else setSpeech({ s: "unavailable", d: "prompt-tools.js did not load" });
+  };
+  const toggleStt = () => { const v = !stt; setStt(v); promptLSset("fv-prompt-stt", v ? "1" : "0"); if (!v && dictRef.current) dictRef.current.stop(); setSpeech({ s: "idle", d: "" }); };
+  const toggleTts = () => {
+    const v = !tts;
+    if (v && PT) { const sup = PT.ttsSupport(window); if (!sup.ok) { setNote("🔊 unavailable: " + sup.reason); return; } }
+    setTts(v); promptLSset("fv-prompt-tts", v ? "1" : "0");
+  };
+  const pickTarget = (v) => { setTarget(v); promptLSset("fv-prompt-target", v); };
+  /* send: the prompt goes to the target session itself. The text stays in the
+     box unless the send was delivered/queued — a failure never loses it. */
+  const send = (extra) => {
     const t = text; if ((!t.trim() && !files.length) || busy) return;
-    const nf = files.length;
     setBusy(true); setNote(null);
-    const mediated = window.__fvBackend && window.__fvBackend.get("frontier") === "mct";
-    /* seat:"tmux" ALWAYS addresses the terminal seat explicitly — the documented
-       escape hatch for the server's serve-mode guard (server.py mct_prompt ~3878
-       refuses to fan a prompt out unless seat=="tmux" while KEEPER_SURFACE=="serve").
-       So the composer's "send" works no matter the surface. NOTE: in serve mode this
-       therefore routes the prompt to the TMUX seat, not the serve-console chat. */
-    const delivery = mediated
-      ? window.__fvMct.submit(t, files)
-      : api("/api/mct/prompt", { method: "POST", timeout: 120000, body: JSON.stringify({ text: t, files, seat: "tmux" }) });
-    delivery
+    const backend = (window.__fvBackend && window.__fvBackend.get("frontier")) || "";
+    const sel = promptLS("ac_selected", "");
+    const body = { text: t, files, target: target === "serve-head" ? "serve" : target,
+                   session_id: target === "serve-head" || target === "seat" ? "" : sel,
+                   seat_backend: backend, force: !!(extra && extra.force) };
+    api("/api/prompt/send", { method: "POST", timeout: 180000, body: JSON.stringify(body) })
+      .then(d => d, e => ({ ok: false, state: "failed", target: body.target, reason: (e.body && (e.body.reason || e.body.error)) || e.message || String(e) }))
       .then(d => {
-        // Host path: the server SAVED the prompt (+ media) and returned a pointer —
-        // we inject it into the active frontier seat. VM/central path (d.central)
-        // already typed into that locus's seat server-side, so don't double-send.
-        if (d && d.pointer && !d.central) injectPointer(d.pointer, nf, 0);
-        else setNote(mediated ? "saved · queued for frontier (A)" : d.note || "sent");
-        setText(""); setFiles([]);
+        setSent({ ...d, at: Date.now() });
+        if (d.ok) { setText(""); setFiles([]); setRev(null); }
+        if (ttsRef.current && PT && d.ok && d.target === "seat") PT.speak(window, "prompt delivered to the terminal seat");
       })
-      .catch(e => setNote("error: " + (e.message || e)))
       .finally(() => setBusy(false));
+  };
+  /* the legacy file-pointer path, explicit and labelled: saves prompt.md (+
+     files) to the prompt-inbox and reports the path. Nothing is delivered. */
+  const saveInbox = () => {
+    const t = text; if ((!t.trim() && !files.length) || busy) return;
+    setBusy(true);
+    api("/api/mct/prompt", { method: "POST", timeout: 120000, body: JSON.stringify({ text: t, files, seat: "tmux", save_only: true }) })
+      .then(d => setSent({ ok: false, state: "saved", note: d.note || ("saved → " + (d.path || "?")) + " — NOT delivered", at: Date.now() }))
+      .catch(e => setSent({ ok: false, state: "failed", target: "inbox", reason: e.message || String(e), at: Date.now() }))
+      .finally(() => setBusy(false));
+  };
+  const retryQueue = () => {
+    if (!sent || !sent.session_id) return;
+    api("/api/prompt/status?vm=" + encodeURIComponent(promptVm(sent)),
+        { method: "POST", timeout: 20000, body: JSON.stringify({ session_id: sent.session_id, action: "retry" }) })
+      .then(d => setNote(d.ok ? "retry sent — following the turn" : ("retry failed: " + (d.error || d.status))))
+      .then(() => setSent(x => x ? { ...x, track: { state: "queued" }, gen: (x.gen || 0) + 1 } : x))
+      .catch(e => setNote("retry: " + (e.message || e)));
   };
   /* todo mode: queue the textarea's text on the host-native ☑ board instead of
      sending a prompt. Same endpoint/payload as SessionTodoDrawer.add(); shares
@@ -8992,29 +9426,39 @@ function PromptPanel() {
       .finally(() => setBusy(false));
   };
   if (!dock) return null;
+  const track = sent && sent.track;
+  const sentBadge = sent && html`<span title=${(sent.reason || sent.detail || "") + (sent.why ? " · session via " + sent.why : "")}
+      style=${{ color: PROMPT_STATE_COLOR[sent.state] || "var(--dim)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
+      ${promptSendLabel(sent)}${track ? html`<span style=${{ color: PROMPT_STATE_COLOR[track.state] || "var(--dim)" }}> · ${track.state === "done" ? "✓ reply in" : track.state}${track.error ? " — " + track.error : ""}</span>` : ""}</span>`;
+  const sel = { background: "var(--bg)", color: "var(--fg)", border: "1px solid var(--edge)", borderRadius: 4, fontSize: 11 };
   const body = !open
     ? html`<div className="prompt-bar" onClick=${() => setOpen(true)}
-      style=${{ flex: "none", borderTop: "1px solid var(--edge)", padding: "5px 10px", cursor: "pointer", background: "var(--panel)", fontSize: 12, display: "flex", alignItems: "center", gap: 8 }}>
-    <b>✍ prompt</b><span style=${{ color: "var(--dim)" }}>▲ expand${files.length ? " · " + files.length + " file(s) attached" : ""}</span></div>`
+      style=${{ flex: "none", borderTop: "1px solid var(--edge)", padding: "5px 10px", cursor: "pointer", background: "var(--panel)", fontSize: 12, display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+    <b>✍ prompt</b><span style=${{ color: "var(--dim)", flex: "none" }}>▲ expand${files.length ? " · " + files.length + " file(s) attached" : ""}${text.trim() ? " · draft kept" : ""}</span>${sentBadge}</div>`
     : html`<div className="prompt-panel" style=${{ flex: "1 1 auto", minHeight: 0, height: "100%", display: "flex", flexDirection: "column", borderTop: "1px solid var(--edge)", background: "var(--panel)" }}>
     <div onPointerDown=${onDrag} title="drag to resize" style=${{ height: 6, cursor: "ns-resize", background: "var(--edge)", flex: "none" }}></div>
-    <div style=${{ display: "flex", alignItems: "center", gap: 8, padding: "4px 10px", flex: "none" }}>
+    <div style=${{ display: "flex", alignItems: "center", gap: 8, padding: "4px 10px", flex: "none", flexWrap: "wrap" }}>
       <b style=${{ fontSize: 12 }}>✍ prompt</b>
       <label className="btn" style=${{ fontSize: 11, cursor: "pointer" }}>📎 media<input type="file" multiple style=${{ display: "none" }} onChange=${e => addFiles(e.target.files)} /></label>
+      <button className="btn" style=${{ fontSize: 11 }} title="attach the image on the clipboard (a screenshot / copied image). Copied file paths are text — paste them with Ctrl+V." onClick=${pasteImage}>📋 image</button>
+      <select value=${target} disabled=${todoMode} onChange=${e => pickTarget(e.target.value)} style=${sel}
+              title=${(PROMPT_TARGETS.find(x => x[0] === target) || [])[2] || "where send delivers the prompt"}>
+        ${PROMPT_TARGETS.map(([v, l, tip]) => html`<option key=${v} value=${v} title=${tip}>${l}</option>`)}</select>
       ${/* todo mode switch + type/priority picks (2026-09-18): OFF = prompt mode
-            (default, dropdowns greyed); ON = 'add' queues a todo. Row reads
-            media | [todo switch] [type] [priority] | hide. */""}
+            (default, dropdowns greyed); ON = 'add' queues a todo. */""}
       <button className=${"btn" + (todoMode ? " on" : "")} style=${{ fontSize: 11 }}
               title="todo mode — ON: the send button becomes 'add' and queues the text as a todo (type + priority) on the ☑ board instead of sending a prompt"
               onClick=${() => setTodoMode(v => !v)}>${todoMode ? "☑ todo: ON" : "☑ todo: off"}</button>
       <select value=${todoType} disabled=${!todoMode} onChange=${e => setTodoType(e.target.value)}
-              title="todo type (todo mode only)"
-              style=${{ background: "var(--bg)", color: "var(--fg)", border: "1px solid var(--edge)", borderRadius: 4, fontSize: 11, opacity: todoMode ? 1 : .45 }}>
+              title="todo type (todo mode only)" style=${{ ...sel, opacity: todoMode ? 1 : .45 }}>
         <option value="todo">□ todo</option><option value="request">◇ request</option><option value="bookmark">🔖 bookmark</option></select>
       <select value=${todoPrio} disabled=${!todoMode} onChange=${e => setTodoPrio(e.target.value)}
-              title="todo priority (todo mode only)"
-              style=${{ background: "var(--bg)", color: "var(--fg)", border: "1px solid var(--edge)", borderRadius: 4, fontSize: 11, opacity: todoMode ? 1 : .45 }}>
+              title="todo priority (todo mode only)" style=${{ ...sel, opacity: todoMode ? 1 : .45 }}>
         <option value="low">– prio</option><option value="medium">med</option><option value="high">HIGH</option></select>
+      <button className=${"btn" + (stt ? " on" : "")} style=${{ fontSize: 11 }} onClick=${toggleStt}
+              title="speech-to-text: dictate into the prompt (browser speech recognition, else the station's Whisper). Off by default; remembered in this browser.">${stt ? "🎙 on" : "🎙 off"}</button>
+      <button className=${"btn" + (tts ? " on" : "")} style=${{ fontSize: 11 }} onClick=${toggleTts}
+              title="read replies aloud: the reply of a prompt sent to a serve session is spoken with the browser's voice when its turn ends (Esc stops). Off by default; remembered in this browser.">${tts ? "🔊 on" : "🔇 off"}</button>
       <span style=${{ flex: 1 }}></span>
       ${note && html`<span style=${{ color: "var(--dim)", fontSize: 11 }}>${note}</span>`}
       <button className="btn" style=${{ fontSize: 11 }} onClick=${() => setOpen(false)}>▼ hide</button>
@@ -9036,14 +9480,21 @@ function PromptPanel() {
       ${rev.ambiguities && rev.ambiguities.length > 0 && html`<div style=${{ marginTop: 4, color: "var(--warn, #c9862b)" }}><b>B asks</b> (ambiguous — not changed):
         ${rev.ambiguities.map((a, i) => html`<div key=${i}>· “${a.span}”: ${a.question}</div>`)}</div>`}
     </div>`}
-    <textarea value=${text} onInput=${e => setText(e.target.value)} onKeyDown=${onKey}
-      onPaste=${e => { const f = e.clipboardData && e.clipboardData.files; if (f && f.length) addFiles(f); }}
-      placeholder="compose a prompt…  (paste or 📎 to attach images / anything · Ctrl+E: ✎ B revises wording vs docs/NOMENCLATURE.md)"
+    <textarea value=${text} onInput=${e => setText(e.target.value)} onKeyDown=${onKey} onPaste=${onPaste}
+      placeholder="compose a prompt…  (📎 or paste a screenshot to attach · copied paths stay text · Ctrl+E: ✎ B revises wording vs docs/NOMENCLATURE.md)"
       style=${{ flex: 1, minHeight: 0, resize: "none", margin: "0 10px 8px", background: "var(--bg)", color: "var(--fg)", border: "1px solid var(--edge)", borderRadius: 4, padding: 6, fontFamily: "inherit", fontSize: 12 }} />
-    <div style=${{ padding: "0 10px 8px", flex: "none", display: "flex", gap: 6, alignItems: "center" }}>
-      <button className="btn on" disabled=${busy || (todoMode ? !text.trim() : (!text.trim() && !files.length))} onClick=${todoMode ? addTodo : send}>${busy ? (todoMode ? "adding…" : "saving…") : (todoMode ? "add" : "send")}</button>
+    <div style=${{ padding: "0 10px 8px", flex: "none", display: "flex", gap: 6, alignItems: "center", minWidth: 0 }}>
+      <button className="btn on" disabled=${busy || (todoMode ? !text.trim() : (!text.trim() && !files.length))} onClick=${() => (todoMode ? addTodo() : send())}>${busy ? (todoMode ? "adding…" : "sending…") : (todoMode ? "add" : "send")}</button>
       <button className="btn" disabled=${revBusy || !text.trim()} title="✎ B revises the wording against docs/NOMENCLATURE.md (Ctrl+E) — corrects unambiguous mislabels, asks about ambiguous ones; preview, then apply" onClick=${revise}>${revBusy ? "B…" : "✎ B revise"}</button>
-      <span style=${{ color: "var(--dim)", fontSize: 11 }}>→ auto-sent to the live seat (A) · also saved to the prompt-inbox</span>
+      ${stt && html`<button className=${"btn" + (dictRef.current && dictRef.current.active() ? " on" : "")} style=${{ fontSize: 11 }}
+              title=${speech.d || "dictate into the prompt — click to start, click again to stop"} onClick=${dictation}>${speech.s === "listening" || speech.s === "recording" ? "■ stop" : (speech.s === "transcribing" ? "… transcribing" : "🎙 dictate")}</button>`}
+      ${stt && speech.d && html`<span style=${{ fontSize: 11, color: speech.s === "error" || speech.s === "unavailable" ? "var(--bad, #e06c6c)" : "var(--dim)" }}>${speech.s === "unavailable" ? "🎙 unavailable: " : ""}${speech.d}</span>`}
+      ${sent && !sent.ok && sent.state === "failed" && !todoMode && html`<span style=${{ display: "inline-flex", gap: 4 }}>
+        <button className="btn" style=${{ fontSize: 11 }} disabled=${busy} onClick=${() => send()} title="send the kept text again">↻ retry</button>
+        ${sent.can_force && html`<button className="btn" style=${{ fontSize: 11 }} disabled=${busy} onClick=${() => send({ force: true })} title="type it into the seat even though its input line holds text">send anyway</button>`}
+        <button className="btn" style=${{ fontSize: 11 }} disabled=${busy} onClick=${saveInbox} title="LEGACY file-pointer fallback: save prompt.md (+ files) to the workspace prompt-inbox. Nothing reads it by itself — you point a session at it.">🗂 save to inbox (file-pointer fallback)</button></span>`}
+      ${track && track.retry && html`<button className="btn" style=${{ fontSize: 11 }} onClick=${retryQueue} title="start the queued prompt on that serve session (console queue retry)">↻ retry queue</button>`}
+      ${sentBadge || html`<span style=${{ color: "var(--dim)", fontSize: 11 }}>→ delivered straight to the target session; the result shows here</span>`}
     </div>
   </div>`;
   return ReactDOM.createPortal(body, dock);
@@ -9409,7 +9860,10 @@ function App() {
              local machine as a station named "keeper" — the SAME locus the ⌂
              host (@keeper) entry already is. One machine, ONE locus: drop the
              alias row; "keeper" survives on the wire (board alias) only. */
-        setVms((d.vms || []).filter(v => v.name !== "keeper")); setFleetErr(null); setLastOk(Date.now()); })
+        /* 1.0.141: drop only the sidecar's injected local row (and this
+           station's own names) — an ssh locus named "keeper" (vm_mgr's, seen
+           from any other station) is a real, selectable locus. */
+        setVms((d.vms || []).filter(v => !(v.name === "keeper" && v.kind !== "ssh") && !(v.name && isHostVm(v.name)))); setFleetErr(null); setLastOk(Date.now()); })
       .catch(e => setFleetErr(e.message || String(e)));
     api("/api/health")
       .then(d => { setHealth(d); setHealthErr(null); })
@@ -9917,7 +10371,7 @@ function App() {
         <button className="btn term-tab"
                 title=${"↩ back to " + locusLabel(prevLocus) + " — its frontier session; the console becomes that locus's"}
                 onClick=${() => { try {
-                  if (!prevLocus || prevLocus === "@keeper" || prevLocus === "keeper") {
+                  if (isHostVm(prevLocus)) {
                     setActive(null); window.__fvVm && window.__fvVm.set("@keeper");
                   } else { select(prevLocus); }
                   window.__fvSurface && window.__fvSurface.set("frontier");
@@ -10032,7 +10486,7 @@ function App() {
                 host board. The host seat (no pick / @keeper) maps to the "keeper" alias because
                 /api/vm/@keeper/todo is not a route — /api/vm/keeper/todo is. The key remounts
                 the drawer on a switch so its state never bleeds across boards. */ ""}
-          ${panel === "sesstodo" && html`<${TodoDrawer} key=${active || "keeper"} vm=${(!active || active === "@keeper") ? "keeper" : active} onCount=${reportTodoCount} />`}
+          ${panel === "sesstodo" && html`<${TodoDrawer} key=${active || HOST_BOARD} vm=${isHostVm(active) ? HOST_BOARD : active} onCount=${reportTodoCount} />`}
         </div>
       </div>`}
       </div>
@@ -10071,6 +10525,6 @@ ReactDOM.createRoot(document.getElementById("root")).render(html`<${App} />`);
 <script src="/static/xterm.js"></script>
 <script src="/static/xterm-addon-fit.js"></script>
 <script src="/static/mct-renderer.js?v=20260916-t266-choice"></script>
-<script src="/static/fleetview-term.js?v=20260927-hugpy-frontier"></script>
+<script src="/static/fleetview-term.js?v=20261001-shell-clipboard"></script>
 </body>
 </html>

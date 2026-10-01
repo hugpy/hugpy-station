@@ -79,6 +79,18 @@
           }
         ]
       }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$HOME/.local/bin/source_guard_hook.py\"",
+            "timeout": 10
+          }
+        ]
+      }
     ]
   }
 }

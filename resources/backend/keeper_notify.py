@@ -17,9 +17,12 @@ toolserver is swallowed — nothing is marked delivered, so the next scan retrie
 
 Per-signature DISPOSITION (operator: "differ to past propositions, rather than
 constantly suggesting a fix to a thing that is already determined as inert"):
-open | proposed | accepted | rejected(reason) | inert(reason, by, at). ``inert``
-silences notifications and proposals for the signature (still counted, still
-listed greyed) until a MATERIAL change: rate >= 10x the rate when it was marked,
+open | proposed | accepted | rejected(reason) | inert(reason, by, at). Since
+2026-10-01 (t4178 [F2.5]) a disposition ANNOTATES and lowers the priority — it
+never silences; and the reports themselves go to the locus's WORKER session
+(bug_route.py), not the keeper. Under STATION_NOTIFY_INERT_SILENCES=1 (default
+off) the old rule returns: ``inert`` silences notifications and proposals for
+the signature (still counted, still listed greyed) until a MATERIAL change: rate >= 10x the rate when it was marked,
 a new source/unit/locus, or a higher severity class — the reopened
 notification says why. The disposition key is (kind, normalised signature), so
 the same error from a new unit or locus is recognisably "the same thing, new
@@ -55,6 +58,16 @@ DEFAULTS = {
 }
 
 DISPOSITIONS = ("open", "proposed", "accepted", "rejected", "inert")
+
+
+def inert_silences(env=None):
+    """STATION_NOTIFY_INERT_SILENCES=1 restores the pre-2026-10-01 behaviour where
+    an `inert` (or accepted) disposition SILENCED a signature / loop. Default OFF
+    (operator 2026-10-01, board t4178 [F2.5]: "the suppression is too much … a
+    silent killer"): a disposition annotates the report and lowers its priority,
+    it never hides it."""
+    env = os.environ if env is None else env
+    return str(env.get("STATION_NOTIFY_INERT_SILENCES") or "0").strip().lower() in ("1", "true", "on", "yes")
 
 
 def sig_key(kind, signature):
@@ -173,7 +186,7 @@ class NotifyBook:
         for r in self.rows.values():
             if r["sigkey"] == skey:
                 r["propose_due"] = False if disposition in ("inert", "accepted") else r.get("propose_due", False)
-                if disposition == "inert":
+                if disposition == "inert" and inert_silences():
                     r["pending_mail"] = False
         self.save()
         return s
@@ -197,10 +210,27 @@ class NotifyBook:
 
     # ---- the scan step ----------------------------------------------------------------
     def notify_row(self, r):
+        """Is this row REPORTED (board + worker), not only listed on the ⚠ strip?
+        Severity / seat-pane prose are classification; an inert disposition only
+        silences under STATION_NOTIFY_INERT_SILENCES=1 (default off, t4178)."""
         src = str(r.get("source") or "")
         return (sev_rank(r.get("severity")) >= sev_rank(self.cfg["min_severity"])
                 and not any(src.startswith(p) for p in self.cfg["strip_only_prefixes"] or ())
-                and self.sig(r["sigkey"]).get("disposition") != "inert")
+                and not (inert_silences() and self.sig(r["sigkey"]).get("disposition") == "inert"))
+
+    def priority_of(self, r):
+        """inert / accepted lower the priority (t4178); severity sets it otherwise."""
+        if self.sig(r["sigkey"]).get("disposition") in ("inert", "accepted"):
+            return "low"
+        return "high" if sev_rank(r.get("severity")) >= 2 else "medium"
+
+    def annotation(self, r):
+        s = self.sig(r["sigkey"])
+        d = s.get("disposition") or "open"
+        bits = [] if d == "open" else ["%s%s" % (d, (": " + s["reason"]) if s.get("reason") else "")]
+        if s.get("reopen_reason"):
+            bits.append("why now: " + s["reopen_reason"])
+        return " · ".join(bits)
 
     def step(self, emitted, live, now=None):
         """Fold one scan. ``emitted``: [(finding, reason)] for EVERY finding the
@@ -258,9 +288,10 @@ class NotifyBook:
             h = self.sig(skey).setdefault("hist", [])
             h.append([now, tot])
             self.sig(skey)["hist"] = [x for x in h if now - x[0] <= 2 * self.cfg["rate_window_s"]][-200:]
-        # inert signatures: re-open only on a material change
+        # inert signatures: re-open only on a material change (only meaningful while
+        # inert silences, STATION_NOTIFY_INERT_SILENCES=1; otherwise inert is reported anyway)
         for skey, s in self.sigs.items():
-            if s.get("disposition") != "inert":
+            if s.get("disposition") != "inert" or not inert_silences():
                 continue
             why = self._material_change(skey, now)
             if why:
@@ -312,6 +343,49 @@ class NotifyBook:
 
 
 # ── formatting ─────────────────────────────────────────────────────────────────────────
+LOOP_KIND = "crash_loop"
+
+
+def loop_sigkey(row):
+    """The disposition key of a loop-detector row: the same (kind, signature)
+    server.py hands B for it, so one decision covers the loop wherever it recurs."""
+    return sig_key(LOOP_KIND, str(row.get("identity") or "")[:160])
+
+
+def gate_loops(book, ev, now=None):
+    """Loop-detector events through the book's dispositions. An accepted loop that
+    comes back after the accept re-opens ("did not hold"). Since 2026-10-01
+    (t4178) NOTHING is dropped by default: returns (ev, []) — the disposition only
+    annotates / lowers the priority. Under STATION_NOTIFY_INERT_SILENCES=1 the old
+    rule applies (operator 2026-09-30): ``inert`` / ``accepted`` drop the row from
+    ``new`` and ``mail``. Returns (ev without the silenced rows, [silenced rows])."""
+    now = now or book.now()
+    silence = inert_silences()
+    silenced, drop = [], set()
+    fresh = {id(r) for r in ev.get("new") or []}
+    for row in (ev.get("new") or []) + (ev.get("mail") or []):
+        if id(row) in drop:
+            continue
+        s = book.sigs.get(loop_sigkey(row))
+        disp = (s or {}).get("disposition")
+        if disp not in ("inert", "accepted"):
+            continue
+        if disp == "accepted" and id(row) in fresh and now > float(s.get("accepted_at") or 0):
+            s.update(disposition="open", did_not_hold=s.get("accepted_id") or "?",
+                     reopen_reason="loop recurred after accepted fix %s — it did not hold" % (s.get("accepted_id") or "?"))
+            continue
+        if not silence:
+            continue
+        drop.add(id(row))
+        silenced.append(row)
+        s["loop_hits"] = int(s.get("loop_hits") or 0) + 1
+        s["last_hit"] = now
+    out = dict(ev)
+    for k in ("new", "mail"):
+        out[k] = [r for r in ev.get(k) or [] if id(r) not in drop]
+    return out, silenced
+
+
 def fmt_mail(row, sig=None):
     why = (sig or {}).get("reopen_reason") or ""
     return ("🐞 finding [%s] %s ×%d (first %s, last %s)%s\n%s\nDo:\n```bash\n%s\n```"
@@ -324,8 +398,8 @@ def fmt_board(row, sig=None):
     why = (sig or {}).get("reopen_reason") or ""
     text = ("[finding] %s %s ×%d" % (row.get("kind"), row.get("identity"), int(row.get("count") or 0)))[:500]
     note = ("%s%s\n\nfirst %s · last %s · finding %s · signature %s\n\n```\n%s\n```\n\n```bash\n%s\n```\n\n"
-            "close with a disposition line: `inert: <reason>` silences this signature until it materially "
-            "changes; plain close = handled.") % (
+            "close with a disposition line: `inert: <reason>` records it as inert — that lowers its priority, it "
+            "is still reported (board t4178); plain close = handled.") % (
         ("why now: " + why + "\n\n") if why else "", row.get("signature") or "",
         _ymdhm(row.get("first_seen")), _hhmm(row.get("last_seen")), row.get("key"), row.get("sigkey"),
         "\n".join(s[:240] for s in (row.get("sample_lines") or [])[:5]), row.get("action") or "")

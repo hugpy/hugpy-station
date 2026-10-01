@@ -25,6 +25,7 @@ import json
 import os
 import sys
 import time
+import urllib.error
 import urllib.request
 
 MAX_CHARS = int(os.environ.get("LEDGER_MAX_CHARS", "12000") or 12000)
@@ -171,11 +172,84 @@ def _pending_line(locus, sid):
             "call prompt_list / comms_inbox to read them. Bodies are NOT injected here.")
 
 
+_HANDOFF_SEEN_DIR = os.path.expanduser("~/.claude-console/handoff-seen")
+
+
+def _handoff_pull(locus, sid):
+    """1.0.146 — the /resume PULL (operator 2026-10-01: the toolserver houses the
+    handoffs; no file). Pull the open handoff for this seat from the toolserver
+    (HANDOFF_ID env = the exact row a spawned seat was launched for, else the
+    newest open row on the locus) and mark it consumed by THIS session id. Text
+    or '' — every failure mode says what it is, nothing is swallowed."""
+    hid = os.environ.get("HANDOFF_ID", "").strip()
+    body = {"session_id": sid, "consume": True}
+    if hid:
+        body["id"] = hid
+    else:
+        body["locus"] = locus
+    try:
+        doc = _call("handoff/pull", body, timeout=12)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return _handoff_pull_legacy(locus, hid)
+        return (f"[handoff] pull FAILED (HTTP {e.code}) — a handoff may be waiting: run "
+                f"handoff_pull locus={locus}" + (f" id={hid}" if hid else "") + " before working.")
+    except Exception as e:                                   # noqa: BLE001
+        return (f"[handoff] pull FAILED ({str(e)[:140]}) — a handoff may be waiting: run "
+                f"handoff_pull locus={locus}" + (f" id={hid}" if hid else "") + " before working.")
+    if not isinstance(doc, dict) or not doc.get("found"):
+        return ""
+    return (str(doc.get("text") or "").rstrip() + "\n"
+            f"[handoff] {doc.get('id')} is now consumed by this session ({sid[:8] or '?'}); "
+            f"re-pull any time: handoff_pull id={doc.get('id')}.")
+
+
+def _handoff_pull_legacy(locus, hid):
+    """A toolserver before 0.0.41 has no handoff/pull: read the newest open seat
+    row via handoff/list and SAY that it could not be marked consumed."""
+    try:
+        rows = [r for r in (_call("handoff/list", {"limit": 50}, timeout=8) or [])
+                if isinstance(r, dict) and r.get("mode", "seat") == "seat"
+                and r.get("status") in ("pending", "open", "spun", "claimed")]
+    except Exception as e:                                   # noqa: BLE001
+        return f"[handoff] toolserver < 0.0.41 and handoff/list failed ({str(e)[:120]}) — run handoff_list yourself."
+    rows = [r for r in rows if (hid and r.get("id") == hid) or (not hid and r.get("locus") == locus)]
+    if not rows:
+        return ""
+    r = max(rows, key=lambda r: int(r.get("created") or 0))
+    return (f"# Session init prompt (handoff {r.get('id')} — locus {r.get('locus')})\n"
+            f"{str(r.get('brief') or '').rstrip()}\n"
+            f"[handoff] toolserver < 0.0.41: this row could NOT be marked consumed (no handoff/pull). "
+            f"When its work is finished: handoff_claim id={r.get('id')} status=done. "
+            f"Previous seat: exchange_list locus={r.get('locus')} session_id={r.get('source_session') or '?'} full=true.")
+
+
+def _handoff_block(locus, sid, src):
+    """Inject the handoff ONCE per session (serve resumes fire SessionStart per
+    turn): startup/clear/compact always pull (consume is idempotent for the same
+    session); resume only until this session has seen one."""
+    f = os.path.join(_HANDOFF_SEEN_DIR, sid) if sid else ""
+    if src == "resume" and f and os.path.exists(f):
+        return ""
+    text = _handoff_pull(locus, sid)
+    if f:
+        try:
+            os.makedirs(_HANDOFF_SEEN_DIR, mode=0o700, exist_ok=True)
+            with open(f, "w") as fh:
+                fh.write("1" if text else "0")
+        except Exception:                                    # noqa: BLE001
+            pass
+    return text
+
+
 def session_start(payload):
     locus = _locus()
     led = _ledger(locus)
     src = payload.get("source") or ""
     sid = payload.get("session_id") or ""
+    handoff = _handoff_block(locus, sid, src)
+    if handoff:
+        print(handoff + "\n")
     # Token discipline: under serve every console turn is a fresh `claude -p
     # --resume` process, so SessionStart(source=resume) fires PER TURN. Inject
     # the ledger on resume only when its rev changed since this session last saw

@@ -1,0 +1,175 @@
+{
+  "url": "http://127.0.0.1:7391/",
+  "filter": {
+    "domains": [
+      "127.0.0.1:7391"
+    ],
+    "routes": [
+      "/api/*"
+    ],
+    "methods": [
+      "GET"
+    ],
+    "types": [
+      "XHR",
+      "Fetch"
+    ],
+    "action": ""
+  },
+  "log": [
+    "toggle default (fresh userData, env=unset): enabled=false",
+    "toggle after setEnabled(true): enabled=true",
+    "loaded http://127.0.0.1:7391/ capture.active=true",
+    "clicked #load at 49,70",
+    "clicked #xhr at 130,70",
+    "devtools opened: isDevToolsOpened=true capture.active=true debugger.isAttached=true",
+    "clicked #boom at 314,70",
+    "clicked #chain at 405,70",
+    "clicked #save at 219,70"
+  ],
+  "blocked": [],
+  "hops": [
+    {
+      "traceId": "obs-a2590881f65d2b92",
+      "req": "GET /api/items?n=3",
+      "type": "Fetch",
+      "hop1_action": "click button#load (+1ms immediate, trusted=true)",
+      "hop2_initiator": "script: loadItems < onLoadClick",
+      "header_on_wire": "obs-a2590881f65d2b92",
+      "hop3_server_request": "GET /api/items -> 200 id=obs-a2590881f65d2b92",
+      "hop4_handler": "list_items observability/test/target_app.py:93 [dispatch_request]",
+      "hop4_callees": [
+        "build_items"
+      ],
+      "hop5_output": [
+        "list_items",
+        "finalize_request",
+        "make_response",
+        "process_response",
+        "HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_handler_exit_line": "handler returned @ line 96",
+      "pageTraceId": null,
+      "inference": {
+        "level": "summary",
+        "text": "1) click on button#load (\"Load items\") [immediate, +1 ms]\n2) GET /api/items?n=3 initiated by script from loadItems @ app.js:3\n3) reached Flask: GET /api/items (server 16 ms)\n4) handler list_items @ observability/test/target_app.py:93 ran 0.4 ms, 11 app calls\n5) output: list_items → finalize_request → make_response → process_response → HTTP 200\n6) browser received 200 application/json 252 B in 40 ms"
+      },
+      "hop6_response": "200 application/json 252B 40ms"
+    },
+    {
+      "traceId": "obs-579fe949b9c3c8e1",
+      "req": "GET /api/slow",
+      "type": "XHR",
+      "hop1_action": "click button#xhr (+1ms immediate, trusted=true)",
+      "hop2_initiator": "script: onXhrClick",
+      "header_on_wire": "obs-579fe949b9c3c8e1",
+      "hop3_server_request": "GET /api/slow -> 200 id=obs-579fe949b9c3c8e1",
+      "hop4_handler": "slow observability/test/target_app.py:109 [dispatch_request]",
+      "hop4_callees": [
+        "_slow_work"
+      ],
+      "hop5_output": [
+        "slow",
+        "finalize_request",
+        "make_response",
+        "process_response",
+        "HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_handler_exit_line": "handler returned @ line 111",
+      "pageTraceId": null,
+      "inference": {
+        "level": "summary",
+        "text": "1) click on button#xhr (\"XHR slow\") [immediate, +1 ms]\n2) GET /api/slow initiated by script from onXhrClick @ app.js:15\n3) reached Flask: GET /api/slow (server 65 ms)\n4) handler slow @ observability/test/target_app.py:109 ran 50.3 ms, 8 app calls\n5) output: slow → finalize_request → make_response → process_response → HTTP 200\n6) browser received 200 application/json 185 B in 93 ms"
+      },
+      "hop6_response": "200 application/json 185B 93ms"
+    },
+    {
+      "traceId": "obs-c27ff10f2d469a8b",
+      "req": "GET /api/boom",
+      "type": "Fetch",
+      "hop1_action": "click button#boom (+1ms immediate, trusted=true)",
+      "hop2_initiator": "script: onBoomClick",
+      "header_on_wire": "obs-c27ff10f2d469a8b",
+      "hop3_server_request": "GET /api/boom -> 500 id=obs-c27ff10f2d469a8b",
+      "hop4_handler": "boom observability/test/target_app.py:118 [dispatch_request]",
+      "hop4_callees": [
+        "_explode"
+      ],
+      "hop5_output": [
+        "boom",
+        "handle_user_exception",
+        "handle_exception",
+        "log_exception",
+        "finalize_request",
+        "make_response",
+        "process_response",
+        "HTTP 500"
+      ],
+      "hop5_raised": "handle_user_exception: dispatch_request flask/app.py:902 -> boom observability/test/target_app.py:120 -> _explode observability/test/target_app.py:115",
+      "hop5_handler_exit_line": "handler unwound (raised) @ line 120",
+      "pageTraceId": null,
+      "inference": {
+        "level": "summary",
+        "text": "1) click on button#boom (\"Boom (500)\") [immediate, +1 ms]\n2) GET /api/boom initiated by script from onBoomClick @ app.js:21\n3) reached Flask: GET /api/boom (server 22 ms)\n4) handler boom @ observability/test/target_app.py:118 ran 0.0 ms, 8 app calls\n5) output: boom → handle_user_exception → handle_exception → log_exception → finalize_request → make_response → process_response → HTTP 500; RAISED via handle_user_exception: dispatch_request:902 → boom:120 → _explode:115\n6) browser received 500 text/html 458 B in 48 ms"
+      },
+      "hop6_response": "500 text/html 458B 48ms"
+    },
+    {
+      "traceId": "obs-f24206309f1ed016",
+      "req": "GET /api/items?n=1",
+      "type": "Fetch",
+      "hop1_action": "click button#chain (+11ms immediate, trusted=true)",
+      "hop2_initiator": "script: loadItems < onChainClick",
+      "header_on_wire": "obs-f24206309f1ed016",
+      "hop3_server_request": "GET /api/items -> 200 id=obs-f24206309f1ed016",
+      "hop4_handler": "list_items observability/test/target_app.py:93 [dispatch_request]",
+      "hop4_callees": [
+        "build_items"
+      ],
+      "hop5_output": [
+        "list_items",
+        "finalize_request",
+        "make_response",
+        "process_response",
+        "HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_handler_exit_line": "handler returned @ line 96",
+      "pageTraceId": null,
+      "inference": {
+        "level": "summary",
+        "text": "1) click on button#chain (\"Async chain\") [immediate, +11 ms]\n2) GET /api/items?n=1 initiated by script from loadItems @ app.js:3\n3) reached Flask: GET /api/items (server 17 ms)\n4) handler list_items @ observability/test/target_app.py:93 ran 0.3 ms, 9 app calls\n5) output: list_items → finalize_request → make_response → process_response → HTTP 200\n6) browser received 200 application/json 202 B in 43 ms"
+      },
+      "hop6_response": "200 application/json 202B 43ms"
+    },
+    {
+      "traceId": null,
+      "req": "POST /api/items",
+      "type": "Fetch",
+      "hop1_action": "click button#save (+1ms immediate, trusted=true)",
+      "hop2_initiator": "script: onSaveClick",
+      "header_on_wire": null,
+      "hop3_server_request": null,
+      "hop4_handler": null,
+      "hop4_callees": null,
+      "hop5_output": null,
+      "hop5_raised": null,
+      "hop5_handler_exit_line": null,
+      "pageTraceId": null,
+      "inference": {
+        "level": "summary",
+        "text": "1) click on button#save (\"Save (POST)\") [immediate, +1 ms]\n2) POST /api/items initiated by script from onSaveClick @ app.js:18\n3-5) not trace-tagged (outside the inject filter): no server spans requested\n6) browser received 201 application/json 207 B in 3 ms"
+      },
+      "hop6_response": "201 application/json 207B 3ms"
+    }
+  ],
+  "console": [
+    "[warning] %cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy  @ warnAboutInsecureCSP",
+    "[warning] %cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy  @ warnAboutInsecureCSP",
+    "[log] items loaded 3 @ onLoadClick",
+    "[error] boom failed Error: boom status 500\n    at http://127.0.0.1:7391/static/app.js:21:51 @ "
+  ],
+  "export": "/srv/vm_mgr/tmp/obs-evidence/final-local/obs-2026-10-01T11-30-51-831Z.json"
+}

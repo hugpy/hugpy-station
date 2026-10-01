@@ -1,0 +1,75 @@
+{
+  "url": "http://127.0.0.1:7002/",
+  "filter": {
+    "domains": [
+      "127.0.0.1:7002"
+    ],
+    "routes": [],
+    "methods": [
+      "NONE"
+    ],
+    "types": [
+      "XHR",
+      "Fetch"
+    ],
+    "action": ""
+  },
+  "log": [
+    "toggle default (fresh userData, env=unset): enabled=false",
+    "toggle after setEnabled(true): enabled=true",
+    "loaded http://127.0.0.1:7002/ capture.active=true"
+  ],
+  "blocked": [],
+  "hops": [
+    {
+      "traceId": null,
+      "req": "GET /api/auth/config",
+      "type": "Fetch",
+      "hop1_action": null,
+      "hop2_initiator": "script: fetch < Ct | async: await[Jt,(anon)]",
+      "header_on_wire": null,
+      "hop3_server_request": null,
+      "hop4_handler": null,
+      "hop4_callees": null,
+      "hop5_output": null,
+      "hop5_raised": null,
+      "hop5_handler_exit_line": null,
+      "hop6_response": "200 application/json 259B 85ms"
+    },
+    {
+      "traceId": null,
+      "req": "GET /api/readiness",
+      "type": "Fetch",
+      "hop1_action": null,
+      "hop2_initiator": "script: fetch < Ct | async: await[Et,(anon)]",
+      "header_on_wire": null,
+      "hop3_server_request": null,
+      "hop4_handler": null,
+      "hop4_callees": null,
+      "hop5_output": null,
+      "hop5_raised": null,
+      "hop5_handler_exit_line": null,
+      "hop6_response": "200 application/json 597B 92ms"
+    },
+    {
+      "traceId": null,
+      "req": "GET /api/auth-svc/me",
+      "type": "Fetch",
+      "hop1_action": null,
+      "hop2_initiator": "script: (anon) < (anon) | async: await[(anon)] < await[(anon),ti]",
+      "header_on_wire": null,
+      "hop3_server_request": null,
+      "hop4_handler": null,
+      "hop4_callees": null,
+      "hop5_output": null,
+      "hop5_raised": null,
+      "hop5_handler_exit_line": null,
+      "hop6_response": "401 application/json 261B 181ms"
+    }
+  ],
+  "console": [
+    "[warning] %cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy  @ warnAboutInsecureCSP",
+    "[warning] %cElectron Security Warning (Insecure Content-Security-Policy) font-weight: bold; This renderer process has either no Content Security\n  Policy set or a policy  @ warnAboutInsecureCSP"
+  ],
+  "export": "/srv/vm_mgr/tmp/obs-evidence/live7002-discover/obs-2026-10-01T11-27-12-580Z.json"
+}

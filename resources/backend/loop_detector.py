@@ -152,6 +152,15 @@ def agent_runs(entries):
     return [r for r in runs if len(r) >= 2], [e for r in runs if len(r) < 2 for e in r]
 
 
+def job_caller(row):
+    """Who submitted a central job (1.0.140, for the gate's self-origin guard)."""
+    for k in ("client_task", "client_process", "client_session", "client", "principal", "ua", "caller"):
+        v = row.get(k)
+        if v:
+            return str(v)[:60]
+    return ""
+
+
 def call_caller(row):
     for k in ("client_process", "client_user", "principal", "client_session", "ua", "client", "peer"):
         v = row.get(k)
@@ -223,7 +232,12 @@ class LoopDetector:
         while dq and now - ts_of(dq[0]) > w:
             dq.popleft()
 
-    def _finding(self, source, identity, count, detail, action, severity="warn", first_seen=None, ids=None):
+    def _finding(self, source, identity, count, detail, action, severity="warn", first_seen=None, ids=None,
+                 caller="", unit="", session_id=""):
+        """1.0.140: ``caller`` / ``unit`` / ``session_id`` say WHO produced the
+        loop, so the issue gate's self-origin guard can tell the keeper's own run
+        (keeper*, cs-*, abstract-claude-serve*) from a real problem. The local
+        key stays as it was; the gate's fingerprint strips job/prompt-hash churn."""
         f = {"source": source, "identity": str(identity)[:200], "count": int(count),
              "detail": str(detail)[:600], "action": str(action)[:600], "severity": severity,
              "key": source + ":" + _h(identity, 16)}
@@ -231,6 +245,12 @@ class LoopDetector:
             f["first_seen"] = float(first_seen)
         if ids:
             f["ids"] = sorted(set(str(i) for i in ids))[:20]
+        if caller:
+            f["caller"] = str(caller)[:120]
+        if unit:
+            f["unit"] = str(unit)[:120]
+        if session_id:
+            f["session_id"] = str(session_id)[:120]
         self._pending.append(f)
         return f
 
@@ -279,9 +299,11 @@ class LoopDetector:
                         r.get("result") or "?", n)
                     action = ("%sjournalctl %s-u %s -n 80 --no-pager   # then: %ssystemctl %sstop %s"
                               % (sudo, sc, unit, sudo, sc, unit))
+                # a unit's restart loop is a real fault even for serve's own unit, so
+                # the unit is NOT passed as the self-origin caller (1.0.140)
                 out.append(self._finding("systemd", key, max(delta, autos), detail, action,
                                          "crit" if delta >= self.cfg["unit_restart_threshold"] else "warn",
-                                         first_seen=dq[0][0]))
+                                         first_seen=dq[0][0], caller="systemd"))
         return out
 
     def observe_jobs(self, jobs, now=None):
@@ -304,6 +326,8 @@ class LoopDetector:
             except (TypeError, ValueError):
                 attempt = 0
             cancel = "curl -s -X POST http://127.0.0.1:7002/llm/jobs/%s/cancel" % jid
+            jcaller = job_caller(j)
+            jsess = str(j.get("client_session") or "")[:120]
             if status in ("failed", "expired", "error") and err:
                 self._note_error(model, err, "job:" + jid, _ts(j, "ended_ts", "updated", "progressed_at") or now, now)
                 continue
@@ -326,7 +350,8 @@ class LoopDetector:
                     ("; last error: " + _snip(norm_error(err), 160)) if err else "")
                 action = cancel + (("   # FIX: " + fix) if fix else "   # permanent error treated as transient — cancel, then fix the cause")
                 out.append(self._finding("job", "%s %s@%s" % (jid, model, worker), retries, detail, action,
-                                         "crit", first_seen=st["first"], ids=[jid]))
+                                         "crit", first_seen=st["first"], ids=[jid], caller=jcaller,
+                                         session_id=jsess))
                 continue
             prog = _ts(j, "progressed_at")
             if status in ("processing", "streaming") and prog and now - prog > self.cfg["job_stall_s"]:
@@ -334,7 +359,8 @@ class LoopDetector:
                 detail = "job %s %s on %s: no progress for %dm%02ds (stage=%s, stalled=%s)" % (
                     jid, model, worker, idle // 60, idle % 60, stage or "?", j.get("stalled"))
                 out.append(self._finding("job", "%s %s@%s" % (jid, model, worker), 1, detail,
-                                         cancel + "   # stalled job", "warn", first_seen=prog, ids=[jid]))
+                                         cancel + "   # stalled job", "warn", first_seen=prog, ids=[jid],
+                                         caller=jcaller, session_id=jsess))
         return out
 
     def _note_error(self, model, err, rid, ts, now):
@@ -465,7 +491,7 @@ class LoopDetector:
                                                   format(self.cfg["caller_token_budget_day"], ",")))
                         out.append(self._finding("calls", "%s>%s run %s" % (caller, model, ph), len(run), detail,
                                                  "stop the run (caller %s) and check why it does not converge" % caller,
-                                                 "warn", first_seen=run[0][0]))
+                                                 "warn", first_seen=run[0][0], caller=caller))
                 dq = deque(loose)                          # only calls outside any run count as repetition
                 n = len(dq)
                 if not dq:
@@ -475,7 +501,7 @@ class LoopDetector:
                     caller, peak, model, "system" if kind == "system" else "user", n, win, snip)
                 out.append(self._finding("calls", "%s>%s %s %s" % (caller, model, kind[:3], ph), peak, detail,
                                          "throttle the caller (one in flight per slot); cancel queued rows via /llm/jobs/<id>/cancel",
-                                         "warn", first_seen=first))
+                                         "warn", first_seen=first, caller=caller))
                 continue
             thresh = self.cfg["call_repeat_threshold"] if kind == "prompt" else self.cfg["call_nohash_threshold"]
             identical = kind == "prompt" and len({e[4] for e in dq}) == 1        # the SAME request, re-sent
@@ -484,7 +510,7 @@ class LoopDetector:
                     caller, model, n, win, snip, ph)
                 out.append(self._finding("calls", "%s>%s %s" % (caller, model, ph), n, detail,
                                          "find the timer/probe sending this prompt (caller %s) and stop it; central call ids in /llm/calls" % caller,
-                                         "warn", first_seen=first))
+                                         "warn", first_seen=first, caller=caller))
                 continue
             if n >= thresh and over:
                 what = {"prompt": "identical prompt", "system": "same system prompt", "nohash": "calls"}[kind]
@@ -494,7 +520,7 @@ class LoopDetector:
                                               (": “%s”" % snip) if snip else "")
                 out.append(self._finding("calls", "%s>%s %s %s" % (caller, model, kind[:3], ph or "nohash"), n, detail,
                                          "find the timer/probe sending this (caller %s) and stop or slow it; central call ids in /llm/calls" % caller,
-                                         "warn", first_seen=first))
+                                         "warn", first_seen=first, caller=caller))
         for caller in burn_callers:
             per_day, tot = self.caller_rate(caller, now)
             if per_day > self.cfg["caller_token_budget_day"]:
@@ -503,7 +529,7 @@ class LoopDetector:
                              format(self.cfg["caller_token_budget_day"], ",")))
                 out.append(self._finding("token_burn", caller, per_day, detail,
                                          "declared batch caller over budget: slow its schedule or raise its budget "
-                                         "(STATION_LOOP_CALLER_BUDGET)", "warn"))
+                                         "(STATION_LOOP_CALLER_BUDGET)", "warn", caller=caller))
         out.extend(self._error_findings(now))
         return out
 
@@ -588,6 +614,9 @@ class LoopDetector:
                        severity=f["severity"])
             if f.get("ids"):
                 row["ids"] = f["ids"]
+            for k2 in ("caller", "unit", "session_id"):          # 1.0.140: self-origin inputs for the gate
+                if f.get(k2):
+                    row[k2] = f[k2]
             if now - float(row.get("mailed_at") or 0) >= self.cfg["mail_cooldown_s"]:
                 events["mail"].append(row)
         for k, row in list(self.loops.items()):
@@ -626,5 +655,10 @@ def fmt_board(row):
     note = ("%s\n\nfirst %s · last %s · detector key %s\n\n```bash\n%s\n```"
             % (row.get("detail") or "", time.strftime("%Y-%m-%d %H:%M", time.localtime(float(row.get("first_seen") or 0))),
                time.strftime("%H:%M", time.localtime(float(row.get("last_seen") or 0))), row["key"],
-               row.get("action") or ""))[:2000]
+               row.get("action") or ""))[:1800]
+    # the same close contract as findings (keeper_notify.DISP_MARKER): a decided
+    # loop is logged, not re-pinged
+    note += ("\n\nclose with a disposition line: `inert: <reason>` lowers this loop's priority (still reported, "
+             "board t4178); `accept` = fixed "
+             "(it re-opens if it comes back); plain close = handled.")
     return text, note

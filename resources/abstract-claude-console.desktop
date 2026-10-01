@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
 Name=Abstract Claude Console
-Comment=Native client for the keeper shared console
-Exec=/opt/hugpy-station/resources/bin/abstract-claude-console
+Comment=Shared Serve console (Claude / GPT / Hugpy) in its own window
+Exec=hugpy-station --serve claude
 Terminal=false
 Categories=Development;Utility;
 StartupWMClass=Abstract Claude Console

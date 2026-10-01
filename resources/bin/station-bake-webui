@@ -40,7 +40,7 @@
 # USAGE
 #   station-bake-webui <dst-dir> [pkg-webui-dir]
 #     dst-dir        where the /ac dist must live (what AC_UI_DIST points at)
-#     pkg-webui-dir  abstract_claude/webui inside the installed package;
+#     pkg-webui-dir  abstract_serve_core/webui inside the installed package;
 #                    auto-detected from ABSTRACT_CLAUDE_BIN / $PATH when omitted
 #
 #   station-bake-webui --check <dst-dir> [pkg-webui-dir]
@@ -69,11 +69,24 @@ if [ -z "$PKG_UI" ]; then
         # the venv that owns the entry point is the one that has the package
         _venv_py="$(dirname "$(readlink -f "$_ac")")/python3"
         [ -x "$_venv_py" ] || _venv_py="$(dirname "$(readlink -f "$_ac")")/python"
-        [ -x "$_venv_py" ] && PKG_UI="$("$_venv_py" -c 'import abstract_claude,os;print(os.path.join(os.path.dirname(abstract_claude.__file__),"webui"))' 2>/dev/null || true)"
+        # The console is SERVED by abstract-serve-core, so its webui is the one
+        # source of truth; abstract_serve (pre-0.1.12 import name) and
+        # abstract_claude are fallbacks for older installs only.
+        [ -x "$_venv_py" ] && PKG_UI="$("$_venv_py" -c '
+import importlib, os
+for m in ("abstract_serve_core", "abstract_serve", "abstract_claude"):
+    try:
+        d = os.path.join(os.path.dirname(importlib.import_module(m).__file__), "webui")
+    except Exception:
+        continue
+    if os.path.isfile(os.path.join(d, "index.html")):
+        print(d)
+        break
+' 2>/dev/null || true)"
     fi
 fi
 if [ -z "$PKG_UI" ] || [ ! -f "$PKG_UI/index.html" ]; then
-    echo "station-bake-webui: no installed abstract_claude webui found (tried '${PKG_UI:-<none>}') — leaving $DST alone" >&2
+    echo "station-bake-webui: no installed console webui (abstract_serve_core/abstract_claude) found (tried '${PKG_UI:-<none>}') — leaving $DST alone" >&2
     exit 0
 fi
 

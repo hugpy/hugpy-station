@@ -10,6 +10,8 @@ const { app, BrowserWindow, Menu, shell, dialog, ipcMain } = electron;
 const { spawn } = require('child_process');
 const path = require('path');
 const http = require('http');
+// observability (OFF by default): only the side-effect-free switch loads here.
+const obsToggle = require('./observability/toggle');
 
 const HOST = '127.0.0.1';
 const PORT = process.env.CONSOLE_PORT || '8899'; // private port; avoids clashing with a system console-standalone.service on 8800
@@ -25,6 +27,15 @@ const BASE = `http://${HOST}:${PORT}`;
 const AC_HOST = '127.0.0.1';
 const AC_PORT = process.env.AC_PORT || '9124'; // serve's default listen port (AC_PORT)
 const AC_BASE = process.env.STATION_CONSOLE_AC || `http://${AC_HOST}:${AC_PORT}`;
+// serve-core (1.0.138): the join-first probe + backend preselect shared with the
+// standalone serve window (resources/serve-app/main.js) — "Serve IS the Electron
+// serve app". Ships unpacked next to serve-app (extraResources).
+const serveCore = require(app.isPackaged
+  ? path.join(process.resourcesPath, 'serve-app', 'serve-core.js')
+  : path.join(__dirname, 'resources', 'serve-app', 'serve-core.js'));
+// The console the /ac proxy and the native view front: AC_BASE, or the console
+// the join-first probe found already answering (startServeIfNeeded).
+let acBase = AC_BASE;
 
 let backend = null;
 let backendReady = false;
@@ -42,6 +53,18 @@ const HAS_WCV = typeof electron.WebContentsView === 'function';
 const AC_CONSOLE_URL = BASE + '/ac/'; // same-origin /ac proxy (shim + holding page)
 let consoleView = null;
 let consoleShown = false;
+let consolePreselected = false;
+// An EXPLICIT first backend for the native console (SERVE_BACKEND=claude|gpt|hugpy
+// or --console-backend=<b>) is applied with serve-core's preselect on the first
+// show — the same selection the standalone serve window makes. Unset (the
+// default) leaves the selection to the console / the SPA's frontier picker.
+const CONSOLE_BACKEND = (() => {
+  const a = process.argv.find((x) => x.startsWith('--console-backend='));
+  const b = (a && a.slice('--console-backend='.length)) || process.env.SERVE_BACKEND || '';
+  return serveCore.BACKENDS.includes(b) ? b : '';
+})();
+let browserView = null;
+let browserShown = false;
 
 function createConsoleView() {
   if (!win || consoleView) return consoleView;
@@ -81,6 +104,14 @@ function showConsole(rect) {
   consoleShown = true;
   try { if (typeof consoleView.setVisible === 'function') consoleView.setVisible(true); } catch (_) {}
   setConsoleBounds(rect);
+  if (CONSOLE_BACKEND && !consolePreselected) {
+    consolePreselected = true;
+    const wc = consoleView.webContents;
+    const run = () => serveCore.preselect({ consoleBase: acBase, backend: CONSOLE_BACKEND,
+      exec: (js) => wc.executeJavaScript(js) })
+      .catch((err) => console.error('[ac-serve] preselect:', err.message));
+    if (wc.isLoading()) wc.once('did-finish-load', run); else run();
+  }
 }
 
 function hideConsole() {
@@ -100,6 +131,57 @@ function registerConsoleIpc() {
   ipcMain.on('console:reload', () => {
     if (consoleView) { try { consoleView.webContents.reload(); } catch (_) {} }
   });
+}
+
+// 1.0.143: the Station page's clipboard (preload window.stationClipboard) —
+// text only, answered only for the main Station window's own page.
+function registerClipboardIpc() {
+  const fromStation = (e) => !!(win && e && e.sender && e.sender.id === win.webContents.id);
+  ipcMain.handle('clipboard:readText', (e) => (fromStation(e) ? electron.clipboard.readText() : ''));
+  ipcMain.handle('clipboard:writeText', (e, text) => {
+    if (!fromStation(e)) return false;
+    electron.clipboard.writeText(String(text == null ? '' : text).slice(0, 8 * 1024 * 1024));
+    return true;
+  });
+}
+
+function createBrowserView() {
+  if (!win || browserView) return browserView;
+  const opts = { webPreferences: { contextIsolation: true, sandbox: true, nodeIntegration: false } };
+  if (HAS_WCV) {
+    browserView = new electron.WebContentsView(opts);
+    win.contentView.addChildView(browserView);
+  } else {
+    browserView = new electron.BrowserView(opts);
+    win.addBrowserView(browserView);
+  }
+  browserView.setBounds({ x: 0, y: 0, width: 0, height: 0 });
+  browserView.webContents.setWindowOpenHandler(({ url }) => { browserView.webContents.loadURL(url); return { action: 'deny' }; });
+  const emit = (kind, body) => win.webContents.send('browser:event', { kind, body, url: browserView.webContents.getURL(), ts: Date.now() / 1000 });
+  browserView.webContents.on('console-message', (_e, level, message, line, sourceId) => emit('browser_console', { level, message, line, sourceId }));
+  browserView.webContents.on('did-start-loading', () => emit('browser_navigation', { phase: 'start' }));
+  browserView.webContents.on('did-stop-loading', () => emit('browser_navigation', { phase: 'stop', title: browserView.webContents.getTitle() }));
+  browserView.webContents.on('did-fail-load', (_e, code, description, validatedURL) => emit('browser_error', { code, description, validatedURL }));
+  browserView.webContents.session.webRequest.onBeforeRequest({ urls: ['<all_urls>'] }, (details, callback) => {
+    emit('browser_request', { requestId: details.id, method: details.method, resourceType: details.resourceType, url: details.url });
+    callback({});
+  });
+  browserView.webContents.session.webRequest.onCompleted({ urls: ['<all_urls>'] }, details => emit('browser_response', { requestId: details.id, statusCode: details.statusCode, url: details.url, method: details.method }));
+  return browserView;
+}
+
+function setBrowserBounds(rect) {
+  if (!browserView || !rect) return;
+  browserView.setBounds({ x: Math.round(rect.x || 0), y: Math.round(rect.y || 0), width: Math.max(0, Math.round(rect.width || 0)), height: Math.max(0, Math.round(rect.height || 0)) });
+}
+
+function registerBrowserIpc() {
+  ipcMain.on('browser:open-capture', () => openObservability());
+  ipcMain.on('browser:show', (_e, rect) => { createBrowserView(); browserShown = true; try { browserView.setVisible(true); } catch (_) {} setBrowserBounds(rect); });
+  ipcMain.on('browser:hide', () => { if (!browserView) return; browserShown = false; try { browserView.setVisible(false); } catch (_) {} setBrowserBounds({ x: 0, y: 0, width: 0, height: 0 }); });
+  ipcMain.on('browser:setBounds', (_e, rect) => { if (browserShown) setBrowserBounds(rect); });
+  ipcMain.on('browser:navigate', (_e, url) => { if (browserView && /^https?:\/\//i.test(String(url || '').trim())) browserView.webContents.loadURL(String(url).trim()); });
+  ipcMain.on('browser:reload', () => { if (browserView) browserView.webContents.reload(); });
 }
 
 function backendDir() {
@@ -141,8 +223,12 @@ function startBackend() {
   const server = path.join(dir, 'server.py');
   backend = spawn(pythonExe(), [server], {
     cwd: dir,
-    // STATION_CONSOLE_AC points server.py's /ac proxy at the serve we own.
-    env: { ...process.env, HOST, PORT, STATION_CONSOLE_AC: AC_BASE },
+    // STATION_CONSOLE_AC points server.py's /ac proxy at the serve we own or joined.
+    // HUGPY_STATION_DESKTOP_PID (1.0.139) marks this backend as OURS: the launcher
+    // reaps a backend holding the station port only when the Station named here
+    // is gone — never the headless hugpy-station-web@ backend or a live Station.
+    env: { ...process.env, HOST, PORT, STATION_CONSOLE_AC: acBase,
+           HUGPY_STATION_DESKTOP_PID: String(process.pid) },
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   backend.stdout.on('data', (d) => console.log('[backend]', d.toString().trimEnd()));
@@ -235,11 +321,18 @@ function startServe() {
   });
 }
 
-// Spawn serve unless an external instance already owns the port.
+// JOIN FIRST (serve-core, same probe as `hugpy-station --serve`): attach to a
+// console already answering on AC_BASE, HUGPY_AGENT_SERVE or 9124-9127; only
+// when none answers do we spawn our own on AC_PORT. A pre-health-path serve that
+// answers `/` on AC_BASE is still joined (the pre-1.0.138 acAnswering check).
+// Either way only THIS user's serve is joined (serve-core ownedByMe): serves are
+// per user, with their own credentials and sessions.
 async function startServeIfNeeded() {
-  if (await acAnswering()) {
-    serveReady = true; // an external instance (systemd unit) already owns AC_BASE
-    console.log('[ac-serve] already answering at', AC_BASE, '- not spawning a duplicate');
+  const found = await serveCore.findConsole(serveCore.consoleCandidates({ first: AC_BASE, acPort: AC_PORT }));
+  if (found || (await acAnswering() && serveCore.ownedByMe(AC_BASE))) {
+    acBase = found || AC_BASE;
+    serveReady = true; // an external instance (systemd unit, serve window) already answers
+    console.log('[ac-serve] console already answering at', acBase, '- joining it, not spawning a duplicate');
     return;
   }
   startServe();
@@ -249,10 +342,10 @@ async function startServeIfNeeded() {
 function waitForServe(retries = 40, delayMs = 500) {
   return new Promise((resolve, reject) => {
     const tick = (n) => {
-      const req = http.get(AC_BASE + '/', (res) => {
+      const req = http.get(acBase + '/', (res) => {
         res.resume();
         serveReady = true;
-        console.log('[ac-serve] answering at', AC_BASE);
+        console.log('[ac-serve] answering at', acBase);
         resolve();
       });
       req.on('error', () => {
@@ -304,6 +397,46 @@ async function showAbout() {
   });
 }
 
+// ── observability: the in-app trace browser (observability/README.md) ──────
+// OFF by default. Only observability/toggle.js (no side effects) is loaded at
+// startup; the capture engine is required on first open and only when enabled,
+// so with the toggle off the Station runs exactly as before. Replaces the
+// external hugpy-observability .deb launcher (never shipped/installed).
+let obsModule = null;
+
+async function openObservability() {
+  const userData = app.getPath('userData');
+  if (!obsToggle.isEnabled(userData)) {
+    if (obsToggle.envOverride() === false) {
+      dialog.showMessageBox(win, { type: 'info', title: 'Observability',
+        message: 'Observability is disabled by HUGPY_STATION_OBSERVABILITY=0.' });
+      return;
+    }
+    const { response } = await dialog.showMessageBox(win, { type: 'question', title: 'Observability',
+      message: 'Observability is off.',
+      detail: 'It opens a separate trace browser (own session) that attaches Chrome DevTools Protocol to the page you load, ' +
+        'tags targeted requests with a per-request X-Hugpy-Trace-Id and reads the matching server spans. Nothing runs while it is off.',
+      buttons: ['Enable and open', 'Cancel'], defaultId: 0, cancelId: 1 });
+    if (response !== 0) return;
+    obsToggle.setEnabled(userData, true);
+    buildMenu();
+  }
+  try {
+    obsModule = obsModule || require('./observability');
+    // saved traces are also filed in this Station's provenance ledger
+    await obsModule.open({ userData, provenanceUrl: `${BASE}/api/provenance/ingest` });
+  } catch (err) {
+    console.error('[observability]', err);
+    dialog.showErrorBox('Observability failed to open', String(err && err.message || err));
+  }
+}
+
+function setObservabilityEnabled(on) {
+  obsToggle.setEnabled(app.getPath('userData'), on);
+  if (!on && obsModule) obsModule.close();
+  buildMenu();
+}
+
 function buildMenu() {
   const template = [
     {
@@ -329,6 +462,17 @@ function buildMenu() {
         {
           label: 'Open in browser',
           click: () => shell.openExternal(BASE),
+        },
+        {
+          label: 'Observability (trace browser)',
+          click: openObservability,
+        },
+        {
+          label: 'Enable observability',
+          type: 'checkbox',
+          checked: obsToggle.isEnabled(app.getPath('userData')),
+          enabled: obsToggle.envOverride() === null,   // env-forced: show, don't fight it
+          click: (item) => setObservabilityEnabled(item.checked),
         },
         { type: 'separator' },
         {
@@ -360,12 +504,45 @@ function createWindow() {
   // build the native console view now so /ac starts warming (hidden until the
   // renderer measures #fv-term-pane and asks for it).
   createConsoleView();
-  win.on('closed', () => { win = null; consoleView = null; consoleShown = false; });
+  win.on('closed', () => {
+    win = null; consoleView = null; consoleShown = false; browserView = null; browserShown = false;
+    if (obsModule) obsModule.close();   // the trace browser never outlives the Station window
+  });
 }
+
+// `hugpy-station --serve [claude|gpt|hugpy]`: run ONLY hugpy serve
+// (resources/serve-app: the shared Serve console, attach-or-launch) on this
+// runtime. None of the Station startup below runs: no backend, no Station
+// window, no serve spawn beyond serve-app's own.
+if (process.argv.some((a) => a === '--serve' || a.startsWith('--serve='))) {
+  require(app.isPackaged
+    ? path.join(process.resourcesPath, 'serve-app', 'main.js')
+    : path.join(__dirname, 'resources', 'serve-app', 'main.js'));
+  return;
+}
+
+// ONE Station per user (1.0.139). A second `hugpy-station` (desktop entry, shell,
+// the launcher handing off because the port is held by this Station) focuses the
+// running window and quits — it never starts a second backend, and nothing kills
+// the running one (the pre-1.0.139 launcher pkill'd it). `--serve` returned above
+// and keeps its own userData, so a serve window never contends for this lock.
+if (!app.requestSingleInstanceLock()) {
+  console.log('[station] hugpy Station is already running for this user - focusing it');
+  app.quit();
+  return;
+}
+app.on('second-instance', () => {
+  if (!win) return;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  win.focus();
+});
 
 app.whenReady().then(async () => {
   buildMenu();
   registerConsoleIpc();
+  registerBrowserIpc();
+  registerClipboardIpc();
   // Bring serve up first so 9124 is coming up while the backend boots; skip if
   // an external instance already owns it.
   await startServeIfNeeded();

@@ -240,11 +240,11 @@ log "PATH: $LBIN/{mct-pull,mct-push,abstract-claude-serve-run,sweep-orphan-seat-
 # exchange_capture_hook.py, SessionStart/PreCompact/SessionEnd -> ledger_hook.py)
 # go on the user's PATH too, so serve/seat sessions run them from a shipped
 # source instead of a hand-authored /srv/vm_mgr/bin copy (station-drift-check G).
-for hook in exchange_capture_hook.py ledger_hook.py; do
+for hook in exchange_capture_hook.py ledger_hook.py source_guard_hook.py; do
     [ -f "$BACKEND/hooks/$hook" ] || continue
     ln -sfn "$BACKEND/hooks/$hook" "$LBIN/$hook" 2>/dev/null && own "$LBIN/$hook"
 done
-log "hooks: $LBIN/{exchange_capture_hook,ledger_hook}.py -> $BACKEND/hooks"
+log "hooks: $LBIN/{exchange_capture_hook,ledger_hook,source_guard_hook}.py -> $BACKEND/hooks"
 
 # 1.0.107: re-provision the seat venv from the pinned module manifest on EVERY
 # install (not just fresh-box seat-provision), so a version upgrade persists to

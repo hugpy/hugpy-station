@@ -1,0 +1,2697 @@
+{
+  "url": "http://127.0.0.1:7395/console",
+  "scenario": "ui",
+  "session": "obs-s-9978d5cbc96558cf",
+  "filter": {
+    "domains": [
+      "127.0.0.1:7395"
+    ],
+    "routes": [
+      "/api/*",
+      "/llm/*"
+    ],
+    "methods": [],
+    "types": [
+      "XHR",
+      "Fetch"
+    ],
+    "action": "",
+    "tagWhen": "always"
+  },
+  "server": {
+    "spans": "app",
+    "modules": ""
+  },
+  "log": [
+    "PASS feature OFF by default (fresh userData, env unset)",
+    "loaded http://127.0.0.1:7395/console capture.active=true session=obs-s-9978d5cbc96558cf",
+    "clicked nav.tabbar button:nth-of-type(2) at 120,192",
+    "clicked nav.tabbar button:nth-of-type(3) at 197,192",
+    "clicked nav.tabbar button:nth-of-type(4) at 296,192",
+    "clicked nav.tabbar button:nth-of-type(8) at 654,192",
+    "clicked nav.tabbar button:nth-of-type(9) at 727,192",
+    "clicked nav.tabbar button:nth-of-type(10) at 797,192"
+  ],
+  "blocked": [],
+  "checks": [
+    {
+      "name": "feature OFF by default (fresh userData, env unset)",
+      "ok": true
+    }
+  ],
+  "hops": [
+    {
+      "key": "1951778.5",
+      "traceId": "obs-9e5c114254a50ae9",
+      "serverTraceId": "obs-9e5c114254a50ae9",
+      "req": "GET /api/auth/config",
+      "type": "Fetch",
+      "hop1_action": null,
+      "hop1_listener": null,
+      "hop1_join": "unlinked: root T is not a listener of any recorded action",
+      "hop2_stack": "script: fetch < Ct | await[Jt,(anon)]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-9e5c114254a50ae9",
+        "X-Hugpy-Trace-Session": "obs-s-9978d5cbc96558cf",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/auth/config -> 200 endpoint=ui_auth_config session=obs-s-9978d5cbc96558cf spans=app(10)",
+      "hop4_handler": "ui_auth_config test/contract/stub_server.py:281 [server view (url_rule)]",
+      "hop4_callees": [],
+      "hop5_output": [
+        "handler returned: ui_auth_config",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 283B 4ms console_trace/2; spans=app",
+      "hop6_body": "{\"base\":null,\"mode\":\"open\"}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root +55ms (timing (≤300 ms after response))",
+        "childList html > body +55ms (timing (≤300 ms after response))",
+        "childList div#root +55ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.7",
+      "traceId": "obs-c9e90fa777806058",
+      "serverTraceId": "obs-c9e90fa777806058",
+      "req": "GET /api/v1/models",
+      "type": "Fetch",
+      "hop1_action": null,
+      "hop1_listener": null,
+      "hop1_join": "unlinked: root T is not a listener of any recorded action",
+      "hop2_stack": "script: fetch < Ct | await[Et,n]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-c9e90fa777806058",
+        "X-Hugpy-Trace-Session": "obs-s-9978d5cbc96558cf",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/v1/models -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 339B 18ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/v1/models\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root +30ms (timing (≤300 ms after response))",
+        "childList html > body +30ms (timing (≤300 ms after response))",
+        "childList div#root +30ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.8",
+      "traceId": "obs-bf43a9f80fd2518f",
+      "serverTraceId": "obs-bf43a9f80fd2518f",
+      "req": "GET /api/models",
+      "type": "Fetch",
+      "hop1_action": null,
+      "hop1_listener": null,
+      "hop1_join": "unlinked: root T is not a listener of any recorded action",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-bf43a9f80fd2518f",
+        "X-Hugpy-Trace-Session": "obs-s-9978d5cbc96558cf",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/models -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 336B 19ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/models\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root +28ms (timing (≤300 ms after response))",
+        "childList html > body +28ms (timing (≤300 ms after response))",
+        "childList div#root +28ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.10",
+      "traceId": "obs-2f82bfd375ab2e90",
+      "serverTraceId": "obs-2f82bfd375ab2e90",
+      "req": "GET /api/llm/snapshot",
+      "type": "Fetch",
+      "hop1_action": null,
+      "hop1_listener": null,
+      "hop1_join": "unlinked: root T is not a listener of any recorded action",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)] < setTimeout[Ht,e.onerror] < error[(anon),Vt]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-2f82bfd375ab2e90",
+        "X-Hugpy-Trace-Session": "obs-s-9978d5cbc96558cf",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/llm/snapshot -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 342B 4ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/llm/snapshot\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root +17ms (timing (≤300 ms after response))",
+        "childList html > body +17ms (timing (≤300 ms after response))",
+        "childList div#root +17ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.38",
+      "traceId": "obs-7061a3073491c06c",
+      "serverTraceId": "obs-7061a3073491c06c",
+      "req": "GET /api/models",
+      "type": "Fetch",
+      "hop1_action": null,
+      "hop1_listener": null,
+      "hop1_join": "unlinked: timer-driven (setTimeout)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)] < setTimeout[(anon),ti]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-7061a3073491c06c",
+        "X-Hugpy-Trace-Session": "obs-s-9978d5cbc96558cf",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/models -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 336B 3ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/models\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": []
+    },
+    {
+      "key": "1951778.39",
+      "traceId": "obs-4eed5bb492d280a9",
+      "serverTraceId": "obs-4eed5bb492d280a9",
+      "req": "GET /api/llm/fleet/distribution",
+      "type": "Fetch",
+      "hop1_action": "click div#root > div.layout > nav.tabbar > button.tab:nth-of-type(2) (trusted=true)",
+      "hop1_listener": null,
+      "hop1_join": "scheduled-after-action (async chain)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)]",
+      "request_headers_on_wire": {},
+      "request_body": null,
+      "hop3_server": "GET /api/llm/fleet/distribution -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 352B 6ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/llm/fleet/distribution\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +53ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +53ms (timing (≤300 ms after response))",
+        "childList div.layout > div.tab-body:nth-of-type(2) > div.tab-pane > div.phonebrick-panel:nth-of-type(3) > div.pb-bar +53ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.40",
+      "traceId": "obs-ed687f207412b6f3",
+      "serverTraceId": "obs-ed687f207412b6f3",
+      "req": "GET /api/llm/enroll-tokens",
+      "type": "Fetch",
+      "hop1_action": "click div#root > div.layout > nav.tabbar > button.tab:nth-of-type(2) (trusted=true)",
+      "hop1_listener": null,
+      "hop1_join": "scheduled-after-action (async chain)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)]",
+      "request_headers_on_wire": {},
+      "request_body": null,
+      "hop3_server": "GET /api/llm/enroll-tokens -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 347B 4ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/llm/enroll-tokens\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +55ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +55ms (timing (≤300 ms after response))",
+        "childList div.layout > div.tab-body:nth-of-type(2) > div.tab-pane > div.phonebrick-panel:nth-of-type(3) > div.pb-bar +55ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.41",
+      "traceId": "obs-89ba82f399c18540",
+      "serverTraceId": "obs-89ba82f399c18540",
+      "req": "GET /api/llm/workers/central-address",
+      "type": "Fetch",
+      "hop1_action": "click div#root > div.layout > nav.tabbar > button.tab:nth-of-type(2) (trusted=true)",
+      "hop1_listener": null,
+      "hop1_join": "scheduled-after-action (async chain)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)]",
+      "request_headers_on_wire": {},
+      "request_body": null,
+      "hop3_server": "GET /api/llm/workers/central-address -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 358B 5ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/llm/workers/central-address\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +54ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +54ms (timing (≤300 ms after response))",
+        "childList div.layout > div.tab-body:nth-of-type(2) > div.tab-pane > div.phonebrick-panel:nth-of-type(3) > div.pb-bar +54ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.42",
+      "traceId": "obs-7bbc143882eb53f4",
+      "serverTraceId": "obs-7bbc143882eb53f4",
+      "req": "GET /api/phone-brick/phones",
+      "type": "Fetch",
+      "hop1_action": "click div#root > div.layout > nav.tabbar > button.tab:nth-of-type(2) (trusted=true)",
+      "hop1_listener": null,
+      "hop1_join": "scheduled-after-action (async chain)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)]",
+      "request_headers_on_wire": {},
+      "request_body": null,
+      "hop3_server": "GET /api/phone-brick/phones -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 348B 6ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/phone-brick/phones\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +53ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +53ms (timing (≤300 ms after response))",
+        "childList div.layout > div.tab-body:nth-of-type(2) > div.tab-pane > div.phonebrick-panel:nth-of-type(3) > div.pb-bar +53ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.43",
+      "traceId": "obs-9ca2dfaa6512b192",
+      "serverTraceId": "obs-9ca2dfaa6512b192",
+      "req": "GET /api/llm/model-groups",
+      "type": "Fetch",
+      "hop1_action": "click div#root > div.layout > nav.tabbar > button.tab:nth-of-type(3) (trusted=true)",
+      "hop1_listener": null,
+      "hop1_join": "scheduled-after-action (async chain)",
+      "hop2_stack": "script: fetch < Ct | await[Et,oo]",
+      "request_headers_on_wire": {},
+      "request_body": null,
+      "hop3_server": "GET /api/llm/model-groups -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 346B 5ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/llm/model-groups\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +55ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +55ms (timing (≤300 ms after response))",
+        "childList section.models-pane > div.models-pane-split-host > div.models-pane-feed:nth-of-type(3) > div.evf > div.evf-bar:nth-of-type(1) +55ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.44",
+      "traceId": "obs-9b929713f2a93755",
+      "serverTraceId": "obs-9b929713f2a93755",
+      "req": "GET /api/llm/evictions?limit=300",
+      "type": "Fetch",
+      "hop1_action": "click div#root > div.layout > nav.tabbar > button.tab:nth-of-type(3) (trusted=true)",
+      "hop1_listener": null,
+      "hop1_join": "scheduled-after-action (async chain)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)]",
+      "request_headers_on_wire": {},
+      "request_body": null,
+      "hop3_server": "GET /api/llm/evictions -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 343B 5ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/llm/evictions\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +55ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +55ms (timing (≤300 ms after response))",
+        "childList section.models-pane > div.models-pane-split-host > div.models-pane-feed:nth-of-type(3) > div.evf > div.evf-bar:nth-of-type(1) +55ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.46",
+      "traceId": "obs-b76952e8f9d79764",
+      "serverTraceId": "obs-b76952e8f9d79764",
+      "req": "GET /api/llm/workers",
+      "type": "Fetch",
+      "hop1_action": "click div#root > div.layout > nav.tabbar > button.tab:nth-of-type(4) (trusted=true)",
+      "hop1_listener": null,
+      "hop1_join": "scheduled-after-action (async chain)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)]",
+      "request_headers_on_wire": {},
+      "request_body": null,
+      "hop3_server": "GET /api/llm/workers -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 341B 3ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/llm/workers\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +56ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +56ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) > div.tab-pane > section.hf-search.hf-search-expanded +56ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.47",
+      "traceId": "obs-32e587d0a7da22cb",
+      "serverTraceId": "obs-32e587d0a7da22cb",
+      "req": "GET /api/search?limit=40&offset=0",
+      "type": "Fetch",
+      "hop1_action": null,
+      "hop1_listener": null,
+      "hop1_join": "unlinked: timer-driven (setTimeout)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)] < setTimeout[(anon),ti]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-32e587d0a7da22cb",
+        "X-Hugpy-Trace-Session": "obs-s-9978d5cbc96558cf",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/search -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 336B 3ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/search\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div.layout > div.tab-body:nth-of-type(2) > div.tab-pane > section.hf-search.hf-search-expanded > div.hf-search-bar:nth-of-type(2) +61ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) > div.tab-pane > section.hf-search.hf-search-expanded +61ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.48",
+      "traceId": "obs-56525b3f950f2b8b",
+      "serverTraceId": "obs-56525b3f950f2b8b",
+      "req": "GET /api/llm/benchmark/suites",
+      "type": "Fetch",
+      "hop1_action": "click div#root > div.layout > nav.tabbar > button.tab:nth-of-type(8) (trusted=true)",
+      "hop1_listener": null,
+      "hop1_join": "scheduled-after-action (async chain)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)]",
+      "request_headers_on_wire": {},
+      "request_body": null,
+      "hop3_server": "GET /api/llm/benchmark/suites -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 350B 6ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/llm/benchmark/suites\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +53ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +53ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) > div.tab-pane > div.metrics-panel +53ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.49",
+      "traceId": "obs-b6148f644ce2ebbb",
+      "serverTraceId": "obs-b6148f644ce2ebbb",
+      "req": "GET /api/llm/benchmark/runs",
+      "type": "Fetch",
+      "hop1_action": "click div#root > div.layout > nav.tabbar > button.tab:nth-of-type(8) (trusted=true)",
+      "hop1_listener": null,
+      "hop1_join": "scheduled-after-action (async chain)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)]",
+      "request_headers_on_wire": {},
+      "request_body": null,
+      "hop3_server": "GET /api/llm/benchmark/runs -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 348B 8ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/llm/benchmark/runs\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +51ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +51ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) > div.tab-pane > div.metrics-panel +51ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.50",
+      "traceId": "obs-83337afd33ae936c",
+      "serverTraceId": "obs-83337afd33ae936c",
+      "req": "GET /api/llm/model-metrics2?limit=5000",
+      "type": "Fetch",
+      "hop1_action": "click div#root > div.layout > nav.tabbar > button.tab:nth-of-type(8) (trusted=true)",
+      "hop1_listener": null,
+      "hop1_join": "scheduled-after-action (async chain)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)]",
+      "request_headers_on_wire": {},
+      "request_body": null,
+      "hop3_server": "GET /api/llm/model-metrics2 -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 348B 8ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/llm/model-metrics2\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +51ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +51ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) > div.tab-pane > div.metrics-panel +51ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.51",
+      "traceId": "obs-b65b4ec0579d9388",
+      "serverTraceId": "obs-b65b4ec0579d9388",
+      "req": "GET /api/llm/benchmark/status",
+      "type": "Fetch",
+      "hop1_action": "click div#root > div.layout > nav.tabbar > button.tab:nth-of-type(8) (trusted=true)",
+      "hop1_listener": null,
+      "hop1_join": "scheduled-after-action (async chain)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)]",
+      "request_headers_on_wire": {},
+      "request_body": null,
+      "hop3_server": "GET /api/llm/benchmark/status -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 350B 8ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/llm/benchmark/status\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +51ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +51ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) > div.tab-pane > div.metrics-panel +51ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.52",
+      "traceId": "obs-f8005f66c1e32737",
+      "serverTraceId": "obs-f8005f66c1e32737",
+      "req": "GET /api/v1/models",
+      "type": "Fetch",
+      "hop1_action": "click div#root > div.layout > nav.tabbar > button.tab:nth-of-type(8) (trusted=true)",
+      "hop1_listener": null,
+      "hop1_join": "scheduled-after-action (async chain)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)]",
+      "request_headers_on_wire": {},
+      "request_body": null,
+      "hop3_server": "GET /api/v1/models -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 339B 8ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/v1/models\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +51ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +51ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) > div.tab-pane > div.metrics-panel +51ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.53",
+      "traceId": "obs-b103ff22d3ffb591",
+      "serverTraceId": "obs-b103ff22d3ffb591",
+      "req": "GET /api/llm/calls?limit=400",
+      "type": "Fetch",
+      "hop1_action": "click div#root > div.layout > nav.tabbar > button.tab:nth-of-type(9) (trusted=true)",
+      "hop1_listener": null,
+      "hop1_join": "scheduled-after-action (async chain)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)]",
+      "request_headers_on_wire": {},
+      "request_body": null,
+      "hop3_server": "GET /api/llm/calls -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 339B 3ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/llm/calls\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +57ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +57ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) > div.tab-pane > div.cp-panel +57ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.54",
+      "traceId": "obs-8ea2a93d1853cbde",
+      "serverTraceId": "obs-8ea2a93d1853cbde",
+      "req": "GET /api/llm/benchmark/suites",
+      "type": "Fetch",
+      "hop1_action": "click div#root > div.layout > nav.tabbar > button.tab:nth-of-type(10) (trusted=true)",
+      "hop1_listener": null,
+      "hop1_join": "scheduled-after-action (async chain)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)]",
+      "request_headers_on_wire": {},
+      "request_body": null,
+      "hop3_server": "GET /api/llm/benchmark/suites -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 350B 5ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/llm/benchmark/suites\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +54ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +54ms (timing (≤300 ms after response))",
+        "childList div.tab-body:nth-of-type(2) > div.tab-pane > div.rv-panel > section.rv-benchmark > div.metrics-panel +54ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.55",
+      "traceId": "obs-16914ac58ddb1299",
+      "serverTraceId": "obs-16914ac58ddb1299",
+      "req": "GET /api/llm/benchmark/runs",
+      "type": "Fetch",
+      "hop1_action": "click div#root > div.layout > nav.tabbar > button.tab:nth-of-type(10) (trusted=true)",
+      "hop1_listener": null,
+      "hop1_join": "scheduled-after-action (async chain)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)]",
+      "request_headers_on_wire": {},
+      "request_body": null,
+      "hop3_server": "GET /api/llm/benchmark/runs -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 348B 7ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/llm/benchmark/runs\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +52ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +52ms (timing (≤300 ms after response))",
+        "childList div.tab-body:nth-of-type(2) > div.tab-pane > div.rv-panel > section.rv-benchmark > div.metrics-panel +52ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.56",
+      "traceId": "obs-deecf4cc10bf7c9f",
+      "serverTraceId": "obs-deecf4cc10bf7c9f",
+      "req": "GET /api/models",
+      "type": "Fetch",
+      "hop1_action": "click div#root > div.layout > nav.tabbar > button.tab:nth-of-type(10) (trusted=true)",
+      "hop1_listener": null,
+      "hop1_join": "scheduled-after-action (async chain)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)]",
+      "request_headers_on_wire": {},
+      "request_body": null,
+      "hop3_server": "GET /api/models -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 336B 8ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/models\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +51ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +51ms (timing (≤300 ms after response))",
+        "childList div.tab-body:nth-of-type(2) > div.tab-pane > div.rv-panel > section.rv-benchmark > div.metrics-panel +51ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.57",
+      "traceId": "obs-37073ede93a9fe1a",
+      "serverTraceId": "obs-37073ede93a9fe1a",
+      "req": "GET /api/llm/model-metrics2?limit=5000",
+      "type": "Fetch",
+      "hop1_action": "click div#root > div.layout > nav.tabbar > button.tab:nth-of-type(10) (trusted=true)",
+      "hop1_listener": null,
+      "hop1_join": "scheduled-after-action (async chain)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)]",
+      "request_headers_on_wire": {},
+      "request_body": null,
+      "hop3_server": "GET /api/llm/model-metrics2 -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 348B 9ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/llm/model-metrics2\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +50ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +50ms (timing (≤300 ms after response))",
+        "childList div.tab-body:nth-of-type(2) > div.tab-pane > div.rv-panel > section.rv-benchmark > div.metrics-panel +50ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.58",
+      "traceId": "obs-ed433649a0b5eb1e",
+      "serverTraceId": "obs-ed433649a0b5eb1e",
+      "req": "GET /api/llm/benchmark/status",
+      "type": "Fetch",
+      "hop1_action": "click div#root > div.layout > nav.tabbar > button.tab:nth-of-type(10) (trusted=true)",
+      "hop1_listener": null,
+      "hop1_join": "scheduled-after-action (async chain)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-ed433649a0b5eb1e",
+        "X-Hugpy-Trace-Session": "obs-s-9978d5cbc96558cf",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/llm/benchmark/status -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 350B 13ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/llm/benchmark/status\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +45ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +45ms (timing (≤300 ms after response))",
+        "childList div.tab-body:nth-of-type(2) > div.tab-pane > div.rv-panel > section.rv-benchmark > div.metrics-panel +45ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.59",
+      "traceId": "obs-3ae007d7fcfc0ade",
+      "serverTraceId": "obs-3ae007d7fcfc0ade",
+      "req": "GET /api/v1/models",
+      "type": "Fetch",
+      "hop1_action": "click div#root > div.layout > nav.tabbar > button.tab:nth-of-type(10) (trusted=true)",
+      "hop1_listener": null,
+      "hop1_join": "scheduled-after-action (async chain)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-3ae007d7fcfc0ade",
+        "X-Hugpy-Trace-Session": "obs-s-9978d5cbc96558cf",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/v1/models -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 339B 14ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/v1/models\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +45ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +45ms (timing (≤300 ms after response))",
+        "childList div.tab-body:nth-of-type(2) > div.tab-pane > div.rv-panel > section.rv-benchmark > div.metrics-panel +45ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.60",
+      "traceId": "obs-7ab4b65ca00380ea",
+      "serverTraceId": "obs-7ab4b65ca00380ea",
+      "req": "GET /api/llm/review/status",
+      "type": "Fetch",
+      "hop1_action": "click div#root > div.layout > nav.tabbar > button.tab:nth-of-type(10) (trusted=true)",
+      "hop1_listener": null,
+      "hop1_join": "scheduled-after-action (async chain)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)]",
+      "request_headers_on_wire": {},
+      "request_body": null,
+      "hop3_server": "GET /api/llm/review/status -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 347B 8ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/llm/review/status\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +50ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +50ms (timing (≤300 ms after response))",
+        "childList div.tab-body:nth-of-type(2) > div.tab-pane > div.rv-panel > section.rv-benchmark > div.metrics-panel +50ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.61",
+      "traceId": "obs-44988cd13dd9d022",
+      "serverTraceId": "obs-44988cd13dd9d022",
+      "req": "GET /api/llm/review/runs?limit=200",
+      "type": "Fetch",
+      "hop1_action": "click div#root > div.layout > nav.tabbar > button.tab:nth-of-type(10) (trusted=true)",
+      "hop1_listener": null,
+      "hop1_join": "scheduled-after-action (async chain)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)]",
+      "request_headers_on_wire": {},
+      "request_body": null,
+      "hop3_server": "GET /api/llm/review/runs -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 345B 8ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/llm/review/runs\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +50ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +50ms (timing (≤300 ms after response))",
+        "childList div.tab-body:nth-of-type(2) > div.tab-pane > div.rv-panel > section.rv-benchmark > div.metrics-panel +50ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.62",
+      "traceId": "obs-25a96c1b02e07e09",
+      "serverTraceId": "obs-25a96c1b02e07e09",
+      "req": "GET /api/llm/benchmark/status",
+      "type": "Fetch",
+      "hop1_action": "click div#root > div.layout > nav.tabbar > button.tab:nth-of-type(10) (trusted=true)",
+      "hop1_listener": null,
+      "hop1_join": "scheduled-after-action (async chain)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-25a96c1b02e07e09",
+        "X-Hugpy-Trace-Session": "obs-s-9978d5cbc96558cf",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/llm/benchmark/status -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 350B 18ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/llm/benchmark/status\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +41ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +41ms (timing (≤300 ms after response))",
+        "childList div.tab-body:nth-of-type(2) > div.tab-pane > div.rv-panel > section.rv-benchmark > div.metrics-panel +41ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.63",
+      "traceId": "obs-1eeea52bb6c8b8a0",
+      "serverTraceId": "obs-1eeea52bb6c8b8a0",
+      "req": "GET /api/llm/workers",
+      "type": "Fetch",
+      "hop1_action": "click div#root > div.layout > nav.tabbar > button.tab:nth-of-type(10) (trusted=true)",
+      "hop1_listener": null,
+      "hop1_join": "scheduled-after-action (async chain)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-1eeea52bb6c8b8a0",
+        "X-Hugpy-Trace-Session": "obs-s-9978d5cbc96558cf",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/llm/workers -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 341B 14ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/llm/workers\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +45ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +45ms (timing (≤300 ms after response))",
+        "childList div.tab-body:nth-of-type(2) > div.tab-pane > div.rv-panel > section.rv-benchmark > div.metrics-panel +45ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.64",
+      "traceId": "obs-3039c9344b25bff8",
+      "serverTraceId": "obs-3039c9344b25bff8",
+      "req": "GET /api/llm/benchmark/suites",
+      "type": "Fetch",
+      "hop1_action": "click div#root > div.layout > nav.tabbar > button.tab:nth-of-type(10) (trusted=true)",
+      "hop1_listener": null,
+      "hop1_join": "scheduled-after-action (async chain)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-3039c9344b25bff8",
+        "X-Hugpy-Trace-Session": "obs-s-9978d5cbc96558cf",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/llm/benchmark/suites -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 350B 7ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/llm/benchmark/suites\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +42ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +42ms (timing (≤300 ms after response))",
+        "childList div.tab-body:nth-of-type(2) > div.tab-pane > div.rv-panel > section.rv-benchmark > div.metrics-panel +42ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.65",
+      "traceId": "obs-b8f22e45b038b248",
+      "serverTraceId": "obs-b8f22e45b038b248",
+      "req": "GET /api/llm/benchmark/runs",
+      "type": "Fetch",
+      "hop1_action": "click div#root > div.layout > nav.tabbar > button.tab:nth-of-type(10) (trusted=true)",
+      "hop1_listener": null,
+      "hop1_join": "scheduled-after-action (async chain)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-b8f22e45b038b248",
+        "X-Hugpy-Trace-Session": "obs-s-9978d5cbc96558cf",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/llm/benchmark/runs -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 348B 10ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/llm/benchmark/runs\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +39ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +39ms (timing (≤300 ms after response))",
+        "childList div.tab-body:nth-of-type(2) > div.tab-pane > div.rv-panel > section.rv-benchmark > div.metrics-panel +39ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.66",
+      "traceId": "obs-ef74a74312aead4d",
+      "serverTraceId": "obs-ef74a74312aead4d",
+      "req": "GET /api/llm/model-metrics2?limit=5000",
+      "type": "Fetch",
+      "hop1_action": "click div#root > div.layout > nav.tabbar > button.tab:nth-of-type(10) (trusted=true)",
+      "hop1_listener": null,
+      "hop1_join": "scheduled-after-action (async chain)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-ef74a74312aead4d",
+        "X-Hugpy-Trace-Session": "obs-s-9978d5cbc96558cf",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/llm/model-metrics2 -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 348B 10ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/llm/model-metrics2\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +39ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +39ms (timing (≤300 ms after response))",
+        "childList div.tab-body:nth-of-type(2) > div.tab-pane > div.rv-panel > section.rv-benchmark > div.metrics-panel +39ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.67",
+      "traceId": "obs-1766805d44bfa5ee",
+      "serverTraceId": "obs-1766805d44bfa5ee",
+      "req": "GET /api/llm/benchmark/status",
+      "type": "Fetch",
+      "hop1_action": "click div#root > div.layout > nav.tabbar > button.tab:nth-of-type(10) (trusted=true)",
+      "hop1_listener": null,
+      "hop1_join": "scheduled-after-action (async chain)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-1766805d44bfa5ee",
+        "X-Hugpy-Trace-Session": "obs-s-9978d5cbc96558cf",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/llm/benchmark/status -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 350B 12ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/llm/benchmark/status\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +37ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +37ms (timing (≤300 ms after response))",
+        "childList div.tab-body:nth-of-type(2) > div.tab-pane > div.rv-panel > section.rv-benchmark > div.metrics-panel +37ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.68",
+      "traceId": "obs-edef37abfa45d40e",
+      "serverTraceId": "obs-edef37abfa45d40e",
+      "req": "GET /api/v1/models",
+      "type": "Fetch",
+      "hop1_action": "click div#root > div.layout > nav.tabbar > button.tab:nth-of-type(10) (trusted=true)",
+      "hop1_listener": null,
+      "hop1_join": "scheduled-after-action (async chain)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-edef37abfa45d40e",
+        "X-Hugpy-Trace-Session": "obs-s-9978d5cbc96558cf",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/v1/models -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 339B 9ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/v1/models\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +39ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +39ms (timing (≤300 ms after response))",
+        "childList div.tab-body:nth-of-type(2) > div.tab-pane > div.rv-panel > section.rv-benchmark > div.metrics-panel +39ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.69",
+      "traceId": "obs-1196027243645ed2",
+      "serverTraceId": "obs-1196027243645ed2",
+      "req": "GET /api/llm/benchmark/runs",
+      "type": "Fetch",
+      "hop1_action": "click div#root > div.layout > nav.tabbar > button.tab:nth-of-type(10) (trusted=true)",
+      "hop1_listener": null,
+      "hop1_join": "scheduled-after-action (async chain)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-1196027243645ed2",
+        "X-Hugpy-Trace-Session": "obs-s-9978d5cbc96558cf",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/llm/benchmark/runs -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 348B 4ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/llm/benchmark/runs\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +34ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +34ms (timing (≤300 ms after response))",
+        "childList div.tab-body:nth-of-type(2) > div.tab-pane > div.rv-panel > section.rv-benchmark > div.metrics-panel +34ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.70",
+      "traceId": "obs-5c68af600e67f275",
+      "serverTraceId": "obs-5c68af600e67f275",
+      "req": "GET /api/llm/model-metrics2?limit=5000",
+      "type": "Fetch",
+      "hop1_action": "click div#root > div.layout > nav.tabbar > button.tab:nth-of-type(10) (trusted=true)",
+      "hop1_listener": null,
+      "hop1_join": "scheduled-after-action (async chain)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-5c68af600e67f275",
+        "X-Hugpy-Trace-Session": "obs-s-9978d5cbc96558cf",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/llm/model-metrics2 -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 348B 5ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/llm/model-metrics2\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +32ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +32ms (timing (≤300 ms after response))",
+        "childList div.tab-body:nth-of-type(2) > div.tab-pane > div.rv-panel > section.rv-benchmark > div.metrics-panel +32ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.71",
+      "traceId": "obs-75ba3ecd83e10d1f",
+      "serverTraceId": "obs-75ba3ecd83e10d1f",
+      "req": "GET /api/llm/benchmark/status",
+      "type": "Fetch",
+      "hop1_action": "click div#root > div.layout > nav.tabbar > button.tab:nth-of-type(10) (trusted=true)",
+      "hop1_listener": null,
+      "hop1_join": "scheduled-after-action (async chain)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-75ba3ecd83e10d1f",
+        "X-Hugpy-Trace-Session": "obs-s-9978d5cbc96558cf",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/llm/benchmark/status -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 350B 9ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/llm/benchmark/status\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +28ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +28ms (timing (≤300 ms after response))",
+        "childList div.tab-body:nth-of-type(2) > div.tab-pane > div.rv-panel > section.rv-benchmark > div.metrics-panel +28ms (timing (≤300 ms after response))"
+      ]
+    },
+    {
+      "key": "1951778.72",
+      "traceId": "obs-964010b75fbcbf48",
+      "serverTraceId": "obs-964010b75fbcbf48",
+      "req": "GET /api/v1/models",
+      "type": "Fetch",
+      "hop1_action": "click div#root > div.layout > nav.tabbar > button.tab:nth-of-type(10) (trusted=true)",
+      "hop1_listener": null,
+      "hop1_join": "scheduled-after-action (async chain)",
+      "hop2_stack": "script: fetch < Ct | await[Et,(anon)]",
+      "request_headers_on_wire": {
+        "X-Hugpy-Trace": "1",
+        "X-Hugpy-Trace-Id": "obs-964010b75fbcbf48",
+        "X-Hugpy-Trace-Session": "obs-s-9978d5cbc96558cf",
+        "X-Hugpy-Trace-Spans": "app"
+      },
+      "request_body": null,
+      "hop3_server": "GET /api/v1/models -> 200 endpoint=ui_api session=obs-s-9978d5cbc96558cf spans=app(12)",
+      "hop4_handler": "ui_api test/contract/stub_server.py:297 [server view (url_rule)]",
+      "hop4_callees": [
+        "_stub_payload"
+      ],
+      "hop5_output": [
+        "handler returned: ui_api",
+        "response built: finalize_request",
+        "response built: make_response",
+        "response built: process_response",
+        "status: HTTP 200"
+      ],
+      "hop5_raised": null,
+      "hop5_exception_spans": [],
+      "hop5_handled": [],
+      "hop6_response": "200 application/json 339B 9ms console_trace/2; spans=app",
+      "hop6_body": "{\"data\":[],\"items\":[],\"models\":[],\"path\":\"/api/v1/models\",\"stub\":true,\"workers\":[]}\n",
+      "hop6_consumers": [],
+      "hop6_dom": [
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +28ms (timing (≤300 ms after response))",
+        "childList div#root > div.layout > div.tab-body:nth-of-type(2) +28ms (timing (≤300 ms after response))",
+        "childList div.tab-body:nth-of-type(2) > div.tab-pane > div.rv-panel > section.rv-benchmark > div.metrics-panel +28ms (timing (≤300 ms after response))"
+      ]
+    }
+  ],
+  "actions": [
+    {
+      "id": 1,
+      "action": "click",
+      "target": "div#root > div.layout > nav.tabbar > button.tab:nth-of-type(2)",
+      "listeners": [
+        {
+          "type": "click",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 385926,
+          "name": "Zr",
+          "node": "div#root > div.layout > nav.tabbar > button.tab.tab-active:nth-of-type(2)",
+          "startColumn": 385915,
+          "endLine": 1,
+          "endColumn": 385930
+        },
+        {
+          "type": "auxclick",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "click",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "mousedown",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "mouseup",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "pointerdown",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "pointerup",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "dblclick",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "auxclick",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "click",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "click",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 385926,
+          "name": "Zr",
+          "node": "div#root",
+          "startColumn": 385915,
+          "endLine": 1,
+          "endColumn": 385930
+        },
+        {
+          "type": "mousedown",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "mouseup",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "pointerdown",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "pointerup",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "dblclick",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "action": "click",
+      "target": "div#root > div.layout > nav.tabbar > button.tab:nth-of-type(3)",
+      "listeners": [
+        {
+          "type": "click",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 385926,
+          "name": "Zr",
+          "node": "div#root > div.layout > nav.tabbar > button.tab.tab-active:nth-of-type(3)",
+          "startColumn": 385915,
+          "endLine": 1,
+          "endColumn": 385930
+        },
+        {
+          "type": "auxclick",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "click",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "mousedown",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "mouseup",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "pointerdown",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "pointerup",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "dblclick",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "auxclick",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "click",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "click",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 385926,
+          "name": "Zr",
+          "node": "div#root",
+          "startColumn": 385915,
+          "endLine": 1,
+          "endColumn": 385930
+        },
+        {
+          "type": "mousedown",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "mouseup",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "pointerdown",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "pointerup",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "dblclick",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "action": "click",
+      "target": "div#root > div.layout > nav.tabbar > button.tab:nth-of-type(4)",
+      "listeners": [
+        {
+          "type": "click",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 385926,
+          "name": "Zr",
+          "node": "div#root > div.layout > nav.tabbar > button.tab.tab-active:nth-of-type(4)",
+          "startColumn": 385915,
+          "endLine": 1,
+          "endColumn": 385930
+        },
+        {
+          "type": "auxclick",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "click",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "mousedown",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "mouseup",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "pointerdown",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "pointerup",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "dblclick",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "auxclick",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "click",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "click",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 385926,
+          "name": "Zr",
+          "node": "div#root",
+          "startColumn": 385915,
+          "endLine": 1,
+          "endColumn": 385930
+        },
+        {
+          "type": "mousedown",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "mouseup",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "pointerdown",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "pointerup",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "dblclick",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "action": "click",
+      "target": "div#root > div.layout > nav.tabbar > button.tab:nth-of-type(8)",
+      "listeners": [
+        {
+          "type": "click",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 385926,
+          "name": "Zr",
+          "node": "div#root > div.layout > nav.tabbar > button.tab.tab-active:nth-of-type(8)",
+          "startColumn": 385915,
+          "endLine": 1,
+          "endColumn": 385930
+        },
+        {
+          "type": "auxclick",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "click",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "mousedown",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "mouseup",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "pointerdown",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "pointerup",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "dblclick",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "auxclick",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "click",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "click",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 385926,
+          "name": "Zr",
+          "node": "div#root",
+          "startColumn": 385915,
+          "endLine": 1,
+          "endColumn": 385930
+        },
+        {
+          "type": "mousedown",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "mouseup",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "pointerdown",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "pointerup",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "dblclick",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "action": "click",
+      "target": "div#root > div.layout > nav.tabbar > button.tab:nth-of-type(9)",
+      "listeners": [
+        {
+          "type": "click",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 385926,
+          "name": "Zr",
+          "node": "div#root > div.layout > nav.tabbar > button.tab.tab-active:nth-of-type(9)",
+          "startColumn": 385915,
+          "endLine": 1,
+          "endColumn": 385930
+        },
+        {
+          "type": "auxclick",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "click",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "mousedown",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "mouseup",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "pointerdown",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "pointerup",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "dblclick",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "auxclick",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "click",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "click",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 385926,
+          "name": "Zr",
+          "node": "div#root",
+          "startColumn": 385915,
+          "endLine": 1,
+          "endColumn": 385930
+        },
+        {
+          "type": "mousedown",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "mouseup",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "pointerdown",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "pointerup",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "dblclick",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "action": "click",
+      "target": "div#root > div.layout > nav.tabbar > button.tab:nth-of-type(10)",
+      "listeners": [
+        {
+          "type": "click",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 385926,
+          "name": "Zr",
+          "node": "div#root > div.layout > nav.tabbar > button.tab.tab-active:nth-of-type(10)",
+          "startColumn": 385915,
+          "endLine": 1,
+          "endColumn": 385930
+        },
+        {
+          "type": "auxclick",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "click",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "mousedown",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "mouseup",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "pointerdown",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "pointerup",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "dblclick",
+          "useCapture": true,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "auxclick",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "click",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "click",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 385926,
+          "name": "Zr",
+          "node": "div#root",
+          "startColumn": 385915,
+          "endLine": 1,
+          "endColumn": 385930
+        },
+        {
+          "type": "mousedown",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "mouseup",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "pointerdown",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "pointerup",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        },
+        {
+          "type": "dblclick",
+          "useCapture": false,
+          "scriptId": "13",
+          "lineNumber": 1,
+          "columnNumber": 365093,
+          "name": "Vn",
+          "node": "div#root",
+          "startColumn": 365082,
+          "endLine": 1,
+          "endColumn": 365198
+        }
+      ]
+    }
+  ],
+  "export": "/srv/vm_mgr/tmp/obs-evidence2/hugpy-ui/obs-2026-10-01T18-52-43-097Z.json"
+}

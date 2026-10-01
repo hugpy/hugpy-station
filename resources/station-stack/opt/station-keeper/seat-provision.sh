@@ -128,12 +128,35 @@ fi
 for exe in abstract-claude hugpy-agent; do
   [ -x "$VENV/bin/$exe" ] && ln -sfn "$VENV/bin/$exe" "$BIN/$exe" && log "linked $exe -> $BIN"
 done
-if command -v claude >/dev/null 2>&1 || [ -x "$BIN/claude" ]; then
-  log "claude present"
+# 1.0.139: "claude ok" means a `claude` CLI that RUNS — never the installer's exit
+# status. `curl … | bash` is bash's status: offline, curl fails, bash reads an
+# empty script and exits 0, so 1.0.138 logged "claude ok" with no claude at all.
+claude_cli() {                      # the claude CLI this seat would run, else ''
+  local c
+  c="$(command -v claude 2>/dev/null || true)"
+  [ -n "$c" ] || { [ -x "$BIN/claude" ] && c="$BIN/claude"; }
+  [ -n "$c" ] && printf '%s' "$c"
+}
+claude_check() {                    # log the verdict; 0 only for a claude that runs
+  local c v
+  c="$(claude_cli)"
+  [ -n "$c" ] || { log "claude NOT installed$1 — the claude-code seat stays unavailable (retry online: curl -fsSL https://claude.ai/install.sh | bash, or npm i -g @anthropic-ai/claude-code)"; return 1; }
+  if v="$(timeout 30 "$c" --version 2>/dev/null | head -1)" && [ -n "$v" ]; then
+    log "claude ok ($c, $v)"; return 0
+  fi
+  log "claude FAILED — $c is present but \`claude --version\` does not run$1"; return 1
+}
+if [ -n "$(claude_cli)" ]; then
+  claude_check ""
 else
   log "installing claude (claude.ai/install.sh)"
-  curl -fsSL https://claude.ai/install.sh 2>/dev/null | bash >/dev/null 2>&1 \
-    && log "claude ok" || log "claude install failed (try: npm i -g @anthropic-ai/claude-code)"
+  if _inst="$(curl -fsSL https://claude.ai/install.sh 2>/dev/null)" && [ -n "$_inst" ]; then
+    printf '%s\n' "$_inst" | bash >/dev/null 2>&1 || log "claude installer exited non-zero"
+  else
+    log "claude installer unreachable (offline?)"
+  fi
+  hash -r 2>/dev/null || true
+  claude_check " after the installer"
 fi
 
 # ── 6. durable OAuth token (same login method as the toolserver) ─────────────
