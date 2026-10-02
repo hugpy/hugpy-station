@@ -347,6 +347,23 @@ def _checkpoint(payload, label):
         pass
 
 
+def _precompact_safety_net(payload):
+    """Safety net: if PreCompact fires, the rollover monitor missed the threshold.
+    File a handoff so the next session gets state even if compression degrades this one."""
+    sys.stderr.write("WARNING: PreCompact fired — rollover monitor missed the threshold. "
+                     "Filing safety-net handoff.\n")
+    locus = _locus()
+    sid = payload.get("session_id") or ""
+    try:
+        _call("handoff/request", {"locus": locus, "by": "precompact-safety-net",
+              "text": f"Safety-net handoff: PreCompact fired on session {sid[:8] or '?'} — "
+                      f"the rollover monitor should have rolled before compression. "
+                      f"Pull the ledger: ledger_get locus={locus}",
+              "spawn": False}, timeout=15)
+    except Exception:
+        pass
+
+
 def main():
     try:
         payload = json.loads(sys.stdin.read() or "{}")
@@ -367,6 +384,8 @@ def main():
             except OSError:
                 pass
             _checkpoint(payload, "pre-compact" if ev == "PreCompact" else "session end")
+            if ev == "PreCompact":
+                _precompact_safety_net(payload)
     except Exception:
         pass
     return 0

@@ -5466,6 +5466,100 @@ function DbGrid({ rows, name }) {
 const dbCount = (r) => r.rows.length + " row" + (r.rows.length === 1 ? "" : "s")
   + (r.rows.length > DB_MAX_ROWS ? " (showing " + DB_MAX_ROWS + ")" : "") + " · " + r.ms + " ms";
 
+/* ─── ⚙ settings drawer — the shared ~/.hugpy/.env (GET/POST /api/settings) ───
+   One file every hugpy arm reads; the fields come from the backend's schema
+   (hugpy_settings.SCHEMA), grouped by section. Not per-locus, like 📖 docs.
+   - a value exported in the shell / unit wins over the file: shown as "env".
+   - secrets are write-only: the field shows set/unset, typing replaces it.
+   - changing a URL (where traffic goes) asks for confirmation, old → new host.
+   - front.fallback = seats moved off this machine's central (opted-in fallback). */
+const SETTINGS_URL_KEYS = ["HUGPY_BASE", "HUGPY_AGENT_SERVE", "HUGPY_TOOLSERVER_URL"];
+const hostOf = (u) => { try { return new URL(u).host; } catch (_) { return u || "(unset)"; } };
+function SettingsDrawer() {
+  const [doc, setDoc] = useState(null);
+  const [draft, setDraft] = useState({});
+  const [err, setErr] = useState("");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const load = () => api("/api/settings").then(d => { setDoc(d); setErr(""); })
+    .catch(e => setErr(e.message || "settings unavailable"));
+  useEffect(() => { load(); }, []);
+  const edit = (k, v) => setDraft(d => Object.assign({}, d, { [k]: v }));
+  const dirty = Object.keys(draft).length > 0;
+  const save = () => {
+    const rows = (doc && doc.settings) || [];
+    const moves = SETTINGS_URL_KEYS.filter(k => k in draft).map(k => {
+      const row = rows.find(r => r.key === k) || {};
+      return row.label + ": " + hostOf(row.effective) + " → " + hostOf(draft[k] || row.default || "");
+    });
+    if (moves.length && !window.confirm("Repoint where hugpy traffic goes?\n\n" + moves.join("\n")))
+      return;
+    setBusy(true); setNote(""); setErr("");
+    api("/api/settings", { method: "POST", body: JSON.stringify(draft) })
+      .then(d => { setDoc(d); setDraft({}); setNote("saved · " + (d.applies || "")); })
+      .catch(e => setErr(e.message || "save failed"))
+      .finally(() => setBusy(false));
+  };
+  const sections = [];
+  ((doc && doc.settings) || []).forEach(r => {
+    let s = sections.find(x => x.name === r.section);
+    if (!s) sections.push(s = { name: r.section, rows: [] });
+    s.rows.push(r);
+  });
+  const field = (r) => {
+    const v = r.key in draft ? draft[r.key] : null;
+    if (r.bool) {
+      const on = (v !== null ? v : (r.value || r.effective || r.default)) === "1";
+      return html`<label style=${{ display: "flex", gap: 6, alignItems: "center" }}>
+        <input type="checkbox" checked=${on} disabled=${r.source === "env"}
+               onChange=${e => edit(r.key, e.target.checked ? "1" : "0")} /> ${on ? "on" : "off"}</label>`;
+    }
+    if (r.secret)
+      return html`<input type="password" style=${{ width: "100%" }}
+               placeholder=${r.set ? "•••••• set — type to replace" : "not set"}
+               value=${v || ""} disabled=${r.source === "env"}
+               onInput=${e => edit(r.key, e.target.value)} />`;
+    return html`<input style=${{ width: "100%" }}
+             placeholder=${r.effective || r.default || ""}
+             value=${v !== null ? v : (r.value || "")} disabled=${r.source === "env"}
+             onInput=${e => edit(r.key, e.target.value)} />`;
+  };
+  const front = doc && doc.front;
+  return html`<div style=${{ overflowY: "auto", height: "100%" }}>
+    <div className="docs-bar"><b>⚙ settings</b><span className="docs-spacer"></span>
+      <button className="btn" onClick=${load} title="re-read the file">↻</button></div>
+    <div style=${{ padding: "8px 12px" }}>
+      ${doc && html`<div style=${{ color: "var(--dim)", fontSize: 11, marginBottom: 8 }}>
+        <code>${doc.path}</code> — shared by every hugpy package (hugpy-agent, Station, serve,
+        toolserver client). A value exported in the shell overrides the file.</div>`}
+      ${front && front.fallback && html`<div className="stale" style=${{ display: "block", marginBottom: 8 }}>
+        ⚠ seats → ${hostOf(front.url)} (this machine's central is down; fleet fallback is on)</div>`}
+      ${err && html`<div className="stale" style=${{ display: "block", marginBottom: 8 }}>${err}</div>`}
+      ${!doc && !err && html`<div style=${{ color: "var(--dim)" }}>loading…</div>`}
+      ${sections.map(s => html`<div key=${s.name} style=${{ marginBottom: 14 }}>
+        <div style=${{ fontWeight: 600, marginBottom: 6 }}>${s.name}</div>
+        ${s.rows.map(r => html`<div key=${r.key} style=${{ marginBottom: 8 }}>
+          <div style=${{ display: "flex", gap: 6, alignItems: "baseline" }}>
+            <span>${r.label}</span>
+            <code style=${{ color: "var(--dim)", fontSize: 10 }}>${r.key}</code>
+            ${r.source === "env" && html`<span style=${{ color: "var(--warn, #e0a030)", fontSize: 10 }}
+                title="set in the process environment (shell export / unit Environment=); it overrides the file — change it there">env</span>`}
+          </div>
+          ${field(r)}
+          ${r.error && html`<div className="stale" style=${{ display: "block", fontSize: 11 }}>⚠ ${r.error}</div>`}
+          ${r.help && html`<div style=${{ color: "var(--dim)", fontSize: 11 }}>${r.help}</div>`}
+          ${!r.secret && !r.bool && r.effective && html`<div style=${{ color: "var(--dim)", fontSize: 10 }}>in effect: ${r.effective}</div>`}
+        </div>`)}
+      </div>`)}
+      ${doc && html`<div style=${{ display: "flex", gap: 8, alignItems: "center" }}>
+        <button className="btn" disabled=${busy || !dirty} onClick=${save}>${busy ? "saving…" : "Save"}</button>
+        <button className="btn" disabled=${busy || !dirty} onClick=${() => setDraft({})}>Discard</button>
+        <span style=${{ color: "var(--dim)", fontSize: 11 }}>${note}</span>
+      </div>`}
+    </div>
+  </div>`;
+}
+
 function DbDrawer() {
   const [tab, setTab] = useState("tables");        // "tables" | "query"
   const [tables, setTables] = useState({ loading: true });   // {loading} | {names:[...]} | {error}
@@ -9900,6 +9994,12 @@ function App() {
   const [lastOk, setLastOk] = useState(null);   // epoch ms of the last good fleet poll
   const [now, setNow] = useState(Date.now());
   const togglePanel = (p) => setPanel(cur => (cur === p ? null : p));
+  /* File → Settings… (Electron menu) fires this; it opens, never toggles shut. */
+  useEffect(() => {
+    const h = () => setPanel("settings");
+    window.addEventListener("station-settings", h);
+    return () => window.removeEventListener("station-settings", h);
+  }, []);
   /* A failed on the frontier terminal (fleetview-term's watch saw mct's
      failure banner): bring up the 💬 B chat so the operator has temporary
      inference to get answers / sort out what happened. The drawer seeds its
@@ -10502,6 +10602,9 @@ function App() {
         <button className=${"btn" + (panel === "db" ? " on" : "")}
                 title="db — the central toolserver database, read-only (tables · columns · SELECT queries via the station's /ts/db proxy)"
                 onClick=${() => togglePanel("db")}>🗄 db</button>
+        <button className=${"btn" + (panel === "settings" ? " on" : "")}
+                title="settings — the shared ~/.hugpy/.env: fleet URL, serve, toolserver (also File → Settings…)"
+                onClick=${() => togglePanel("settings")}>⚙</button>
         <button className="btn" title="right-column width — cycles 44% / 70% / 88% (applies to every drawer)"
                 onClick=${() => setRcW(rcCycle())}>${RC_LABEL[rcW]}</button>
         </div>
@@ -10551,6 +10654,7 @@ function App() {
                   hugpyKeys=${activeUp && (keeperAgents[active] || []).includes("hugpy")} /></div>`}
           ${panel === "docs" && html`<${DocsDrawer} />`}
           ${panel === "db" && html`<${DbDrawer} />`}
+          ${panel === "settings" && html`<${SettingsDrawer} />`}
           ${panel === "ac" && html`<iframe src="/ac/" title="claude settings"
                 style=${{ width: "100%", height: "100%", border: 0, background: "#0e1116" }} />`}
           ${panel === "bchat" && html`<${BChatDrawer} />`}

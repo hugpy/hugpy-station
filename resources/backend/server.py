@@ -56,6 +56,8 @@ import prompt_send as PS  # 1.0.143: ✍ prompt delivers directly (serve session
 import todo_digest as TD  # 1.0.144: deterministic open-todos digest -> each locus's keeper session
 import operator_scripts as OPS  # 1.0.144: operator items' RUN blocks as files on disk
 import directives as DV   # 1.0.143: per-(locus x session) directives + init briefs, one source of record
+import hugpy_settings as HS  # ~/.hugpy/.env: shared hugpy settings + the ONE fleet pointer (⚙ Settings)
+HS.load()                    # before any module-level os.environ read below; the env still wins
 
 ROOT = Path(__file__).resolve().parent          # .../vm_mgr/console
 VM_BIN = ROOT.parent / "bin"                      # .../vm_mgr/bin (vm-* scripts)
@@ -1342,7 +1344,7 @@ LLM_PROVIDERS = {
     "hugpy": {
         "label": "hugpy",
         "type": "openai",
-        "base": os.environ.get("HUGPY_URL", ""),
+        "base": HS.base(),
         "api_key": os.environ.get("HUGPY_API_KEY", ""),
     },
 }
@@ -1416,7 +1418,7 @@ async def api_voice_transcribe(request):
     ctype = request.headers.get("Content-Type", "")
     if not ctype.startswith("multipart/form-data;"):
         return web.json_response({"error": "expected multipart audio upload"}, status=415)
-    base = (os.environ.get("HUGPY_URL") or _LOCAL_HUGPY_FRONT).rstrip("/")
+    base = HS.base()
     token = (os.environ.get("HUGPY_API_KEY") or
              os.environ.get("HUGPY_OPERATOR_TOKEN") or "").strip()
     headers = {"Content-Type": ctype}
@@ -5725,8 +5727,8 @@ def _mct_b_collate(messages):
         # Verbatim: no model call, no paraphrase, no per-tick fan-out.
         return texts[0] if len(texts) == 1 else "\n\n---\n\n".join(texts)
     base = os.environ.get("MCT_B_BASE")
-    if not base and _port_open(7002):
-        base = _LOCAL_HUGPY_FRONT + "/api/v1"
+    if not base:
+        base = HS.local_front() + "/api/v1"   # local, primary Fleet URL, or opted-in fallback
     overrides = {"timeout": 60}
     if base:
         overrides["base"] = base
@@ -11439,8 +11441,10 @@ def _seat_env_block(surface="", target=None, cfg=None):
     if not target.remote:
         env = {k: os.environ[k] for k in _SEAT_ENV_KEYS if os.environ.get(k)}
         env["HUGPY_STATION_STATE"] = str(FV_STATE_HOME)
-        if surface == "local" and _port_open(7002):
-            env["HUGPY_BASE"] = _LOCAL_HUGPY_FRONT      # opencode's ~84 KB requests need the local front
+        if surface == "local":
+            # opencode's ~84 KB requests need the local front; when it is down this
+            # is the primary Fleet URL (client box) or the opted-in, shown fallback
+            env["HUGPY_BASE"] = HS.local_front()
         lines += [f"export {k}={shlex.quote(v)}" for k, v in env.items() if v]
     loc = target.locus or ""
     if loc:
@@ -14327,6 +14331,25 @@ async def api_gpt(request):
         return web.json_response({"error": "GPT settings unavailable: " + str(exc)}, status=503)
 
 
+async def api_settings(request):
+    """⚙ Settings: GET/POST the shared ~/.hugpy/.env (hugpy_settings.SCHEMA keys).
+    Secrets come back only as set/unset; POST {KEY: value}, "" removes a key."""
+    try:
+        if request.method == "POST":
+            require_provision(request)   # repointing traffic: homebase + capability + CSRF
+            body = await request.json()
+            before = HS.read_file()
+            doc = HS.update(body)
+            audit(request, "settings", HS.audit_detail(body, before), ok=True)
+            doc["applies"] = "now for Station; other hugpy arms at their next start"
+            return web.json_response(doc)
+        return web.json_response(HS.view())
+    except (ValueError, TypeError) as exc:
+        return web.json_response({"error": str(exc)}, status=400)
+    except OSError as exc:
+        return web.json_response({"error": "settings unavailable: " + str(exc)}, status=503)
+
+
 def _frontier_fs_mediated(cfg=None):
     """Host-level mirror of the frontier fs switch: True = A's direct filesystem
     access is DENIED (mediated via B). Written by /api/frontier/fs/toggle
@@ -15701,9 +15724,9 @@ async def _b_model_candidates():
     /api/models proxy serves), current/loaded-friendly. Best effort: [] on error."""
     try:
         import aiohttp
-        base = os.environ.get("HUGPY_BASE") or "https://dev.hugpy.ai/api"
+        base = HS.base()
         async with aiohttp.ClientSession() as cs:
-            async with cs.get(base.rstrip("/") + "/models",
+            async with cs.get(base + "/api/models",
                               timeout=aiohttp.ClientTimeout(total=15)) as r:
                 data = await r.json()
     except Exception:
@@ -16887,6 +16910,8 @@ def make_app():
     app.router.add_post("/api/frontier/models", api_frontier_models)
     app.router.add_get("/api/gpt", api_gpt)
     app.router.add_post("/api/gpt", api_gpt)
+    app.router.add_get("/api/settings", api_settings)
+    app.router.add_post("/api/settings", api_settings)
     app.router.add_get("/api/frontier/cache", api_frontier_cache)       # 1.0.67 prompt-cache countdown; ?backend= per seat (steward tabs)
     app.router.add_get("/api/frontier/limits", api_frontier_limits)     # p515: frontier quota/limit state for the seat-card LimitsBadge
     app.router.add_get("/api/frontier/agents", api_frontier_agents)     # steward tabs: the seat's live subagents

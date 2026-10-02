@@ -79,15 +79,41 @@ git_q() { git -c safe.directory='*' -C "$1" "${@:2}" 2>/dev/null; }
 # from every artifact, so it is *correctly* absent from the install.
 A_SRC="$STATION_SRC/resources/backend"
 A_INS="$STATION_APP/resources/backend"
+# 2026-10-02: DIRECTION-AWARE. The danger is LIVE ahead of source (a hand edit
+# the next install deletes), not SOURCE ahead of live (the release itself). A
+# file that differs from source passes when the installed copy is byte-identical
+# to what the installed version SHIPPED — the commit that set resources/VERSION
+# to the installed version. Anything else (a live edit, or no shipped commit to
+# prove it) still fails.
+GIT_PREFIX="$(git_q "$STATION_SRC" rev-parse --show-prefix)"
+INS_VER="$(cat "$STATION_APP/resources/VERSION" 2>/dev/null | tr -d '[:space:]')"
+SHIPPED_REV=""
+if [ -n "$INS_VER" ]; then   # newest commit whose resources/VERSION *is* the installed version
+    for _rev in $(git_q "$STATION_SRC" log --format=%H -- resources/VERSION); do
+        [ "$(git_q "$STATION_SRC" show "$_rev:${GIT_PREFIX}resources/VERSION" | tr -d '[:space:]')" = "$INS_VER" ] \
+            && { SHIPPED_REV="$_rev"; break; }
+    done
+fi
+shipped_md5() { [ -n "$SHIPPED_REV" ] || { echo NOREV; return; }
+                git_q "$STATION_SRC" cat-file -e "$SHIPPED_REV:$GIT_PREFIX$1" || { echo MISSING; return; }
+                git_q "$STATION_SRC" show "$SHIPPED_REV:$GIT_PREFIX$1" | md5sum | cut -d' ' -f1; }
 if [ -d "$A_SRC" ] && [ -d "$A_INS" ]; then
-    a_bad=""
+    a_bad=""; a_ahead=0
     while IFS= read -r rel; do
         [ -n "$rel" ] || continue
-        [ "$(md5of "$A_SRC/$rel")" = "$(md5of "$A_INS/$rel")" ] || a_bad="$a_bad $rel"
+        ins="$(md5of "$A_INS/$rel")"
+        [ "$(md5of "$A_SRC/$rel")" = "$ins" ] && continue
+        if [ "$(shipped_md5 "resources/backend/$rel")" = "$ins" ]; then
+            a_ahead=$((a_ahead+1))         # live == shipped: source is simply ahead
+        else
+            a_bad="$a_bad $rel"            # live differs from what shipped: a hand edit
+        fi
     done < <(cd "$A_SRC" && find . -type f \( -name '*.py' -o -name '*.js' -o -name '*.css' -o -name '*.html' -o -name '*.json' \) \
                  ! -path './__pycache__/*' ! -name '*.pyc' ! -name 'test_*.py' -printf '%P\n' 2>/dev/null)
     if [ -n "$a_bad" ]; then
-        fail "A backend installed vs source" "$(echo $a_bad | tr ' ' '\n' | head -6 | tr '\n' ' ')($(echo $a_bad | wc -w) files)"
+        fail "A backend installed vs source" "$(echo $a_bad | tr ' ' '\n' | head -6 | tr '\n' ' ')($(echo $a_bad | wc -w) files differ from shipped ${INS_VER:-?}${SHIPPED_REV:+ @ ${SHIPPED_REV:0:8}})"
+    elif [ "$a_ahead" -gt 0 ]; then
+        pass "A backend installed vs source" "live == shipped $INS_VER @ ${SHIPPED_REV:0:8}; source ahead by $a_ahead file(s)"
     else
         pass "A backend installed vs source" "$STATION_APP -> $STATION_SRC"
     fi
@@ -110,6 +136,11 @@ elif [ -z "$IVER" ] || [ "$IVER" = '?' ]; then
     skip "B abstract_claude installed vs pin" "abstract_claude not importable in $SERVE_VENV"
 elif [ "$IVER" = "$PIN" ]; then
     pass "B abstract_claude installed vs pin" "$IVER == pin $PIN ($SERVE_VENV)"
+elif [ -n "$SHIPPED_REV" ] && [ "$IVER" = "$(git_q "$STATION_SRC" show "$SHIPPED_REV:${GIT_PREFIX}resources/REQUIREMENTS.txt" \
+                                             | sed -n 's/^abstract-claude==\([0-9][0-9.]*\).*/\1/p' | head -1)" ]; then
+    # 2026-10-02: installed == the pin the installed version SHIPPED; the pin is
+    # simply ahead (this release bumps it) — installing the build closes it.
+    pass "B abstract_claude installed vs pin" "installed $IVER == shipped pin ($INS_VER); pin ahead -> $PIN"
 else
     fail "B abstract_claude installed vs pin" "installed $IVER != pinned $PIN — re-run station-provision-venv $SERVE_VENV"
 fi

@@ -3,6 +3,28 @@
 Versions before 1.0.91 are recorded in git history and in README.md; this file
 starts at the release that introduced it.
 
+## 1.0.154 — 2026-10-02
+
+* ⚙ settings (File → Settings…, Ctrl+, or the ⚙ toolbar button): edits the shared
+  `~/.hugpy/.env` ($HUGPY_HOME) every hugpy package reads — fleet URL, fleet API key,
+  fleet fallback switch, serve URL/token, toolserver URL/token. A value exported in the
+  shell or unit overrides the file and is shown locked as `env`; secrets are write-only;
+  changing a URL asks to confirm old → new host. `/api/settings` (POST needs homebase +
+  provision capability + CSRF); the audit records URL changes as old -> new.
+* One fleet pointer: `HUGPY_BASE` resolves env → `~/.hugpy/.env` → `http://127.0.0.1:7002`
+  (abstract_toolserver.hugpy_home). Station's own `dev.hugpy.ai` / `HUGPY_URL` defaults
+  are gone (hugpy provider, transcribe proxy, B model picker).
+* URLs that carry credentials must be https, or plain http only to loopback / LAN.
+* Seats never silently leave this machine's central: once it has answered, a down
+  central stays the target unless `HUGPY_FLEET_FALLBACK=1` and an operator-set Fleet URL;
+  the move is reported (`front.fallback`). A client box with no local central uses the
+  Fleet URL as its primary target.
+* ledger hook: PreCompact safety net (files a toolserver handoff when compaction fires
+  before the rollover monitor) — was live-only since 2026-10-01, now shipped.
+* abstract-claude pin 0.1.96 → 0.1.97.
+* Drift gate rows A/B are direction-aware: source/pin AHEAD of the installed version's
+  shipped commit passes; a live copy differing from what shipped still fails.
+
 ## 1.0.153 — 2026-10-02
 
 * Operator 2026-10-02 (screenshot: stacked HUGPY AGENT headers when scrolling up): the

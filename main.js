@@ -441,7 +441,17 @@ function buildMenu() {
   const template = [
     {
       label: 'File',
-      submenu: [{ role: 'quit' }],
+      submenu: [
+        {
+          label: 'Settings…',
+          accelerator: 'CmdOrCtrl+,',
+          // the ⚙ drawer listens for this event (index.html App)
+          click: () => win && win.webContents.executeJavaScript(
+            "window.dispatchEvent(new Event('station-settings'))").catch(() => {}),
+        },
+        { type: 'separator' },
+        { role: 'quit' },
+      ],
     },
     {
       label: 'View',
