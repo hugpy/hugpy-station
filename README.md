@@ -7,6 +7,10 @@ app.asar packs plain, unbundled files, so this IS the complete source).
 
 ![hugpy Station 1.0.153 on a fresh hugpy-ubuntu install: tmux Claude seat (left), steward panel with keeper, rollover and B local keeper (right)](docs/img/station-fresh-install.png)
 
+![Station canvas (◳ flow): the hugpy cinema build pipeline as a live flow diagram beside the Claude seat](docs/img/station-canvas-flow.png)
+
+![Station to-do board: keeper proposals with pros/cons, keeper recommendation, accept/decline and comments; prompt composer docked below](docs/img/station-todo-proposals.png)
+
 ## Part of the hugpy orbit
 
 ```
