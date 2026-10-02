@@ -3,6 +3,15 @@
 Versions before 1.0.91 are recorded in git history and in README.md; this file
 starts at the release that introduced it.
 
+## 1.0.155 — 2026-10-02
+
+- OSC 52 clipboard: every Station terminal accepts OSC 52 copies (write-only; `?` reads refused, 1 MB cap) and hands them to the Electron clipboard; seat tmux runs `set-clipboard on` + clipboard terminal-feature (applies on seat restart).
+- Electron right-click: context menu (copy/paste/select all) on the SPA and the /ac console view; terminal keeps copy-on-select.
+- copyText goes bridge-first (window.stationClipboard) before navigator.clipboard / execCommand.
+- firstrun: creates ~/.hugpy/.env and migrates HUGPY_BASE out of ~/.config/hugpy-agent/agent.env (so Settings is no longer overridden by the unit EnvironmentFile).
+
+* 
+
 ## 1.0.154 — 2026-10-02
 
 * ⚙ settings (File → Settings…, Ctrl+, or the ⚙ toolbar button): edits the shared
