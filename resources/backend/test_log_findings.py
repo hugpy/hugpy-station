@@ -50,6 +50,21 @@ def test_ignore_list_drops_noise():
         assert lf.classify(msg) is None, msg
 
 
+def test_bare_429_is_not_a_rate_limit_and_sweeps_are_ignored():
+    """1.0.152: serve's rollover sweep #429 filed two HIGH rate_limit_429 findings. A bare
+    429 needs HTTP status context; the sweep bookkeeping lines are ignored outright."""
+    for msg in ("[rollover] sweep #429: mode=auto thr=12 candidates=3 evaluated=3 due=0 promotable=0 skipped=2",
+                "[rollover] sweep #429 seen: 68c57bfb=12/idle429s 76a65777=4/idle9s",
+                "job 429 finished in 3.1s", "listening on port 4290 and 429"):
+        got = lf.classify(msg)
+        assert not got or got[0] != "rate_limit_429", (msg, got)
+    for msg in ('"HTTP/1.1 429 Too Many Requests"', "call failed: HTTP 429 Too Many Requests",
+                "status=429 from upstream", "stream error: 429 rate limit exceeded",
+                "anthropic.RateLimitError: overloaded", 'POST /v1/messages" 429 12'):
+        got = lf.classify(msg)
+        assert got and got[0] == "rate_limit_429", (msg, got)
+
+
 def test_signature_strips_volatile_parts():
     a = lf.signature("2026-09-29 18:41:24,349 worker 3a1f9c2e-1111-2222-3333-444455556666 at "
                      "/srv/hugpy/x/y.py line 12 from 192.168.1.100:7002 after 97s")

@@ -41,7 +41,7 @@
   };
   var SURFACE_TIPS = {
     local:    "Local Keeper — talk to B (hugpy-agent) directly; works without A",
-    frontier: "Frontier Keeper \u2014 default surface is the Serve console (abstract-claude serve at /ac/); the Terminal seats (Claude Code, ChatGPT via Codex, Hugpy agent, MCT pointer exchange) stay available here as optional choices",
+    frontier: "Frontier Keeper \u2014 default is the Terminal seat Claude Code (the tmux keeper-claude session, the keeper on every locus); the Serve sessions (keeper/chat/worker/local of this locus's abstract-claude serve, driven from the hugpy-agent TUI) and the other Terminal seats (ChatGPT via Codex, Hugpy agent, MCT pointer exchange) stay available here as optional choices",
     shell:    "Terminal Shell — your own shell; output enters model context only when you explicitly share it"
   };
   // Display names only — backend KEYS are identity (storage, URLs, the
@@ -64,8 +64,10 @@
                          "claude-code": "Terminal \u00b7 Claude Code",
                          "hugpy": "Terminal \u00b7 Hugpy agent",
                          "mct": "Terminal \u00b7 MCT pointer exchange",
+                         "serve-tui": "Serve sessions \u00b7 Hugpy Agent TUI",
                          "serve": "Serve console" };
-  var KEEPER_SURFACE = "serve";      // from /api/term/backends keeper_surface (of the ACTIVE locus)
+  var SERVE_TUI = "serve-tui";   // 1.0.148: the serve sessions ride a Terminal seat (hugpy-agent tui), not the /ac/ frame
+  var KEEPER_SURFACE = "tmux";       // from /api/term/backends keeper_surface (of the ACTIVE locus); 1.0.147 default = the tmux keeper-claude seat
   /* 1.0.101 (2026-09-17, vm_mgr): per-locus serve consoles. refreshMeta() probes
      /api/term/backends?vm=<active locus>; when the station reports that locus's
      OWN abstract-claude serve (ac_serve.path, e.g. /ac/@hugpy/ for the hugpy
@@ -95,6 +97,13 @@
   // SESSION-PULL-PATCH 2026-09-02: attached pulled/jump-in seats — "pull:<tmux>" -> {tmux}. Kept apart
   // from SURFACES (refreshMeta replaces that map from /api/term/backends).
   var PULLS = {};
+  /* 1.0.151 (operator 2026-10-02): MULTIPLE SHELLS on the locus — "shell#N" (N≥2) is
+     its own PTY/tmux session server-side (ws_hostterm ?surface=shell&inst=N); the
+     ⌂ shell button goes to the last used shell, ＋ opens the next, × closes the
+     extra one you are on. The bare "shell" stays inst 1. */
+  var SHELLS = {};                 // "shell#N" -> {inst: N}
+  var lastShell = "shell";
+  function isShell(s) { return s === "shell" || !!SHELLS[s]; }
   try { chosen = JSON.parse(localStorage.getItem("fv-backends") || "{}") || {}; }
   catch (e) { chosen = {}; }
   // MCT became the frontier default; migrate the prior implicit choice once.
@@ -146,6 +155,14 @@
     "#fv-shell:hover{color:#e6e9ef;background:#21262d}" +
     "#fv-shell.on{color:#e6e9ef;background:#1f6feb;border-color:#388bfd}" +
     "#fv-shell:disabled{opacity:.45;cursor:not-allowed}" +
+    /* 1.0.151: ＋ / × ride the ⌂ shell button as a split */
+    "#fv-shell-grp{display:inline-flex;align-items:stretch;flex:none}" +
+    "#fv-shell-grp #fv-shell{border-top-right-radius:0;border-bottom-right-radius:0}" +
+    "#fv-shell-add,#fv-shell-x{flex:none;background:#0d1117;color:#8b949e;border:1px solid #30363d;border-left:0;" +
+    "font:12px system-ui,sans-serif;padding:1px 6px;cursor:pointer;border-radius:0}" +
+    "#fv-shell-grp > button:last-child:not([style*='display: none']){border-radius:0 4px 4px 0}" +
+    "#fv-shell-add:hover,#fv-shell-x:hover{color:#e6e9ef;background:#21262d}" +
+    "#fv-shell-add:disabled{opacity:.45;cursor:not-allowed}" +
     "#fv-term-host{flex:1;padding:4px;overflow:hidden;position:relative}" +
     ".fv-view{position:absolute;inset:4px;display:none}" +
     ".fv-view.on{display:block}" +
@@ -189,7 +206,16 @@
     "#fv-loop-strip .fv-loop-meta{color:#c08585;flex:none}" +
     "#fv-loop-strip .fv-loop-do{color:#e6e9ef;overflow:hidden;text-overflow:ellipsis;font-family:ui-monospace,monospace;flex:1}" +
     "#fv-loop-strip .fv-loop-copy{cursor:pointer;flex:none;color:#9fd4ff;background:#16324a;border:1px solid #2b567a;border-radius:5px;padding:0 6px;font:10px ui-monospace,monospace}" +
-    "#fv-loop-strip .fv-loop.cleared{opacity:.55}";
+    "#fv-loop-strip .fv-loop.cleared{opacity:.55}" +
+    /* 1.0.149: tmux split button (button + ▾) and its provider menu */
+    "#fv-backend .fv-split{display:inline-flex;align-items:stretch}" +
+    "#fv-backend .fv-split button:first-child{border-top-right-radius:0;border-bottom-right-radius:0}" +
+    "#fv-backend .fv-split-arrow{border-top-left-radius:0;border-bottom-left-radius:0;margin-left:-1px;padding:0 5px;min-width:0}" +
+    ".fv-menu{position:fixed;z-index:2147483100;display:flex;flex-direction:column;min-width:120px;" +
+    "background:#161b22;border:1px solid #2b567a;border-radius:6px;padding:3px;box-shadow:0 4px 14px rgba(0,0,0,.5)}" +
+    ".fv-menu-item{text-align:left;background:transparent;color:#e6e9ef;border:0;border-radius:4px;padding:4px 8px;" +
+    "font:12px system-ui,sans-serif;cursor:pointer}" +
+    ".fv-menu-item:hover{background:rgba(255,255,255,.08)} .fv-menu-item.on{color:#9fd4ff} .fv-menu-item:disabled{opacity:.45;cursor:default}";
   document.head.appendChild(css);
 
   var pane = document.createElement("div");
@@ -207,7 +233,11 @@
     '<span class="fv-lane hidden" id="fv-lane-todo" data-lane="todo: " title="mct CAPTURE lane: types todo: at the REPL prompt — no turn spent; the line is appended to the workspace todo.md">todo:</span>' +
     '<span class="dot" id="fv-dot"></span>' +
     '<span id="fv-status">terminal</span>' +
+    '<span class="fv-split" id="fv-shell-grp">' +
     '<button type="button" id="fv-shell" title="open a shell on the selected locus as its own user">⌂ shell</button>' +
+    '<button type="button" id="fv-shell-add" class="fv-split-arrow" title="＋ another shell on this locus (its own PTY / tmux session)">＋</button>' +
+    '<button type="button" id="fv-shell-x" class="fv-split-arrow" title="close this extra shell (its PTY only)" style="display:none">×</button>' +
+    '</span>' +
     '<span id="fv-term-hide" title="collapse">⇤ hide</span></div>' +
     '<div id="fv-roll-banner" title="rolling state — the fleet judge\'s derived objective for this locus\'s frontier seat">' +
     '<span class="fv-roll-k">🎯 rolling state</span>' +
@@ -361,6 +391,7 @@
   }
 
   function backendFor(s) {
+    if (SHELLS[s]) s = "shell";    // an extra shell instance shares the shell surface's backend
     var spec = SURFACES[s] || {};
     var b = chosen[s] || spec["default"] || "";
     if (spec.backends && spec.backends[b] === undefined) b = spec["default"] || "";
@@ -392,8 +423,11 @@
     var info = shellInfo(), who = info.who || "";
     var where = acHostSeat() ? "this host" : activeVm;
     var down = info.available === false;
-    var on = surface === "shell" && !down;
-    b.textContent = "⌂ " + (who || "shell");
+    var on = isShell(surface) && !down;
+    var n = Object.keys(SHELLS).length + 1;
+    b.textContent = "⌂ " + (who || "shell") + (isShell(surface) && surface !== "shell" ? " #" + SHELLS[surface].inst : "") + (n > 1 && !isShell(surface) ? " (" + n + ")" : "");
+    var bx = document.getElementById("fv-shell-x"); if (bx) bx.style.display = SHELLS[surface] ? "" : "none";
+    var ba = document.getElementById("fv-shell-add"); if (ba) ba.disabled = down;
     b.className = on ? "on" : "";
     b.disabled = down && surface !== "shell";
     b.title = down
@@ -447,13 +481,17 @@
     // 1.0.143: exec-vs-ssh only means something for an LXD guest's shell; the
     // host / ssh-locus shell has exactly one way in, so no picker.
     if (surface === "shell" && spec.kind && spec.kind !== "lxc") keys = [];
-    if (!keys.length) { sel.className = "hidden"; sel.innerHTML = ""; setStatus(); return; }
+    if (!keys.length && !isShell(surface)) { sel.className = "hidden"; sel.innerHTML = ""; setStatus(); return; }
     sel.className = "";
     sel.innerHTML = "";
     var current = backendFor(surface);
     // Frontier picker: a provider dropdown (ChatGPT / Claude — which model backs
     // the terminal seat) plus a two-button keeper-mode switch, serve vs tmux.
-    if (surface === "frontier") {
+    // 1.0.153 (operator 2026-10-02): while a SHELL is on stage the frontier picker
+    // (tui · tmux ▾) stays in the bar — the host shell has no backend picker of its
+    // own, so the bar went empty and there was no way back but the ⌂ toggle.
+    if (surface === "frontier" || (isShell(surface) && !keys.length)) {
+      spec = SURFACES.frontier || { backends: {} };
       if (acOn()) {
         var modelPicker = document.createElement("select");
         modelPicker.id = "fv-serve-model";
@@ -462,33 +500,9 @@
         modelPicker.style.maxWidth = "360px";
         sel.appendChild(modelPicker);
         populateServeModels(modelPicker);
-      } else {
-      var provider = document.createElement("select");
-      provider.id = "fv-frontier-provider";
-      provider.title = "Keeper provider";
-      provider.setAttribute("aria-label", "Keeper provider");
-      [["codex", "ChatGPT"], ["claude-code", "Claude"], ["hugpy", "Hugpy"]].forEach(function (entry) {
-        var option = document.createElement("option");
-        option.value = entry[0];
-        option.textContent = entry[1];
-        option.selected = entry[0] === frontierNative;
-        option.disabled = !spec.backends[entry[0]] || spec.backends[entry[0]].available === false;
-        provider.appendChild(option);
-      });
-      provider.addEventListener("change", function (ev) {
-        var method = backendFor("frontier");
-        frontierNative = ev.target.value;
-        localStorage.setItem("fv-frontier-native", frontierNative);
-        chosen.frontier = (method === "mct" && frontierNative !== "hugpy") ? "mct" : frontierNative;
-        localStorage.setItem("fv-backends", JSON.stringify(chosen));
-        /* One stable Serve frontend: a provider change is carried into the
-           existing console, never used as a reason to mount a terminal seat. */
-        detach("frontier");
-        renderBar();
-        refreshMeta();
-      });
-      sel.appendChild(provider);
       }
+      /* 1.0.149 (operator 2026-10-02): the provider is chosen from the tmux SPLIT
+         button below (▾ menu: Claude · ChatGPT · Hugpy) — no separate select. */
       /* Keeper mode is a two-button switch (2026-09-18): the abstract-claude
          "serve" console vs the "tmux" terminal seat (which model backs the seat
          is the provider select above). "serve" is the keeper surface, not a
@@ -499,15 +513,23 @@
       var bServe = document.createElement("button");
       bServe.type = "button";
       bServe.setAttribute("data-mode", "serve");
-      bServe.textContent = "serve";
-      bServe.title = "Shared Serve — the /ac console (keeper surface)";
-      bServe.disabled = !acOffered();
-      bServe.className = acOn() ? "on" : "";
+      bServe.textContent = "tui";   // 1.0.150 (operator): the serve-sessions seat IS the hugpy-agent TUI
+      /* 1.0.148 (operator 2026-10-02): "serve" now mounts the SERVE SESSIONS seat —
+         `hugpy-agent tui --serve <this locus's serve>` in the keeper-serve-tui tmux
+         session (TERM_SURFACES frontier.serve-tui) — in place of the /ac/ web
+         console frame. It needs a serve that answers AND hugpy-agent on the locus. */
+      var tuiInfo = spec.backends[SERVE_TUI] || {};
+      var tuiOn = backendFor("frontier") === SERVE_TUI;
+      bServe.title = tuiInfo.available === false
+        ? "Serve sessions \u2014 hugpy-agent is not installed on this locus"
+        : !acOffered() ? "Serve sessions \u2014 no abstract-claude serve answers on this locus"
+        : "Serve sessions \u2014 keeper/chat/worker/local of this locus's abstract-claude serve, driven from the hugpy-agent TUI (tmux seat keeper-serve-tui)";
+      bServe.disabled = !acOffered() || tuiInfo.available === false;
+      bServe.className = tuiOn ? "on" : "";
       bServe.addEventListener("click", function () {
-        if (acOn()) return;
-        acSetForce("serve");
-        acSync();
-        renderBar();
+        if (surface !== "frontier") show("frontier");      // off a shell first
+        if (backendFor("frontier") === SERVE_TUI) { show("frontier"); return; }
+        setBackend("frontier", SERVE_TUI, true);
       });
       sel.appendChild(bServe);
       /* 1.0.144: a locus without a serve of its own gets ONE explicit action —
@@ -537,10 +559,18 @@
         });
         sel.appendChild(bProv);
       }
+      /* 1.0.149: SPLIT button — the left half is the tmux button (goes to the LAST
+         CHOSEN terminal: frontierNative); the right half is a ▾ that opens the
+         provider menu (Claude · ChatGPT · Hugpy — the same three the standalone
+         select offered). Picking one sets frontierNative and mounts that seat. */
+      var PROVIDERS = [["claude-code", "Claude"], ["codex", "ChatGPT"], ["hugpy", "Hugpy"]];
+      var provName = (PROVIDERS.filter(function (e) { return e[0] === frontierNative; })[0] || ["", frontierNative])[1];
+      var split = document.createElement("span");
+      split.className = "fv-split";
       var bTmux = document.createElement("button");
       bTmux.type = "button";
       bTmux.setAttribute("data-mode", "tmux");
-      bTmux.textContent = "tmux";
+      bTmux.textContent = "tmux \u00b7 " + provName;
       /* 1.0.139: tmux is a Recommends — /api/term/backends reports frontier.tmux;
          without it the seat cannot start, so the button is disabled and says why. */
       var tmuxInfo = spec.tmux || {};
@@ -555,12 +585,54 @@
       if (running.length) bTmux.title += " · running on " + (acHostSeat() ? "this host" : activeVm) + ": " + running.join(", ");
       if (spec.seat_live) bTmux.setAttribute("data-seat-live", "1");
       bTmux.disabled = seatInfo.available === false || tmuxMissing;
-      bTmux.className = acOn() ? "" : "on";
+      bTmux.className = tuiOn ? "" : "on";
       bTmux.addEventListener("click", function () {
-        if (!acOn() && backendFor("frontier") === frontierNative) { show("frontier"); return; }
-        setBackend("frontier", frontierNative, true);   // leaves serve, mounts the tmux seat
+        if (surface !== "frontier") show("frontier");      // off a shell first
+        if (backendFor("frontier") === frontierNative) { show("frontier"); return; }
+        setBackend("frontier", frontierNative, true);   // leaves the serve-sessions seat, mounts the provider seat
       });
-      sel.appendChild(bTmux);
+      split.appendChild(bTmux);
+      var bArrow = document.createElement("button");
+      bArrow.type = "button";
+      bArrow.className = "fv-split-arrow" + (tuiOn ? "" : " on");
+      bArrow.textContent = "\u25be";
+      bArrow.title = "choose the terminal: Claude \u00b7 ChatGPT \u00b7 Hugpy";
+      bArrow.disabled = tmuxMissing;
+      bArrow.addEventListener("click", function (ev) {
+        ev.stopPropagation();
+        var old = document.getElementById("fv-prov-menu");
+        if (old) { old.remove(); return; }
+        var menu = document.createElement("div");
+        menu.id = "fv-prov-menu";
+        menu.className = "fv-menu";
+        PROVIDERS.forEach(function (entry) {
+          var info = spec.backends[entry[0]] || {};
+          var it = document.createElement("button");
+          it.type = "button";
+          it.className = "fv-menu-item" + (entry[0] === frontierNative ? " on" : "");
+          it.textContent = entry[1] + (entry[0] === frontierNative ? " \u2713" : "");
+          it.disabled = info.available === false;
+          it.title = info.available === false ? entry[1] + " is not installed on this locus" : backendLabel(entry[0]);
+          it.addEventListener("click", function (e2) {
+            e2.stopPropagation();
+            menu.remove();
+            frontierNative = entry[0];
+            localStorage.setItem("fv-frontier-native", frontierNative);
+            if (surface !== "frontier") show("frontier");  // off a shell first
+            if (backendFor("frontier") === frontierNative) { show("frontier"); renderBar(); return; }
+            setBackend("frontier", frontierNative, true);
+          });
+          menu.appendChild(it);
+        });
+        var r = bArrow.getBoundingClientRect();
+        menu.style.left = Math.max(0, r.right - 120) + "px";
+        menu.style.top = (r.bottom + 2) + "px";
+        document.body.appendChild(menu);
+        var closer = function () { menu.remove(); document.removeEventListener("click", closer, true); };
+        setTimeout(function () { document.addEventListener("click", closer, true); }, 0);
+      });
+      split.appendChild(bArrow);
+      sel.appendChild(split);
       setStatus();
       return;
     }
@@ -732,7 +804,9 @@
      station says its surface is serve (so the operator can come BACK to it
      after a tmux detour), or whenever they have explicitly forced it. */
   function acOffered() {
-    return !!acPathNow() && (KEEPER_SURFACE === "serve" || AC_FORCE === "serve");
+    /* 1.0.147: the serve console is OFFERED whenever the locus has one that
+       answers — selectable, never the default (the keeper is the tmux seat). */
+    return !!acPathNow();
   }
   function acHostSeat() {
     // 1.0.141: the bare "keeper" is vm_mgr's locus, not this host — the host is
@@ -744,8 +818,10 @@
   // ?vm=<selected locus> for seat-config calls ("" on the host seat)
   function vmQ(pre) { return acHostSeat() ? "" : ((pre || "?") + "vm=" + encodeURIComponent(activeVm)); }
   function acOn() {
-    if (surface !== "frontier" || !acPathNow()) return false;
-    return AC_FORCE ? AC_FORCE === "serve" : KEEPER_SURFACE === "serve";
+    /* 1.0.148: the /ac/ web console is no longer a pane — the serve sessions are
+       the serve-tui Terminal seat (see renderBar). The frame/native-view plumbing
+       below is kept (acView/acFrame/acNative*) but never mounted. */
+    return false;
   }
   var acEl = null;
   // The /ac console placeholder. It is only ever a positioned, empty anchor:
@@ -948,6 +1024,10 @@
       v._whAcc = 0; v._whT = null;
       nativeEl.addEventListener("wheel", function (e) {
         if (!v.ws || v.ws.readyState !== 1) return;
+        /* 1.0.153: the serve-tui seat (hugpy-agent tui) scrolls its OWN transcript —
+           it has DEC mouse tracking on, so xterm turns the wheel into mouse reports
+           the app understands. Do not hijack it into tmux copy-mode. */
+        if (s === "frontier" && backendFor("frontier") === SERVE_TUI) return;
         e.preventDefault(); e.stopPropagation();
         v._whAcc += (e.deltaMode === 1 ? e.deltaY : e.deltaY / 20);
         if (v._whT) return;
@@ -1178,7 +1258,9 @@
     var mine = new WebSocket(proto + "://" + location.host + "/wsterm" +
       "?rows=" + v.term.rows + "&cols=" + v.term.cols +
       (PULLS[s] ? "&surface=shell&vm=@keeper&tmux=" + encodeURIComponent(PULLS[s].tmux) : "") +
-      (PULLS[s] ? "&surface_key=" : "&surface=") + encodeURIComponent(s) +
+      (PULLS[s] ? "&surface_key=" + encodeURIComponent(s)
+                : SHELLS[s] ? "&surface=shell&inst=" + SHELLS[s].inst
+                            : "&surface=" + encodeURIComponent(s)) +
       "&backend=" + encodeURIComponent(backendFor(s)) +
       (s === "frontier" ? "&native=" + encodeURIComponent(frontierNative) : "") +
       (s === "frontier" && activeSession ? "&session=" + encodeURIComponent(activeSession) : "") +
@@ -1329,7 +1411,31 @@
     }
   }, 1000);
 
+  function addShell() {
+    var n = 2;
+    while (SHELLS["shell#" + n] && n < 32) n++;
+    if (n >= 32) return "";
+    var key = "shell#" + n;
+    SHELLS[key] = { inst: n };
+    show(key);
+    return key;
+  }
+  function closeShell(key) {
+    if (!SHELLS[key]) return;
+    var v = views[key];
+    if (v) {
+      clearTimeout(v._retryT);
+      if (v.ws) { var old = v.ws; v.ws = null; try { if (old.readyState === 1) old.send(JSON.stringify({ t: "kill" })); } catch (e) {} try { old.close(); } catch (e) {} }
+      try { v.el.remove(); } catch (e) {}
+      delete views[key];
+    }
+    delete SHELLS[key];
+    if (lastShell === key) lastShell = "shell";
+    if (surface === key) show("shell");
+    else renderBar();
+  }
   function show(s) {
+    if (isShell(s)) lastShell = s;
     surface = s;
     localStorage.setItem("fv-surface", surface);
     try { window.dispatchEvent(new CustomEvent("fv-surface", { detail: s })); } catch (e) {}
@@ -1488,6 +1594,12 @@
   function refreshLoops() {
     var strip = document.getElementById("fv-loop-strip");
     if (!strip) return;
+    /* 1.0.149 (operator 2026-10-02): the strip no longer paints over the terminal —
+       the same rows live in the steward tab's 📡 feed → ⚠ alerts (critical in red).
+       localStorage fv-loop-strip=1 brings the strip back for this browser. */
+    var stripOn = false;
+    try { stripOn = localStorage.getItem("fv-loop-strip") === "1"; } catch (e) {}
+    if (!stripOn) { strip.textContent = ""; strip.classList.remove("on"); return; }
     fetch("/api/loops" + vmQ(), { credentials: "same-origin" })
       .then(function (r) { return r.ok ? r.json() : null; })
       .then(function (j) {
@@ -1597,10 +1709,15 @@
     });
     pane.querySelector("#fv-session-new").addEventListener("click", newSession);
     pane.querySelector("#fv-shell").addEventListener("click", function () {
-      if (surface === "shell") { show("frontier"); return; }
+      if (isShell(surface)) { show("frontier"); return; }
       if (shellInfo().available === false) { setStatus(); return; }
-      show("shell");
+      show(SHELLS[lastShell] || lastShell === "shell" ? lastShell : "shell");
     });
+    pane.querySelector("#fv-shell-add").addEventListener("click", function () {
+      if (shellInfo().available === false) { setStatus(); return; }
+      addShell();
+    });
+    pane.querySelector("#fv-shell-x").addEventListener("click", function () { if (SHELLS[surface]) closeShell(surface); });
     // geometry: pin to the console's real header (nav) and status bar (floor);
     // best-effort measurement of full-width fixed bars, with the defaults as
     // the floor values.
@@ -1738,7 +1855,7 @@
     open();                       // terminal-first: auto-open on load
   }
   window.__fvSurface = {   // the top bar drives the terminal surface through this
-    set: function (s) { if (SURFACES[s] || PULLS[s]) show(s); },
+    set: function (s) { if (SURFACES[s] || PULLS[s] || SHELLS[s]) show(s); },
     // ONE-CLICK WIPE (operator 2026-09-14): after a seat wipe kills this
     // surface's tmux session server-side, the operator's still-open socket
     // only closes a beat later — so show()'s "reconnect if closed" guard races
@@ -1749,7 +1866,7 @@
     // on the active VM + chosen backend — so wiped host OR peer loci come back
     // alive in one click via the canonical seat launcher.
     reopen: function (s) {
-      if (!(SURFACES[s] || PULLS[s])) return;
+      if (!(SURFACES[s] || PULLS[s] || SHELLS[s])) return;
       show(s);
       /* t296: the serve console has no tmux session to relaunch — reload the
          proxied app instead, which is the equivalent "come back fresh". */
@@ -1770,7 +1887,7 @@
     // used here — it early-returns on a still-OPEN socket.
     recover: function (s) {
       s = s || surface;
-      if (!(SURFACES[s] || PULLS[s])) return;
+      if (!(SURFACES[s] || PULLS[s] || SHELLS[s])) return;
       if (surface !== s) show(s);
       if (acOn()) { if (window.__fvSurface.reopen) window.__fvSurface.reopen(s); return; }
       var v = view(s);
@@ -1782,7 +1899,9 @@
       connect(s);
       setTimeout(function () { v.fit.fit(); sizeOf(v); focusView(v); }, 30);
     },
-    list: function () { return Object.keys(SURFACES).concat(Object.keys(PULLS)); },
+    list: function () { return Object.keys(SURFACES).concat(Object.keys(SHELLS)).concat(Object.keys(PULLS)); },
+    addShell: function () { return addShell(); },
+    closeShell: function (k) { closeShell(k); },
     // SESSION-PULL-PATCH 2026-09-02: attach a pulled / jump-in seat (a tmux session on the keeper
     // socket, spawned by /api/handoff/spawn) as its own terminal tab.
     attach: function (name) {

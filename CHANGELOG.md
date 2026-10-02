@@ -3,6 +3,72 @@
 Versions before 1.0.91 are recorded in git history and in README.md; this file
 starts at the release that introduced it.
 
+## 1.0.153 — 2026-10-02
+
+* Operator 2026-10-02 (screenshot: stacked HUGPY AGENT headers when scrolling up): the
+  serve-tui seat keeps the ALTERNATE screen (`tmux setw alternate-screen on` in its own
+  window — the socket-wide `off` stays for claude-code/opencode, which have no scrollback
+  of their own), so TUI redraws no longer pile into tmux history; and the client no
+  longer hijacks the wheel into tmux copy-mode for that seat — xterm turns it into
+  mouse reports and the TUI scrolls its own transcript.
+* While a ⌂ shell is on stage the frontier picker (`tui` · `tmux · <provider> ▾`) stays
+  in the bar; clicking either leaves the shell and mounts that seat.
+
+## 1.0.152 — 2026-10-02
+
+* 🐞 bug scan (log_findings.py): a bare `429` is no longer a rate limit — serve's
+  `[rollover] sweep #429:` lines filed two HIGH rate_limit_429 findings (r3746/r3747,
+  B proposal p2232). 429 counts only as an HTTP status (after HTTP[/1.x], `status=`/
+  `code=`/`error=`, inside an access-log quote, or before "Too Many Requests"); the
+  `[rollover] sweep #N` bookkeeping lines are on the IGNORE list. Wording matches
+  (Too Many Requests, rate limit, RateLimitError) unchanged. Test added.
+
+## 1.0.151 — 2026-10-02
+
+* Operator 2026-10-02: MULTIPLE SHELLS on a locus. The ⌂ shell button is a split:
+  ⌂ goes to the last used shell (back to frontier when already on one), ＋ opens the
+  next shell (`shell#N`, its own PTY — ws_hostterm `?surface=shell&inst=N`, which the
+  backend already persisted per instance), × closes the extra shell you are on (its
+  PTY only; the tmux shell in the locus lives on). `__fvSurface.addShell/closeShell`
+  now exist for the SPA.
+
+## 1.0.150 — 2026-10-02
+
+* Operator 2026-10-02: the frontier picker's `serve` button is labelled **`tui`** — the serve-sessions seat IS the hugpy-agent TUI over this locus's abstract-claude serve (backend key `serve-tui` unchanged).
+
+## 1.0.149 — 2026-10-02
+
+* Operator 2026-10-02: the ⚠ loop/finding strip no longer paints over the terminal.
+  Its rows (crash/retry loops, log findings, station holds — GET /api/loops) live in
+  the steward tab's 📡 feed as a new **⚠ alerts** subtab with an `all | critical`
+  filter. critical = an active non-inert loop, a high-severity finding, or a station
+  skip; critical rows read red (left bar + tint) there AND in the 🐞 review. The strip
+  is off by default (localStorage `fv-loop-strip=1` restores it for a browser).
+* Frontier picker: the `tmux` button is a SPLIT button — the left half goes to the
+  last chosen terminal (`tmux · Claude`), the right ▾ opens the provider menu
+  (Claude · ChatGPT · Hugpy), replacing the separate provider dropdown.
+
+## 1.0.148 — 2026-10-02
+
+* Operator 2026-10-02: the SERVE SESSIONS (keeper/chat/worker/local of a locus's
+  abstract-claude serve) are driven from the hugpy-agent TUI, replacing the /ac/ web
+  console pane. New frontier Terminal backend `serve-tui` = `hugpy-agent tui --serve
+  <serve url as seen from the locus>` in tmux session `keeper-serve-tui`
+  (TERM_SURFACES / BACKEND_TMUX_SESSION / TMUX_SEAT_LABELS "Serve sessions · Hugpy
+  Agent TUI"). The picker's "serve" button mounts that seat (disabled when the locus
+  has no answering serve or no hugpy-agent); "tmux" returns to the provider seat. The
+  /ac/ proxy route and native-view plumbing stay for scripts but no pane frames them;
+  the SPA's VM-pane paneSrc() no longer special-cases "/ac/".
+* Pins: abstract-claude 0.1.96, abstract-serve-core 0.1.19 (cross-locus
+  session_message `<locus>:keeper`), abstract-gpt 0.1.17, hugpy-agent 0.1.100 (TUI:
+  locus tabs/picker, mouse session switch, typing-always-types), abstract-toolserver
+  0.0.47 (comms_ping live push to the target locus's registered serve_url). The
+  previous pins (hugpy-agent 0.1.85) predate `hugpy-agent tui` and were DOWNGRADING
+  fleet venvs on every serve start.
+* Carried from the post-1.0.147 tree: 📨 nudges delivered into the locus's own
+  keeper-claude seat (_nudge_seat_on via prompt_send.deliver_seat); LXD discovery
+  failures back off 10 min and log once.
+
 ## 1.0.147 — 2026-10-01
 
 * Pin abstract-serve-core 0.1.16: operator interrupt = stop (no operator:interrupt

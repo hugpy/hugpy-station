@@ -214,10 +214,14 @@ def _nudge_ns(tmp, au, ts_down=False, serve_ok=True):
     pend = tmp / "pending.json"
     pend.write_text(json.dumps({"pings": [{"id": "r1", "text": "[ping] a"}, {"id": "r2", "text": "[ping] b"}],
                                 "last_sent": 0}))
+    async def surface_now(vm=""):                    # 1.0.147: this test models the serve-surface locus
+        return "serve", {"ok": True}
+
     ns = extract({"_nudge_frontier", "_nudge_pending", "_nudge_pending_write", "_is_channel_ping", "_no_tmux"},
                  consts={"_KEEP", "_CHANNEL_REF_RE"}, _ts_call=ts_call, _nudge_serve=nudge_serve,
                  _nudge_tmux=nudge_serve, _nudge_drain=drain, _read_json=read_json, _NUDGE_PENDING_PATH=pend,
-                 NUDGE_MIN_INTERVAL=0, _audit_line=au.line, _hold_note=au.note, _hold_clear=au.clear)
+                 NUDGE_MIN_INTERVAL=0, _audit_line=au.line, _hold_note=au.note, _hold_clear=au.clear,
+                 KEEPER_SURFACE="serve", _keeper_surface_now=surface_now)
     return ns, pend
 
 

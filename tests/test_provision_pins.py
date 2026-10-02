@@ -27,7 +27,8 @@ def _pins():
 
 def test_serve_modules_are_pinned_to_the_published_versions():
     p = _pins()
-    assert p["abstract-claude"] == "0.1.70" and p["abstract-serve-core"] == "0.1.10"
+    assert p["abstract-claude"] == "0.1.96" and p["abstract-serve-core"] == "0.1.19"
+    assert p["hugpy-agent"] == "0.1.100"   # 1.0.148: the serve-tui seat needs `hugpy-agent tui`
 
 
 def test_no_local_wheels_ship():

@@ -17,14 +17,14 @@
 # station version — the next install re-provisions every venv to the new pins.
 #
 # Tier 1 — per-seat LIBRARIES (installed into every venv):
-abstract-claude==0.1.71
-abstract-serve-core==0.1.16
-abstract-gpt==0.1.15
-hugpy-agent[mct,serve]==0.1.85
+abstract-claude==0.1.96
+abstract-serve-core==0.1.19
+abstract-gpt==0.1.17
+hugpy-agent[mct,serve]==0.1.100
 abstract-search==0.0.0.42
 # the shared toolserver CLIENT side (client / discovery / MCP bridge / CLI;
 # stdlib-only — the service itself needs the [server] extra, not installed here)
-abstract-toolserver==0.0.31
+abstract-toolserver==0.0.47
 #
 # Tier 2 — runtime SERVICE floor (a singleton the station CALLS, never started
 # per-seat). The toolserver is ONE Flask service per host; it ADVERTISES itself

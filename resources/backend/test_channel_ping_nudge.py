@@ -30,7 +30,7 @@ FUNCS = {"_deliver_pings", "_nudge_frontier", "_is_channel_ping", "_nudge_pendin
 CONSTS = {"_CHANNEL_REF_RE", "FLEET_MSG_MAX", "_KEEP"}
 
 
-def load(tmp, inbox, open_ids, serve_ok=True, page=True, gate_down=False):
+def load(tmp, inbox, open_ids, serve_ok=True, page=True, gate_down=False, surface="serve"):
     """``page`` / ``gate_down`` script the toolserver issue gate: since 2026-10-01
     (d4187 / t4178) it is consulted for ANNOTATION only — a page=false answer or
     an unreachable toolserver must never withhold a ping (sent["gate"] records
@@ -75,8 +75,12 @@ def load(tmp, inbox, open_ids, serve_ok=True, page=True, gate_down=False):
     async def reroute(app, bugs):
         sent.setdefault("rerouted", []).extend(b["id"] for b in bugs)
 
+    async def surface_now(vm=""):                  # 1.0.147: the locus's keeper surface ("tmux" default live)
+        return surface, {"ok": True}
+
     import secrets
     ns = dict(re=re, json=json, time=time, secrets=secrets, Path=Path,
+              KEEPER_SURFACE=surface, _keeper_surface_now=surface_now,
               _ts_call=ts_call, _station_locus=lambda: "keeper", _read_json=read_json,
               _canon_locus=lambda n: (n or "").lower(),
               _NUDGE_PENDING_PATH=tmp / "pending.json", _PINGS_SEEN_PATH=tmp / "seen.json",

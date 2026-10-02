@@ -1235,7 +1235,7 @@ const termURL = (vm, mode) => {
        must keep using termURL, not this host's serve console.
    window.__keeperSurface is refreshed by the poller below; force either side
    with ?keeper=serve / ?keeper=tmux on the console URL. */
-window.__keeperSurface = { surface: "serve", ok: true, forced: "" };
+window.__keeperSurface = { surface: "tmux", ok: true, forced: "" };   /* 1.0.147: keeper = the tmux keeper-claude seat; serve selectable */
 try {
   var __kq = new URLSearchParams(window.location.search).get("keeper");
   if (__kq === "serve" || __kq === "tmux") window.__keeperSurface.forced = __kq;
@@ -1300,7 +1300,8 @@ const keeperSurface = () => {
 };
 const paneSrc = (vm, mode) => {
   if (mode !== "keeper") return termURL(vm, mode);
-  if (isHostSeat(vm)) return keeperSurface() === "serve" ? "/ac/" : termURL(vm, mode);
+  /* 1.0.148: the serve sessions are a Terminal seat (hugpy-agent tui), not the /ac/ frame */
+  if (isHostSeat(vm)) return termURL(vm, mode);
   /* 1.0.101: a locus with its OWN abstract-claude serve (ac-loci.json; the
      hugpy locus -> /ac/@hugpy/) frames that console; learned by FleetView's
      refreshMeta() from /api/term/backends?vm=<locus> (window.__acPaths). */
@@ -9012,7 +9013,10 @@ function BugScanPanel({ vm }) {
         ${findings.length === 0 && html`<div style=${{ color: "var(--dim)" }}>
           ${st && st.on ? "no running problems found yet — the local keeper reviews this locus's journal every " + Math.round(((st && st.interval) || 600) / 60) + " min."
                         : "the review is off for this locus — flip it on, or hit ‘scan now’ for a single pass."}</div>`}
-        ${findings.map(f => html`<div key=${f.hash} style=${{ borderBottom: "1px solid var(--edge)", padding: "4px 0" }}>
+        ${findings.map(f => html`<div key=${f.hash} style=${{ borderBottom: "1px solid var(--edge)", padding: "4px 0 4px 6px",
+              /* 1.0.149: a high-severity finding is CRITICAL — same red as the ⚠ alerts feed */
+              borderLeft: f.severity === "high" ? "3px solid var(--bad)" : "3px solid transparent",
+              background: f.severity === "high" ? "rgba(224,108,108,.07)" : "transparent" }}>
           <div style=${{ display: "flex", gap: 6, alignItems: "baseline" }}>
             <span style=${{ color: BUGSCAN_SEV[f.severity] || "var(--dim)", fontWeight: f.severity === "high" ? 700 : 400, minWidth: 52, flex: "none", fontSize: 10 }}>${f.severity}</span>
             <span style=${{ flex: "1 1 auto", minWidth: 0, cursor: "pointer" }} title="click to show the evidence the keeper quoted"
@@ -9025,6 +9029,73 @@ function BugScanPanel({ vm }) {
           ${open[f.hash] && html`<pre style=${{ margin: "3px 0 2px 58px", padding: "5px 7px", border: "1px solid var(--edge)", borderRadius: 5, background: "rgba(255,255,255,.02)", maxHeight: 200, overflow: "auto", whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontSize: 10.5 }}>${f.evidence || "(no evidence quoted)"}</pre>`}
         </div>`)}
       </div>`}
+  </div>`;
+}
+
+/* ⚠ alerts (1.0.149, operator 2026-10-02): the crash/retry loops, log findings and
+   station holds the backend detector keeps (GET /api/loops) — the rows the old
+   fourth-row strip painted OVER the terminal now live here, inside the 📡 feed,
+   with a "critical" filter. critical = an active, non-inert loop · a high-severity
+   finding · a station skip. Critical rows read red here AND in the 🐞 review. */
+const ALERT_POLL_MS = 15000;
+function alertIsCritical(l) {
+  if (!l) return false;
+  if (l.hold) return l.source === "station:skip";
+  if (String(l.source || "").indexOf("finding:") === 0) return !l.inert && l.severity === "high";
+  return !!l.active && !l.inert;
+}
+function fmtAlertClock(t) {
+  if (!t) return "?";
+  const d = new Date(t * 1000);
+  return ("0" + d.getHours()).slice(-2) + ":" + ("0" + d.getMinutes()).slice(-2);
+}
+function AlertsFeed({ vm, onlyCritical }) {
+  const [doc, setDoc] = useState(null);
+  const [err, setErr] = useState(null);
+  const [crit, setCrit] = useState(!!onlyCritical);
+  const q = (vm && vm !== "@keeper") ? "?vm=" + encodeURIComponent(vm) : "";
+  useEffect(() => {
+    const load = () => api("/api/loops" + q).then(d => { setDoc(d); setErr(null); }).catch(e => setErr(e.message || "load failed"));
+    load();
+    const id = setInterval(() => { if (document.visibilityState !== "hidden") load(); }, ALERT_POLL_MS);
+    return () => clearInterval(id);
+  }, [q]);
+  const rows = doc && doc.ok
+    ? [].concat(doc.active || [], (doc.recent || []).slice(0, 4), (doc.findings || []).slice(0, 12), (doc.holds || []).slice(0, 12))
+    : [];
+  const shown = crit ? rows.filter(alertIsCritical) : rows;
+  const nCrit = rows.filter(alertIsCritical).length;
+  const kind = (l) => {
+    const holdK = { "station:switch": "⚙ switch", "station:hold": "⏸ hold", "station:skip": "⚠ skip", "station:pending": "⏳ pending" };
+    if (l.hold) return holdK[l.source] || "⏸ hold";
+    if (String(l.source || "").indexOf("finding:") === 0) return l.inert ? "· inert" : "🐞 " + (l.severity || "finding");
+    return l.active ? "⚠ loop" : "✓ cleared";
+  };
+  return html`<div style=${{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+    <div style=${{ display: "flex", gap: 6, alignItems: "center", padding: "4px 8px", borderBottom: "1px solid var(--edge)", flex: "none", fontSize: 11 }}>
+      <button className=${"btn" + (!crit ? " on" : "")} onClick=${() => setCrit(false)} style=${{ fontSize: 10 }}>all (${rows.length})</button>
+      <button className=${"btn" + (crit ? " on" : "")} onClick=${() => setCrit(true)} style=${{ fontSize: 10, color: nCrit ? "var(--bad)" : undefined }}
+              title="active loops · high-severity findings · station skips">critical (${nCrit})</button>
+      <span style=${{ color: "var(--dim)", fontSize: 10, marginLeft: "auto" }} title="GET /api/loops — crash/retry loops (systemd NRestarts, worker re-execs, job retries), log findings and station holds">
+        ${doc && doc.ok ? "detector · " + fmtAlertClock(doc.ts) : err || "…"}</span>
+    </div>
+    <div style=${{ flex: 1, minHeight: 0, overflowY: "auto", padding: "4px 8px", fontSize: 11, lineHeight: 1.45 }}>
+      ${shown.length === 0 && html`<div style=${{ color: "var(--dim)" }}>${crit ? "nothing critical right now" : "no loops, findings or holds on this locus"}</div>`}
+      ${shown.map((l, i) => { const c = alertIsCritical(l); return html`<div key=${(l.key || l.sigkey || l.source || "") + i}
+          title=${(l.detail || "") + "\n\ndo: " + (l.action || "") + (l.key ? "\nkey: " + l.key : "") + (l.sigkey ? "\nsignature: " + l.sigkey + " · disposition: " + (l.disposition || "open") : "") + (l.reopen_reason ? "\nwhy now: " + l.reopen_reason : "")}
+          style=${{ borderBottom: "1px solid var(--edge)", borderLeft: c ? "3px solid var(--bad)" : "3px solid transparent", background: c ? "rgba(224,108,108,.07)" : "transparent", padding: "4px 6px", opacity: (l.active === false || l.inert) ? .6 : 1 }}>
+        <div style=${{ display: "flex", gap: 6, alignItems: "baseline", flexWrap: "wrap" }}>
+          <span style=${{ color: c ? "var(--bad)" : "var(--warn)", fontWeight: c ? 700 : 500, flex: "none", fontSize: 10 }}>${kind(l)}</span>
+          <span style=${{ color: "var(--accent)", fontFamily: "ui-monospace,monospace", fontSize: 10, flex: "none" }}>${l.source || "?"}</span>
+          <span style=${{ flex: "1 1 auto", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>${l.identity || "?"} ×${l.count || 0}</span>
+          <span style=${{ color: "var(--dim)", fontSize: 10, flex: "none" }}>first ${fmtAlertClock(l.first_seen)} · last ${fmtAlertClock(l.last_seen)}${l.active === false && l.cleared_at ? " · stopped " + fmtAlertClock(l.cleared_at) : ""}${l.board_id ? " · board " + l.board_id : ""}${l.proposal_id ? " · B proposed: " + l.proposal_id : ""}${l.inert ? " · inert: " + (l.disposition_reason || "") : ""}</span>
+        </div>
+        ${l.action && html`<div style=${{ display: "flex", gap: 6, alignItems: "baseline", marginTop: 1 }}>
+          <code style=${{ flex: "1 1 auto", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 10, color: "var(--fg)" }}>do: ${l.action}</code>
+          <button className="btn" style=${{ fontSize: 10, padding: "0 5px", flex: "none" }} title="copy the command to act on this" onClick=${() => copyText(l.action)}>copy</button>
+        </div>`}
+      </div>`; })}
+    </div>
   </div>`;
 }
 
@@ -9048,6 +9119,7 @@ function FeedGroupDrawer({ vm, embed }) {
       ${embed && html`<span style=${{ fontWeight: 600, marginRight: 4 }}>📡 feed</span>`}
       <button className=${"btn" + (sub === "bugs" ? " on" : "")} title="the local keeper's intermittent review of this locus's logs (the VM-side sidecar scanner is a click inside)" onClick=${() => setSub("bugs")}>🐞 bugs</button>
       <button className=${"btn" + (sub === "live" ? " on" : "")} onClick=${() => setSub("live")}>📡 live</button>
+      <button className=${"btn" + (sub === "alerts" ? " on" : "")} title="crash/retry loops, log findings and station holds the detector holds for this locus (GET /api/loops) — the critical ones in red; this replaces the strip that sat over the terminal" onClick=${() => setSub("alerts")}>⚠ alerts</button>
       <button className=${"btn" + (sub === "b" ? " on" : "")} onClick=${() => setSub("b")}>💬 B</button>
       <button className=${"btn" + (sub === "log" ? " on" : "")} title="journalctl -f of this locus's station keeper user (the console backend's own ring is a click inside)" onClick=${() => setSub("log")}>📜 log</button>
       <button className=${"btn" + (sub === "provenance" ? " on" : "")} title="all retained model/tool/edit events intersected with the log feeds" onClick=${() => setSub("provenance")}>🧭 provenance</button>
@@ -9059,6 +9131,7 @@ function FeedGroupDrawer({ vm, embed }) {
             lives behind its `sidecar` toggle. log is the locus journal. */ ""}
       ${sub === "bugs" && html`<${BugScanPanel} vm=${vm} />`}
       ${sub === "live" && html`<${LiveView} />`}
+      ${sub === "alerts" && html`<${AlertsFeed} vm=${vm} />`}
       ${sub === "b" && html`<${BChatDrawer} />`}
       ${sub === "log" && html`<${JournalFeed} vm=${vm} />`}
       ${sub === "provenance" && html`<${ProvenancePanel} />`}

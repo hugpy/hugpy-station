@@ -1,6 +1,6 @@
 {
   "name": "@hugpy/station",
-  "version": "1.0.147",
+  "version": "1.0.153",
   "description": "hugpy Station — the desktop cockpit (Electron shell over the self-contained console backend: stations, VMs, terminals, agent seats). Formerly fleet-console; source package, ships as the hugpy-station .deb.",
   "author": "putkoff (hugpy.ai)",
   "license": "SEE LICENSE IN LICENSE",

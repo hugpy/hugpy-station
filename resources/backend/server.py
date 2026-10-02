@@ -867,6 +867,7 @@ def _bridge_open(name):
 
 _DISCOVER_CACHE = {"ts": 0.0, "stations": None, "err": None}
 _DISCOVER_TTL = 2.0  # collapse rapid known_names()/discover() calls into one `lxc list`
+_DISCOVER_ERROR_TTL = 600.0  # failed Snap/LXD discovery: retry at most every 10 min
 
 
 async def discover():
@@ -877,7 +878,9 @@ async def discover():
     # each shell out to `lxc list` (was spawning dozens of snap.lxd transient
     # scopes per minute, ×3 station users).
     _now = time.monotonic()
-    if _now - _DISCOVER_CACHE["ts"] < _DISCOVER_TTL and (
+    _ttl = (_DISCOVER_ERROR_TTL if _DISCOVER_CACHE["err"] is not None
+            else _DISCOVER_TTL)
+    if _now - _DISCOVER_CACHE["ts"] < _ttl and (
             _DISCOVER_CACHE["stations"] is not None or _DISCOVER_CACHE["err"] is not None):
         if _DISCOVER_CACHE["err"] is not None:
             raise RuntimeError(_DISCOVER_CACHE["err"])
@@ -906,7 +909,7 @@ async def discover():
             "bridge": _bridge_open(name),
         })
     stations.sort(key=lambda s: (s["base"], s["name"]))
-    _DISCOVER_CACHE.update(ts=_now, stations=stations, err=None)
+    _DISCOVER_CACHE.update(ts=_now, stations=stations, err=None, logged_err=None)
     return stations
 
 
@@ -918,7 +921,10 @@ async def known_names():
     try:
         names = {s["name"] for s in await discover()}
     except RuntimeError as e:
-        logging.getLogger("station.fleet").warning("known_names: %s", e)
+        message = str(e)
+        if _DISCOVER_CACHE.get("logged_err") != message:
+            logging.getLogger("station.fleet").warning("known_names: %s", e)
+            _DISCOVER_CACHE["logged_err"] = message
         names = set()
     return names | set(_ssh_hosts())
 
@@ -7189,7 +7195,11 @@ _AC_PROXY_TIMEOUT = aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read
 # STATION_KEEPER_SURFACE=tmux restores the old default. NOTHING added here ever
 # kills a tmux session — the serve-mode relaunch/wipe restart a USER unit, and
 # seats live in their own scopes.
-KEEPER_SURFACE = (os.environ.get("STATION_KEEPER_SURFACE") or "serve").strip().lower()
+# 1.0.147 (operator 2026-10-01, reversing the above): the tmux keeper-claude
+# seat IS the keeper session on EVERY locus; the serve console stays selectable
+# (picker, ?keeper=serve, STATION_KEEPER_SURFACE=serve) but is no longer the
+# default keeper target for prompts, nudges, digests, handoffs or bug reports.
+KEEPER_SURFACE = (os.environ.get("STATION_KEEPER_SURFACE") or "tmux").strip().lower()
 AC_SERVE_UNIT = (os.environ.get("STATION_AC_SERVE_UNIT") or "abstract-claude-serve@station.service").strip()
 # NAMING (2026-09-18): operator-facing surface names are "Serve" (the
 # abstract-claude serve console) and "Terminal" (the interactive-TUI seat -
@@ -7202,7 +7212,9 @@ AC_SERVE_LABEL = "Serve console"
 TMUX_SEAT_LABELS = {"mct": "Terminal \u00b7 MCT pointer exchange",
                     "claude-code": "Terminal \u00b7 Claude Code",
                     "codex": "Terminal \u00b7 ChatGPT Codex",
-                    "hugpy": "Terminal \u00b7 Hugpy agent"}
+                    "hugpy": "Terminal \u00b7 Hugpy agent",
+                    # 1.0.148: the serve sessions, driven from the hugpy-agent TUI
+                    "serve-tui": "Serve sessions \u00b7 Hugpy Agent TUI"}
 
 # ── per-locus serve consoles (1.0.101, 2026-09-17, vm_mgr; operator: "the hugpy
 # locus must have abstract-claude serve integrated") ──────────────────────────
@@ -9233,13 +9245,27 @@ async def _nudge_tmux(app, line):
     return True, f"tmux:{sess}"
 
 
-async def _nudge_frontier(app, locus, base=None, path=None, remote=False):
+async def _nudge_seat_on(app, vm, line):
+    """1.0.147: the 📨 line typed into a locus's keeper-claude seat (tmux -L
+    console on THAT locus, through locus_exec) via prompt_send.deliver_seat —
+    the same idle/dirty/busy checks as the ✍ prompt bar; multi-line safe.
+    vm '' = this host. -> (ok, detail)."""
+    sess = _tmux_session_for("frontier", "claude-code") or "keeper-claude"
+    res = await PS.deliver_seat(lambda *a: _tmux_on(vm, *a), sess, line, label="%s@%s" % (sess, vm or "host"))
+    ok = bool(res.get("ok")) and res.get("state") in ("delivered", "queued")
+    detail = res.get("detail") or res.get("reason") or res.get("state") or ""
+    return ok, "tmux:%s %s" % (res.get("seat") or sess, detail).strip()
+
+
+async def _nudge_frontier(app, locus, base=None, path=None, remote=False, vm=""):
     """ONE 📨 line for everything pending — at most every NUDGE_MIN_INTERVAL,
     only items STILL OPEN at send time (re-read from the board), deduped by
-    (source, signature) across stations; serve first, tmux only as fallback.
-    1.0.144: base/path = a remote locus's serve + its pending file; a remote
-    locus never gets a tmux nudge, and its delivered pings are marked
-    comms/delivered centrally."""
+    (source, signature) across stations. 1.0.147: the locus's tmux keeper-claude
+    seat first (its keeper surface, the default), serve as the fallback; a
+    locus whose surface is serve keeps serve first, tmux only as fallback.
+    1.0.144: base/path = a remote locus's serve + its pending file (vm = that
+    locus's name for its seat); its delivered pings are marked comms/delivered
+    centrally."""
     if _knudge is None:
         return
     if await _nudge_drain(app, base, path):              # 1.0.140: one hand-off in flight at a time
@@ -9285,9 +9311,26 @@ async def _nudge_frontier(app, locus, base=None, path=None, remote=False):
         return
     _hold_clear("hold:comms-nudge-window@" + locus)
     line = _knudge.summarize(pl["items"], locus)
+    # 1.0.147 (operator 2026-10-01): the keeper is the locus's tmux keeper-claude
+    # seat whenever its surface is tmux (the default) — seat first, serve as the
+    # fallback. Surface "serve" keeps the 1.0.140 order (serve first).
+    try:
+        surface_now = (await _keeper_surface_now(vm if remote else ""))[0]
+    except Exception:                                    # noqa: BLE001 — probe failed: the configured default
+        surface_now = KEEPER_SURFACE
     if remote:
-        out = await _knudge.deliver(line, lambda ln: _nudge_serve(app, ln, base),
-                                    lambda ln: _no_tmux(ln), allow_tmux=False)
+        async def _serve_remote(ln):
+            if not base:
+                return False, "no reachable serve on %s" % locus
+            return await _nudge_serve(app, ln, base)
+        if surface_now == "tmux":
+            out = await _knudge.deliver(line, _serve_remote, lambda ln: _nudge_seat_on(app, vm, ln),
+                                        allow_tmux=True, prefer="tmux")
+        else:
+            out = await _knudge.deliver(line, _serve_remote, lambda ln: _no_tmux(ln), allow_tmux=False)
+    elif surface_now == "tmux":
+        out = await _knudge.deliver(line, lambda ln: _nudge_serve(app, ln), lambda ln: _nudge_tmux(app, ln),
+                                    allow_tmux=True, prefer="tmux")
     else:
         out = await _knudge.deliver(line, lambda ln: _nudge_serve(app, ln), lambda ln: _nudge_tmux(app, ln))
     if out["target"] == "none":
@@ -9297,7 +9340,7 @@ async def _nudge_frontier(app, locus, base=None, path=None, remote=False):
         # 1.0.146 (t4260): the skip reason + pending count on the ⚠ strip, not only audit.log
         _hold_note(hkey, _sh.SOURCE_SKIP if _sh else "station:skip", "📨 nudge for %s not sent" % locus,
                    "%d pending; %s" % (len(pl["items"]), out["detail"]),
-                   "bring the keeper serve session up (/api/locus/serve/provision) — the pings stay pending",
+                   "bring the keeper-claude seat (or the serve keeper session) up — the pings stay pending",
                    count=len(pl["items"]))
         return
     app["_rt"][skip_key] = ""
@@ -9357,7 +9400,13 @@ async def _deliver_pings_locus(app, target):
     if not _nudge_pending(pend_p) and not (_read_json(pend_p, {}) or {}).get("inflight"):
         return
     url = (await _ac_resolve(vm))[0]
-    if not url:
+    try:
+        surface_now = (await _keeper_surface_now(vm))[0]
+    except Exception:                                    # noqa: BLE001
+        surface_now = KEEPER_SURFACE
+    # 1.0.147: a tmux-surface locus is nudged through its keeper-claude seat even
+    # without a serve; only a serve-surface locus needs a reachable serve here.
+    if not url and surface_now != "tmux":
         err = (_AC_DISCOVERED.get(_ac_locus_key(vm)) or {}).get("error") or "not discovered"
         _audit_line("comms-nudge-skip", "%s: no reachable serve (%s)" % (locus, err))
         _hold_note("skip:comms-nudge@" + locus, _sh.SOURCE_SKIP if _sh else "station:skip",
@@ -9365,7 +9414,7 @@ async def _deliver_pings_locus(app, target):
                    % (len(_nudge_pending(pend_p)), err),
                    "provision / start that locus's serve — the pings stay pending", count=len(_nudge_pending(pend_p)))
         return
-    await _nudge_frontier(app, locus, base=url, path=pend_p, remote=True)
+    await _nudge_frontier(app, locus, base=url or None, path=pend_p, remote=True, vm=vm)
 
 
 # ── live change bus (1.0.77): ONE subscription to the toolserver's SSE stream
@@ -11144,10 +11193,12 @@ TERM_SURFACES = {
     "local":    {"default": "opencode",
                  "backends": {"opencode":  "hugpy-agent console --frontend opencode",
                               "qwen-code": "hugpy-agent console --frontend qwen-code"}},
-    # MCT is the default frontier backend. Claude Code, Codex, and the native
-    # Hugpy agent remain independently selectable frontier backends. Hugpy is
-    # A's direct fleet runtime, not B's local-agent wrapper.
-    "frontier": {"default": "mct",
+    # 1.0.147 (operator 2026-10-01): Claude Code — the tmux keeper-claude seat —
+    # is the default frontier backend on every locus (it IS the keeper session).
+    # MCT, Codex, and the native Hugpy agent remain independently selectable
+    # frontier backends. Hugpy is A's direct fleet runtime, not B's local-agent
+    # wrapper.
+    "frontier": {"default": "claude-code",
                  # Claude backends (ChatGPT/Codex added 2026-09-14):
                  # claude-code IS the frontier seat, and mct is the
                  # pointer-exchange method OVER it (PROMOTED from "mct2",
@@ -11161,7 +11212,14 @@ TERM_SURFACES = {
                  "backends": {"mct":         f"abstract-claude mct {{ws}} --timeout {MCT_TURN_IDLE_TIMEOUT}",
                               "claude-code": "claude",
                               "codex": "codex",
-                 "hugpy": "hugpy-agent harness"}},
+                              "hugpy": "hugpy-agent harness",
+                              # 1.0.148 (operator 2026-10-02): the serve SESSIONS
+                              # (keeper/chat/worker/local of this locus's
+                              # abstract-claude serve) are driven from the
+                              # hugpy-agent TUI in a Terminal seat — it REPLACES
+                              # the /ac/ web console pane. {ac_url} is resolved at
+                              # launch to the serve as seen FROM the locus.
+                              "serve-tui": "hugpy-agent tui --serve {ac_url}"}},
     # The shell surface's transports: exec (lxc exec, the default — works
     # even where the network path doesn't) and ssh (a real sshd login as the
     # dev user; vm-new enables sshd and seeds the operator's key). These
@@ -11192,7 +11250,8 @@ BACKEND_TMUX_SESSION = {
     # It reuses whichever native frontier seat is selected (Claude Code/Codex).
     "frontier": {"claude-code": "keeper-claude",
                  "codex": "keeper-codex",
-                 "hugpy": "keeper-hugpy"},
+                 "hugpy": "keeper-hugpy",
+                 "serve-tui": "keeper-serve-tui"},
     "local":    {"opencode": "keeper-local-opencode",
                  "qwen-code": "keeper-local-qwen"},
 }
@@ -11810,6 +11869,28 @@ async def ws_hostterm(request):
             # worker; the harness refreshes OpenCode's model map.
             model = _frontier_models(cfg).get("hugpy", "")
             inner = "hugpy-agent harness" + (" --model " + shlex.quote(model) if model else "")
+        elif term_cmd.startswith("hugpy-agent tui"):
+            # 1.0.148: the serve-sessions seat — hugpy-agent's TUI over THIS
+            # locus's abstract-claude serve (keeper/chat/worker/local sessions),
+            # replacing the /ac/ console pane. The TUI runs ON the locus, so the
+            # serve url must be the one seen FROM the locus: the station's own
+            # upstream for the host seat; for a remote locus its loopback port
+            # (discovered / ac-loci.json), never the station-side forward.
+            _au, _unit, _path, _key = await _ac_resolve(ground_vm)
+            if target.remote:
+                _d = _AC_DISCOVERED.get(_key) or {}
+                _ent = _ac_loci().get(_key) or {}
+                _port = _d.get("port") or _ent.get("port") or ""
+                _au = f"http://127.0.0.1:{_port}" if _port else ""
+            inner = "hugpy-agent tui" + (" --serve " + shlex.quote(_au) if _au else "")
+            # 1.0.153: the TUI is a real full-screen curses app with its OWN
+            # transcript scrolling. The socket-wide `alternate-screen off` (t-scroll,
+            # for claude-code/opencode which have no scrollback) makes every TUI
+            # redraw a stale frame in tmux history, and the wheel→copy-mode path
+            # scrolls THAT instead of the transcript (operator 2026-10-02, screenshot:
+            # stacked HUGPY AGENT headers when scrolling up). This window alone keeps
+            # the alternate screen; the client lets the wheel through to the app.
+            inner = "tmux setw alternate-screen on 2>/dev/null; exec " + inner
         else:
             inner = term_cmd
         if surface == "frontier" and "abstract-claude mct " in inner:
@@ -13202,6 +13283,27 @@ async def _digest_once(app, target, now=None, send=None):
     if TD.decide(state, n, now, DIGEST_CADENCE, False, sig) == "skip":
         return await record("skipped", "unchanged since the digest delivered %s (re-sent after %d h)"
                             % (time.strftime("%H:%M", time.localtime(last)), TD.UNCHANGED_FLOOR_S // 3600))
+    vm = "" if target.get("host") else target["vm"]
+    try:
+        surface_now = (await _keeper_surface_now(vm))[0]
+    except Exception:                                    # noqa: BLE001
+        surface_now = KEEPER_SURFACE
+    if surface_now == "tmux" and send is None:
+        # 1.0.147 (operator 2026-10-01): the keeper is the locus's tmux keeper-claude
+        # seat — the digest is typed into it (deliver_seat: idle → delivered, busy →
+        # the TUI holds it for the turn boundary = queued). No serve involved.
+        text, _n = TD.build(rows, locus, now, DIGEST_CADENCE, prev_snap=state.get("snapshot"),
+                            top_n=DIGEST_TOP_N, max_chars=DIGEST_MAX_CHARS)
+        try:
+            ok, detail = await _nudge_seat_on(app, vm, text)
+        except Exception as e:                           # noqa: BLE001
+            ok, detail = False, "seat error: %s" % str(e)[:160]
+        if not ok:
+            return await record("NOT delivered", detail)
+        state.update(last_delivered=now, last_sig=sig, snapshot=TD.snapshot(rows),
+                     deliveries=int(state.get("deliveries") or 0) + 1, last_chars=len(text),
+                     queue_message_ids=[], queued_behind="")
+        return await record("queued" if "busy" in detail else "delivered", detail)
     base = AC_UPSTREAM if target.get("host") else (await _ac_resolve(target["vm"]))[0]
     sid, busy, why = ("", None, "no reachable serve") if not base else await _keeper_busy(app, base)
     if TD.decide(state, n, now, DIGEST_CADENCE, busy, sig) == "unreachable":

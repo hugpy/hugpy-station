@@ -44,8 +44,13 @@ PATTERNS = [
     ("unit_failed", "medium", re.compile(
         r"Failed with result '[\w-]+'|Main process exited, code=(?:exited|killed|dumped), status=(?!0/)"
         r"|Failed to start \S+", re.I)),
+    # 1.0.152 (2026-10-02): a bare "429" is NOT a rate limit — serve's "[rollover]
+    # sweep #429:" filed two high findings (r3746/r3747). 429 counts only as an HTTP
+    # status: after HTTP[/1.x], status=/code=, inside an access-log quote, or
+    # before "Too Many Requests". The wording matches stay as they were.
     ("rate_limit_429", "high", re.compile(
-        r"\b429\b|Too Many Requests|rate[- _]?limit(?:ed|ing)?\b|RateLimitError", re.I)),
+        r"\bHTTP(?:/\d(?:\.\d)?)?\"? 429\b|\b(?:status|code|error)[=: ]+429\b|\" 429 |\b429 Too Many"
+        r"|Too Many Requests|rate[- _]?limit(?:ed|ing)?\b|RateLimitError", re.I)),
     ("http_5xx", "medium", re.compile(
         r"\bHTTP(?:/\d(?:\.\d)?\"?)? 5\d\d\b|\"\s5\d\d\s|\bstatus[=: ]+5\d\d\b"
         r"|\b50[0234] (?:Internal Server Error|Bad Gateway|Service Unavailable|Gateway Timeout)",
@@ -65,6 +70,7 @@ PATTERNS = [
 # lines that match a pattern but are not a running problem
 IGNORE = [
     re.compile(r"DeprecationWarning|UFW BLOCK|\[UFW ", re.I),
+    re.compile(r"\[rollover\] sweep #\d+"),      # serve bookkeeping, never a running problem (1.0.152)
     re.compile(r"\berrors?[=:]\s*(?:None|null|0|\[\]|\{\}|\"\"|'')", re.I),
     re.compile(r"\b0 (?:errors?|failed|failures)\b", re.I),
     re.compile(r"\"(?:GET|POST|PUT|DELETE|HEAD) [^\"]*\" [1-4]\d\d\b"),          # access log non-5xx

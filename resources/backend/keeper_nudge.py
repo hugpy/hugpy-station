@@ -104,9 +104,27 @@ def tmux_enabled(env=None):
     return str(env.get("STATION_NUDGE_TMUX") or "0").strip().lower() in ("1", "true", "on", "yes")
 
 
-async def deliver(line, serve, tmux, allow_tmux=None):
-    """Serve ALWAYS first; tmux ONLY when serve failed AND STATION_NUDGE_TMUX=1.
+async def deliver(line, serve, tmux, allow_tmux=None, prefer="serve"):
+    """prefer="serve" (the surface-serve legacy): serve first; tmux ONLY when
+    serve failed AND STATION_NUDGE_TMUX=1.
+    prefer="tmux" (1.0.147, operator 2026-10-01: the tmux keeper-claude seat IS
+    the keeper on every locus): the seat first; serve is the fallback when the
+    seat cannot take the line (busy / no live seat).
     ``serve``/``tmux``: async callables line -> (ok, detail)."""
+    if prefer == "tmux":
+        try:
+            ok, detail = await tmux(line)
+        except Exception as e:                               # noqa: BLE001 — seat gone
+            ok, detail = False, "tmux error: %s" % str(e)[:160]
+        if ok:
+            return {"target": "tmux", "detail": detail}
+        try:
+            ok2, d2 = await serve(line)
+        except Exception as e:                               # noqa: BLE001 — serve down
+            ok2, d2 = False, "serve error: %s" % str(e)[:160]
+        if ok2:
+            return {"target": "serve", "detail": "%s (seat unavailable: %s)" % (d2, detail)}
+        return {"target": "none", "detail": "tmux: %s; serve: %s" % (detail, d2)}
     if allow_tmux is None:
         allow_tmux = tmux_enabled()
     try:

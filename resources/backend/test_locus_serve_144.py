@@ -277,7 +277,11 @@ def _load(tmp, board=None, inbox=None, page=True, claim_won=True):
         rec["b"] += 1
         raise ConnectionError("B gateway unreachable")
 
+    async def surface_now(vm=""):                  # 1.0.147: these tests model serve-surface loci
+        return "serve", {"ok": True}
+
     ns = dict(re=re, json=json, time=time, Path=Path, os=os, asyncio=asyncio,
+              KEEPER_SURFACE="serve", _keeper_surface_now=surface_now,
               _ts_call=ts_call, _station_locus=lambda: "keeper", _read_json=read_json,
               _write_json_atomic=write_json, FV_STATE_HOME=tmp,
               _NUDGE_PENDING_PATH=tmp / "pending.json", _PINGS_SEEN_PATH=tmp / "seen.json",
