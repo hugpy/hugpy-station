@@ -5,6 +5,40 @@ Provides/Replaces/Conflicts handle upgrades), reconstructed into its proper home
 2026-08-13 (it previously lived only as build roots on a dev drive; the
 app.asar packs plain, unbundled files, so this IS the complete source).
 
+![hugpy Station 1.0.153 on a fresh hugpy-ubuntu install: tmux Claude seat (left), steward panel with keeper, rollover and B local keeper (right)](docs/img/station-fresh-install.png)
+
+## Part of the hugpy orbit
+
+```
+                    ┌──────────────────────────── hugpy (fleet) ───────────────────────────┐
+                    │ central + workers: platform · engine · fleet · server · media · …     │
+                    │ OpenAI-compatible /v1 — every local model, incl. B (Qwen3-Coder-Next) │
+                    └───────▲───────────────────────▲──────────────────────────▲───────────┘
+                            │ inference             │ inference                │ B reductions
+   ┌────────────────────────┴──┐   ┌────────────────┴──────────┐   ┌───────────┴───────────────┐
+   │ hugpy-station             │   │ hugpy-agent               │   │ abstract-toolserver       │
+   │ desktop + headless console│──▶│ agent runtime · TUI ·     │◀─▶│ comms · ledgers · boards ·│
+   │ tmux seats per locus      │   │ OpenCode/qwen seats       │   │ exchanges · MCP · b_ask   │
+   └────────────┬──────────────┘   └────────────┬──────────────┘   └───────────▲───────────────┘
+                │ keeper/codex seats            │ --serve                      │ tools (MCP/HTTP)
+   ┌────────────▼──────────────┐   ┌────────────▼──────────────┐               │
+   │ abstract-gpt (Codex seat) │   │ abstract-claude serve ────┼───────────────┘
+   │ abstract-claude (Claude)  │   │  └ abstract-serve-core    │
+   └───────────────────────────┘   └───────────────────────────┘
+          everything ships through abstract-pypit → PyPI (+ GitHub)
+```
+
+| Package | Role | PyPI |
+|---|---|---|
+| **hugpy** (14 lockstep dists) | the self-hosted LLM fleet: central, workers, engine, media, server | [hugpy](https://pypi.org/project/hugpy/) |
+| **hugpy-station** | Electron desktop + headless backend; tmux seats, prompt composer, loop/bug scan | deb via central install links |
+| **hugpy-agent** | agent runtime on the fleet; `hugpy-agent tui` over abstract-claude serve | [hugpy-agent](https://pypi.org/project/hugpy-agent/) |
+| **abstract-claude** | Claude Code launch/session/rollover + `abstract-claude serve` (roles keeper/chat/worker/local) | [abstract-claude](https://pypi.org/project/abstract-claude/) |
+| **abstract-serve-core** | the HTTP routes `abstract-claude serve` actually runs (queue, relay, rollover sweeps) | [abstract-serve-core](https://pypi.org/project/abstract-serve-core/) |
+| **abstract-gpt** | Codex/ChatGPT seat counterpart of abstract-claude | [abstract-gpt](https://pypi.org/project/abstract-gpt/) |
+| **abstract-toolserver** | one tool service per host: comms, ledgers, boards, exchanges, MCP bridge, B on call | [abstract-toolserver](https://pypi.org/project/abstract-toolserver/) |
+| **abstract-pypit** | one-command publisher: bump → build → PyPI → GitHub push | [abstract-pypit](https://pypi.org/project/abstract-pypit/) |
+
 ## Layout → package mapping
 
 | Here | Installed as |
@@ -163,3 +197,112 @@ exits 2 with a message (1.0.41 and earlier segfaulted). The backend interpreter
 is probed for `aiohttp`; a conda `python3` on PATH is skipped if it lacks it.
 
 Licensed under the hugpy Source-Available License (see LICENSE).
+
+## Seats and terminals
+
+Seats are tmux sessions on the socket `console` (`BACKEND_TMUX_SESSION`):
+`keeper-claude`, `keeper-codex`, `keeper-hugpy`, `keeper-serve-tui`,
+`keeper-local-opencode`, `keeper-local-qwen`. A `TERM_SURFACES` whitelist maps
+surface + backend to the command that runs. tmux options (`_TMUX_OPTS`):
+status off, prefix None, mouse off, **alternate-screen off**, history 20000.
+PTYs attach over `/wsterm?surface&backend&native&session&vm&inst`; control
+messages are `{t: size|kill|scroll|detach}`. The mouse wheel drives tmux
+copy-mode, except on the `serve-tui` seat, which gets the wheel itself.
+
+- **Keeper surface** (1.0.147 ruling): the tmux `keeper-claude` seat IS the
+  keeper on every locus; serve is selectable, never the default.
+  `/api/term/backends` reports `keeper_surface`, `ac_serve`, `backend_labels`
+  and the seats on the locus's socket.
+- **`tui` backend** (1.0.148): `hugpy-agent tui --serve {ac_url}`, with
+  `{ac_url}` resolved at launch (this host → `_ac_resolve`; a remote locus →
+  its loopback port from `discovery/ac-loci.json`). It replaced the `/ac/`
+  serve web pane (`acOn()` is hard false; the iframe code is kept, unmounted).
+  1.0.153: that window keeps the alternate screen on and owns the wheel.
+- **tmux split button** (1.0.149–150): left half `tmux · <Provider>` relaunches
+  the last chosen seat; the ▾ menu picks Claude / ChatGPT / Hugpy.
+- **Multi-shell** (1.0.151): `shell#N` tabs (inst 2..32, each its own PTY,
+  `?surface=shell&inst=N`) behind the ⌂ shell split with ＋ / ×. × closes the
+  PTY only — the locus's `sh-*` tmux session lives on.
+  `__fvSurface.addShell / closeShell / list` drive it from the console.
+
+## Prompt composer (✍)
+
+Docked under the terminal. `POST /api/prompt/send` targets
+`auto | serve | serve-head | seat`. `auto` follows the keeper surface (tmux
+since 1.0.147) → the seat; the seat backend is the selected frontier backend.
+With the `tui` backend the text is typed into the TUI's composer and Enter is
+pressed, so it lands in whichever TUI session has focus. `prompt_send.input_line`
+recognises `>` / `❯` prompt lines; dirty/busy checks guard the send; the
+file-pointer inbox is only an explicit fallback.
+
+## Alerts, loops and bug scan
+
+- `GET /api/loops`: active and recent loops, findings, holds. The ⚠ alerts
+  subtab (1.0.149) filters all | critical — critical = an active non-inert
+  loop, a high-severity finding, or `station:skip`; rows get a red left bar.
+  🐞 review rows of high severity are red. The old ⚠ strip over the terminal
+  is retired (`localStorage fv-loop-strip=1` brings it back).
+- Findings are mailed once and get one board item; keeper 📨 nudges are
+  delivered into the locus's `keeper-claude` seat.
+- Bug scan (`log_findings.py`, 1.0.152): a bare `429` is not a rate limit
+  without HTTP-status context; `[rollover] sweep #N` lines are ignored.
+- Gated restarts (`hugpy-gate svc.control`) are counted as loops — a known
+  false positive during deploy churn. LXD discovery failures back off 10 min.
+
+## Toolserver and fleet credentials
+
+The Station reads **`~/.config/hugpy-station/toolserver.env`** (its state
+home, `HUGPY_STATION_STATE` / `XDG_CONFIG_HOME`), 0600, KEY=VALUE:
+
+```
+STATION_CONSOLE_TOOLSERVER=https://dev.hugpy.ai/toolserver
+STATION_CONSOLE_TOOLSERVER_TOKEN=<operator token>
+HUGPY_BASE=https://dev.hugpy.ai/api
+HUGPY_URL=https://dev.hugpy.ai/api
+STATION_LOCUS=<this box>
+```
+
+A real environment variable always wins. It is written by the package's
+after-install from the installer's `HUGPY_OPERATOR_TOKEN`, by
+`hugpy-station-toolserver set`, or by `POST /api/toolserver/config`. Every
+seat the Station spawns inherits the token. Without it the Station falls back
+to `127.0.0.1:7004` and shows `rolling state — Cannot connect to host
+127.0.0.1:7004` on a box with no local toolserver.
+
+Central install links (`kind=console`) install the deb and establish
+`HUGPY_API_KEY` + the toolserver token; the deb must be staged in
+`/mnt/llm_storage/_keeper_deploy/console`.
+
+## Release, drift and the GitHub mirror
+
+- Source of truth: `/srv/hugpy/src/station-app` (hugpy-dev-mono, `dev`).
+- `build-release.sh` runs `station-drift-check.sh`: installed ≠ source counts
+  as drift; `FORCE_DRIFT=1` is routine right before a cut;
+  `unshipped-artifacts.tsv` registers known gaps.
+- Recipe: `cut-next-version.sh` → CHANGELOG → `FORCE_DRIFT=1 build-release.sh
+  --targets deb` → `ship-version.sh` (release.sh promote).
+- `ship-version.sh` mirrors the committed `station-app` tree to
+  `github.com/hugpy/hugpy-station` via
+  `/srv/vm_mgr/bin/sync-hugpy-station-github.sh` as one snapshot commit per
+  version (`hugpy Station X — sync from hugpy-dev-mono/station-app @ <sha>`).
+- `REQUIREMENTS.txt` pins are force-applied to every Station venv on serve
+  start and seat provision — a stale pin DOWNGRADES (it once pinned
+  hugpy-agent 0.1.85).
+- Sovereign per-user install: `hugpy-station-user-install` →
+  `<state>/app/<ver>`, user unit `7006_hugpy_station`. The serve runner
+  `abstract-claude-serve-run` bakes the console UI and provisions the venv on
+  every start; `station-serve-provision` gives any locus its own serve.
+
+## Attention-worthy
+
+- **Fresh-box launch** (verified 1.0.153 on Ubuntu 24.04, hugpy-ubuntu):
+  `apt install ./hugpy-station_<ver>_amd64.deb` pulls its dependencies and
+  starts `hugpy-station-web@<user>` and `hugpy-station-board@<user>`. Start
+  the GUI from the user session (`hugpy-station`, or
+  `systemd-run --user hugpy-station-launch`); launched through `sudo -u` from a
+  root shell it segfaults. In a VM without 3D, pass `--disable-gpu`.
+- A new box has no Claude login: the keeper seat shows `Not logged in · Run
+  /login` until the operator signs in once on that box.
+- tmux runs with `alternate-screen off` socket-wide; a full-screen app in a
+  seat must turn it back on for its window (the `tui` seat does).
+
