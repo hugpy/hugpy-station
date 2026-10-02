@@ -1177,6 +1177,23 @@
        and wipe the highlight) and Shift no longer has to be held. With no
        selection the click belongs to the app (mouse reporting) and only the
        browser menu is suppressed. The paste… box keeps its native menu. */
+    /* OSC 52 (1.0.155): the one clipboard protocol for every program in a
+       seat (tmux set-clipboard, TUIs, claude-code, codex). Write-only — a
+       "?" query is refused so nothing remote can read this clipboard. */
+    try {
+      term.parser.registerOscHandler(52, function (data) {
+        var i = data.indexOf(";");
+        var pd = i < 0 ? "" : data.slice(i + 1);
+        if (!pd || pd === "?") return true;
+        if (pd.length > 1400000) { fvToast("OSC 52 copy refused: over 1 MB", true); return true; }
+        var text;
+        try {
+          text = new TextDecoder().decode(Uint8Array.from(atob(pd), function (c) { return c.charCodeAt(0); }));
+        } catch (e) { return true; }
+        if (text) fvCopy(text, true);
+        return true;
+      });
+    } catch (e) {}
     var _ctxCopiedAt = 0;
     function inBox(ev) { return pbox.contains(ev.target) || pbtn.contains(ev.target); }
     el.addEventListener("mousedown", function (ev) {

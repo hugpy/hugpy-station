@@ -66,6 +66,24 @@ const CONSOLE_BACKEND = (() => {
 let browserView = null;
 let browserShown = false;
 
+// Right-click menu (2026-10-02): Electron ships none, so outside the terminal a
+// right-click did nothing. Cut/Copy/Paste/Select All by what is under the cursor;
+// the terminal keeps its own right-click (copy-on-select) because it cancels the
+// DOM contextmenu event, which Electron then never reports here.
+function attachContextMenu(wc) {
+  wc.on('context-menu', (_e, p) => {
+    const f = p.editFlags || {};
+    const items = [];
+    if (p.isEditable) items.push({ role: 'cut', enabled: !!f.canCut });
+    if (p.selectionText || p.isEditable) items.push({ role: 'copy', enabled: !!f.canCopy });
+    if (p.isEditable) items.push({ role: 'paste', enabled: !!f.canPaste });
+    if (p.linkURL) items.push({ label: 'Copy link', click: () => electron.clipboard.writeText(p.linkURL) });
+    if (items.length) items.push({ type: 'separator' });
+    items.push({ role: 'selectAll' });
+    Menu.buildFromTemplate(items).popup({ window: win || undefined });
+  });
+}
+
 function createConsoleView() {
   if (!win || consoleView) return consoleView;
   const opts = { webPreferences: { contextIsolation: true } };
@@ -76,6 +94,7 @@ function createConsoleView() {
     consoleView = new electron.BrowserView(opts);
     win.addBrowserView(consoleView);
   }
+  attachContextMenu(consoleView.webContents);
   // external links from the console open in the system browser
   consoleView.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
@@ -505,6 +524,7 @@ function createWindow() {
     // drive the native /ac console view; contextIsolation stays on.
     webPreferences: { contextIsolation: true, preload: path.join(__dirname, 'preload.js') },
   });
+  attachContextMenu(win.webContents);
   // external links open in the system browser, not inside the shell
   win.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);

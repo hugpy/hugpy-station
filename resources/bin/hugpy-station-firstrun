@@ -406,7 +406,8 @@ for c in sys.argv[1:]:
 ' $bcands 2>/dev/null)"
 fi
 aadd=""
-[ -n "$(env_get "$AGENT_ENV" HUGPY_BASE)" ]    || aadd="${aadd}HUGPY_BASE=$url\n"
+# HUGPY_BASE is NOT written here (2026-10-02): the fleet pointer lives in
+# ~/.hugpy/.env (step 6b) — a unit EnvironmentFile would override ⚙ Settings.
 [ -n "$(env_get "$AGENT_ENV" HUGPY_API_KEY)" ] || { [ -n "$key" ] && aadd="${aadd}HUGPY_API_KEY=$key\n"; }
 [ -n "$(env_get "$AGENT_ENV" HUGPY_MODEL)" ]   || { [ -n "$bmodel" ] && aadd="${aadd}HUGPY_MODEL=$bmodel\n"; }
 if [ -n "$aadd" ]; then
@@ -419,6 +420,50 @@ if [ -n "$aadd" ]; then
 fi
 if [ -n "$bmodel" ] && [ ! -e "$STATE/b-model.json" ]; then
     printf '{"model": "%s"}\n' "$bmodel" > "$STATE/b-model.json" && own "$STATE/b-model.json" && log "seeded b-model.json ($bmodel)"
+fi
+
+# ── 6b. the shared hugpy settings home: ~/.hugpy/.env (2026-10-02) ────────────
+# One file every hugpy package reads (abstract_toolserver.hugpy_home) and Station's
+# ⚙ Settings edits. Created ONLY when absent — never rewritten — 0600, seeded with
+# the fleet pointer this run resolved and every other key commented out.
+HUGPY_HOME_DIR="$HOME_DIR/.hugpy"
+# Migration: older firstruns put HUGPY_BASE in the hugpy-agent unit's env file,
+# where it overrides ~/.hugpy/.env. Carry that value over (seed / append when
+# ~/.hugpy/.env has none), then drop the line from agent.env.
+agent_base="$(env_get "$AGENT_ENV" HUGPY_BASE)"
+seed_base="${agent_base:-${url:-http://127.0.0.1:7002}}"
+if [ -e "$HUGPY_HOME_DIR/.env" ] && [ -n "$agent_base" ] && [ -z "$(env_get "$HUGPY_HOME_DIR/.env" HUGPY_BASE)" ]; then
+    printf 'HUGPY_BASE=%s\n' "$agent_base" >> "$HUGPY_HOME_DIR/.env" \
+        && log "moved HUGPY_BASE=$agent_base into $HUGPY_HOME_DIR/.env"
+fi
+if [ ! -e "$HUGPY_HOME_DIR/.env" ]; then
+    mkd 0700 "$HUGPY_HOME_DIR"
+    tmp="$(mktemp)"
+    cat > "$tmp" <<EOF
+# hugpy settings — shared by every hugpy package (hugpy-agent, Station, serve,
+# toolserver client). Edit here or in Station: File → Settings… (Ctrl+,).
+# A value exported in the shell or a unit's Environment= overrides this file.
+#
+# The hugpy fleet every arm talks to (bare host; /api and /v1 are appended):
+HUGPY_BASE=$seed_base
+#HUGPY_API_KEY=
+# Move seats off this machine's central when it is down (0/1; https Fleet URL only):
+#HUGPY_FLEET_FALLBACK=0
+#HUGPY_AGENT_SERVE=
+#HUGPY_SERVE_TOKEN=
+#HUGPY_TOOLSERVER_URL=
+#HUGPY_OPERATOR_TOKEN=
+EOF
+    install -m 0600 "$tmp" "$HUGPY_HOME_DIR/.env" && own "$HUGPY_HOME_DIR/.env" \
+        && log "created $HUGPY_HOME_DIR/.env (HUGPY_BASE=$seed_base)"
+    rm -f "$tmp"
+fi
+if [ -n "$agent_base" ] && [ -n "$(env_get "$HUGPY_HOME_DIR/.env" HUGPY_BASE)" ]; then
+    tmp="$(mktemp)"
+    grep -vE '^[[:space:]]*(export[[:space:]]+)?HUGPY_BASE=' "$AGENT_ENV" > "$tmp"
+    install -m 0600 "$tmp" "$AGENT_ENV" && own "$AGENT_ENV" \
+        && log "removed HUGPY_BASE from $AGENT_ENV (now in $HUGPY_HOME_DIR/.env)"
+    rm -f "$tmp"
 fi
 
 # ── 7. the toolserver credential where USER-level tools look ──────────────────

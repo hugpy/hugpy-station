@@ -57,6 +57,7 @@ fi
 tmux -L "$SOCK" \
   set -g status off \; set -g prefix None \; set -g prefix2 None \; \
   set -g escape-time 0 \; set -g mouse off \; set -g destroy-unattached off \; \
+  set -g set-clipboard on \; set -as terminal-features ',*:clipboard' \; \
   set -g window-size latest \; setw -g aggressive-resize on \; \
   new-session -d -s "$SESS" "$LAUNCH"
 echo "station-keeper: $SESS session started for $STATION"

@@ -11284,6 +11284,7 @@ def _frontier_live_session():
     return None
 _TMUX_OPTS = ("set -g status off \\; set -g prefix None \\; set -g prefix2 None \\; "
               "set -g escape-time 0 \\; set -g mouse off \\; "
+              "set -g set-clipboard on \\; set -as terminal-features ',*:clipboard' \\; "
               # t-scroll (2026-09-19): the seat TUIs (claude-code, opencode) hold
               # the ALTERNATE screen, where tmux keeps ZERO scrollback — copy-mode
               # opened at [0/0] and the wheel ctl ("scroll" above) was a no-op, so

@@ -1390,7 +1390,17 @@ const api = (path, opts) => {
     })
     .finally(() => clearTimeout(timer));
 };
+/* THE copy path for the whole SPA (2026-10-02, normalized with fleetview-term's
+   fvCopy): desktop app → Electron's clipboard via the preload bridge
+   (window.stationClipboard: no focus, permission or secure context needed);
+   a plain browser → async Clipboard API + the execCommand textarea fallback.
+   Every ⧉ goes through here — no direct navigator.clipboard calls. */
 const copyText = (t) => {                       // gesture-synchronous clipboard write
+  t = String(t == null ? "" : t);
+  const sc = window.stationClipboard;
+  if (sc && typeof sc.writeText === "function") {
+    try { sc.writeText(t); return true; } catch (_) {}
+  }
   let api = false;
   if (navigator.clipboard && navigator.clipboard.writeText) {
     try { navigator.clipboard.writeText(t); api = true; } catch (_) {}
@@ -8442,7 +8452,7 @@ function BrowserAccessPanel() {
     ${(st.urls || []).length > 0 && html`<div style=${{ marginTop: 4, fontSize: 11 }}>
       ${st.urls.map(u => html`<div key=${u}>LAN: <code>${u}</code>
         <button className="btn" style=${{ padding: "0 6px", fontSize: 10 }}
-          onClick=${() => { try { navigator.clipboard.writeText(u); } catch (e) {} }}>⧉</button></div>`)}
+          onClick=${() => copyText(u)}>⧉</button></div>`)}
     </div>`}
     ${note && html`<div style=${{ marginTop: 6, fontSize: 11,
         color: String(note).startsWith("error") ? "var(--bad)" : "var(--accent)" }}>${note}</div>`}
