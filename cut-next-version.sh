@@ -41,18 +41,26 @@ echo ">> $CUR -> $NEW"
 node -e "const f='./package.json',j=require(f);j.version='$NEW';require('fs').writeFileSync(f,JSON.stringify(j,null,2)+'\n')"
 printf '%s\n' "$NEW" > resources/VERSION
 
-# CHANGELOG stub — insert before the FIRST "## " version heading so the title +
-# preamble stay on top. Idempotent: skip if this version is already present.
+# CHANGELOG entry — written from the commit subjects since the previous release
+# commit ("… release $CUR…"), so the deb built below ships real notes, not a TODO
+# stub. Insert before the FIRST "## " version heading so the title + preamble stay
+# on top. Idempotent: skip if this version is already present.
 if [ -f CHANGELOG.md ] && ! grep -q "^## $NEW " CHANGELOG.md; then
   TMP="$(mktemp)"
-  STUB="$(printf '## %s — %s\n\n### TODO: summarise this release\n\n* \n' "$NEW" "$(date +%F)")"
+  GIT=(git -c safe.directory='*')
+  LAST="$("${GIT[@]}" log --format=%H -1 --grep="release $CUR\b" -E 2>/dev/null || true)"
+  NOTES="$("${GIT[@]}" log --no-merges --format='* %s' ${LAST:+$LAST..}HEAD -- . 2>/dev/null \
+           | sed -E 's/^\* keeper /* /' | grep -v -E '^\* (keeper )?release [0-9]' || true)"
+  [ -n "$NOTES" ] || NOTES="* (no commits since $CUR)"
+  STUB="$(printf '## %s — %s\n\n%s\n' "$NEW" "$(date +%F)" "$NOTES")"
   awk -v stub="$STUB" '
     !done && /^## / { print stub "\n"; done=1 }
     { print }
     END { if (!done) print "\n" stub }
   ' CHANGELOG.md > "$TMP"
-  mv "$TMP" CHANGELOG.md
-  echo ">> CHANGELOG.md: added stub for $NEW — EDIT IT before promoting."
+  # mktemp makes a 0600 file; keep CHANGELOG group-writable for the other release users
+  cat "$TMP" > CHANGELOG.md && rm -f "$TMP"
+  echo ">> CHANGELOG.md: $NEW entry written from $(printf '%s\n' "$NOTES" | wc -l) commit(s) since $CUR."
 fi
 
 if [ "$DO_BUILD" = 1 ]; then

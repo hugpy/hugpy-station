@@ -3,6 +3,12 @@
 Versions before 1.0.91 are recorded in git history and in README.md; this file
 starts at the release that introduced it.
 
+## 1.0.158 — 2026-10-03
+
+* cut-next-version: write CHANGELOG in place (mktemp+mv left it 0600 and broke the next release user)
+* cut-next-version: write the CHANGELOG entry from commits since the last release (no TODO stub; deb ships real notes)
+* pin abstract-serve-core==0.1.21 (session keys v1 step 3, orphan-hold fix) + abstract-toolserver==0.0.55 (bridge prefers TOOLSERVER_SESSION_KEY)
+
 ## 1.0.157 — 2026-10-02
 
 - Pin abstract-claude==0.1.98: `abstract-claude oauth-mint --to-toolserver` / `oauth-set <token> --to-toolserver` hand the durable Claude token to the fleet toolserver (read-back verified, never printed, nothing stored locally).
