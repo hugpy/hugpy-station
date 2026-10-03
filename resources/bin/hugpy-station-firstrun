@@ -432,9 +432,10 @@ HUGPY_HOME_DIR="$HOME_DIR/.hugpy"
 # ~/.hugpy/.env has none), then drop the line from agent.env.
 agent_base="$(env_get "$AGENT_ENV" HUGPY_BASE)"
 seed_base="${agent_base:-${url:-http://127.0.0.1:7002}}"
+seed_base="${seed_base%/}"; seed_base="${seed_base%/api}"   # bare host; code appends /api, /v1
 if [ -e "$HUGPY_HOME_DIR/.env" ] && [ -n "$agent_base" ] && [ -z "$(env_get "$HUGPY_HOME_DIR/.env" HUGPY_BASE)" ]; then
-    printf 'HUGPY_BASE=%s\n' "$agent_base" >> "$HUGPY_HOME_DIR/.env" \
-        && log "moved HUGPY_BASE=$agent_base into $HUGPY_HOME_DIR/.env"
+    printf 'HUGPY_BASE=%s\n' "$seed_base" >> "$HUGPY_HOME_DIR/.env" \
+        && log "moved HUGPY_BASE=$seed_base into $HUGPY_HOME_DIR/.env"
 fi
 if [ ! -e "$HUGPY_HOME_DIR/.env" ]; then
     mkd 0700 "$HUGPY_HOME_DIR"
@@ -463,6 +464,16 @@ if [ -n "$agent_base" ] && [ -n "$(env_get "$HUGPY_HOME_DIR/.env" HUGPY_BASE)" ]
     grep -vE '^[[:space:]]*(export[[:space:]]+)?HUGPY_BASE=' "$AGENT_ENV" > "$tmp"
     install -m 0600 "$tmp" "$AGENT_ENV" && own "$AGENT_ENV" \
         && log "removed HUGPY_BASE from $AGENT_ENV (now in $HUGPY_HOME_DIR/.env)"
+    rm -f "$tmp"
+fi
+# The fleet key belongs in the same home (1.0.156): copy it in when the file has
+# none. agent.env keeps its copy for older hugpy-agent units; value never logged.
+if [ -n "${key:-}" ] && [ -e "$HUGPY_HOME_DIR/.env" ] && [ -z "$(env_get "$HUGPY_HOME_DIR/.env" HUGPY_API_KEY)" ]; then
+    tmp="$(mktemp)"
+    grep -vE '^[[:space:]]*#?[[:space:]]*HUGPY_API_KEY=[[:space:]]*$' "$HUGPY_HOME_DIR/.env" > "$tmp"
+    printf 'HUGPY_API_KEY=%s\n' "$key" >> "$tmp"
+    install -m 0600 "$tmp" "$HUGPY_HOME_DIR/.env" && own "$HUGPY_HOME_DIR/.env" \
+        && log "HUGPY_API_KEY set in $HUGPY_HOME_DIR/.env"
     rm -f "$tmp"
 fi
 
