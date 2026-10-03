@@ -3,6 +3,13 @@
 Versions before 1.0.91 are recorded in git history and in README.md; this file
 starts at the release that introduced it.
 
+## 1.0.157 — 2026-10-02
+
+- Pin abstract-claude==0.1.98: `abstract-claude oauth-mint --to-toolserver` / `oauth-set <token> --to-toolserver` hand the durable Claude token to the fleet toolserver (read-back verified, never printed, nothing stored locally).
+- seat-provision: recognises the toolserver fleet token (abstract-claude chain step 3) — no more false "no durable token found" warning; the token is not copied to disk.
+
+* 
+
 ## 1.0.156 — 2026-10-02
 
 - Seat pins: hugpy-agent 0.1.103 + abstract-toolserver 0.0.54 — the versions that read ~/.hugpy/.env, so seats follow ⚙ Settings.

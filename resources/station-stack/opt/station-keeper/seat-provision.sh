@@ -201,6 +201,12 @@ if [ -n "$TOK" ]; then
   st="${HUGPY_STATION_STATE:-$HOME/.config/hugpy-station}"; mkdir -p "$st"
   printf '%s' "$TOK" > "$st/claude-oauth-token"
   log "durable token written to $st/claude-oauth-token (station backend)"
+elif [ -x "$BIN/abstract-claude" ] && "$(dirname "$(readlink -f "$BIN/abstract-claude")")/python" -c \
+    'import sys; from abstract_claude.util import fetch_toolserver_token as f; sys.exit(0 if f() else 1)' 2>/dev/null; then
+  # 1.0.157: the fleet chain's step 3 — seats/backend fetch it from the
+  # toolserver at launch (in memory; "toolserver is the only holder"), so
+  # nothing is copied to disk here.
+  log "durable token: resolved from the toolserver (fleet chain) — seats authenticate, nothing stored locally"
 else
   log "no durable token found — seats need one. Provide it once by any of:"
   log "  • HUGPY_STATION_OAUTH=<sk-ant-oat…> during install, or"
