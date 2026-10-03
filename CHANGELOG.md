@@ -3,6 +3,13 @@
 Versions before 1.0.91 are recorded in git history and in README.md; this file
 starts at the release that introduced it.
 
+## 1.0.156 — 2026-10-02
+
+- Seat pins: hugpy-agent 0.1.103 + abstract-toolserver 0.0.54 — the versions that read ~/.hugpy/.env, so seats follow ⚙ Settings.
+- firstrun: HUGPY_BASE stored as a bare host (trailing /api stripped); HUGPY_API_KEY copied into ~/.hugpy/.env when absent (agent.env keeps its copy).
+
+* 
+
 ## 1.0.155 — 2026-10-02
 
 - OSC 52 clipboard: every Station terminal accepts OSC 52 copies (write-only; `?` reads refused, 1 MB cap) and hands them to the Electron clipboard; seat tmux runs `set-clipboard on` + clipboard terminal-feature (applies on seat restart).
